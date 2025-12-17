@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- nomad_v1alpha1_nomadcluster.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

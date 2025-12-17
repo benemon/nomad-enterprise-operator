@@ -1,0 +1,70 @@
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  labels:
+    app.kubernetes.io/name: nomad-enterprise-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: nomad-enterprise
+spec:
+  replicas: 3
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+    secretKey: license
+  topology:
+    region: global
+    # datacenter defaults to namespace if empty
+  services:
+    external:
+      type: LoadBalancer
+      # loadBalancerIP: "10.0.0.100"  # Optional: request specific IP
+  openshift:
+    enabled: true
+    route:
+      enabled: true
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+    monitoring:
+      enabled: true
+      serviceMonitor:
+        interval: 30s
+        scrapeTimeout: 10s
+      prometheusRule:
+        enabled: true
+  server:
+    acl:
+      enabled: true  # Auto-bootstrapped by operator
+    tls:
+      enabled: false
+    autopilot:
+      cleanupDeadServers: true
+      lastContactThreshold: "200ms"
+      maxTrailingLogs: 250
+      serverStabilizationTime: "10s"
+    audit:
+      enabled: true
+      format: json
+      rotateDuration: "24h"
+      rotateMaxFiles: 15
+  persistence:
+    enabled: true
+    size: 10Gi
+    audit:
+      enabled: true
+      size: 5Gi
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  affinity:
+    podAntiAffinity:
+      enabled: true
+      type: preferred
+      weight: 100
+      topologyKey: kubernetes.io/hostname

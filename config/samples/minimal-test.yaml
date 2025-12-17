@@ -1,0 +1,67 @@
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: nomad-enterprise
+  namespace: whatever
+spec:
+  replicas: 3
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+    secretKey: license
+  topology:
+    region: global
+  # Match Helm exactly - NO ACL
+  server:
+    acl:
+      enabled: false
+    tls:
+      enabled: false
+    audit:
+      enabled: true
+      format: json
+      rotateDuration: "24h"
+      rotateMaxFiles: 15
+    autopilot:
+      cleanupDeadServers: true
+      lastContactThreshold: "200ms"
+      maxTrailingLogs: 250
+      serverStabilizationTime: "10s"
+  services:
+    external:
+      type: LoadBalancer
+  persistence:
+    enabled: true
+    size: 10Gi
+    audit:
+      enabled: true
+      size: 5Gi
+  openshift:
+    enabled: true
+    route:
+      enabled: true
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+    monitoring:
+      enabled: true
+      serviceMonitor:
+        interval: "30s"
+        scrapeTimeout: "10s"
+      prometheusRule:
+        enabled: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  affinity:
+    podAntiAffinity:
+      enabled: true
+      type: preferred
+      topologyKey: kubernetes.io/hostname
+      weight: 100
