@@ -52,17 +52,14 @@ func (p *StatefulSetPhase) Name() string {
 
 // Execute creates or updates the Nomad server StatefulSet.
 func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	sts, err := p.buildStatefulSet(ctx, cluster)
-	if err != nil {
-		return Error(err, "Failed to build StatefulSet spec")
-	}
+	sts := p.buildStatefulSet(ctx, cluster)
 
 	if err := controllerutil.SetControllerReference(cluster, sts, p.Scheme); err != nil {
 		return Error(err, "Failed to set owner reference on StatefulSet")
 	}
 
 	existing := &appsv1.StatefulSet{}
-	err = p.Client.Get(ctx, types.NamespacedName{Name: sts.Name, Namespace: sts.Namespace}, existing)
+	err := p.Client.Get(ctx, types.NamespacedName{Name: sts.Name, Namespace: sts.Namespace}, existing)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			p.Log.Info("Creating StatefulSet", "name", sts.Name, "replicas", *sts.Spec.Replicas)
@@ -90,7 +87,7 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 	return OK()
 }
 
-func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*appsv1.StatefulSet, error) {
+func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) *appsv1.StatefulSet {
 	replicas := cluster.Spec.Replicas
 	if replicas == 0 {
 		replicas = 3
@@ -250,7 +247,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		},
 	}
 
-	return sts, nil
+	return sts
 }
 
 func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
@@ -551,11 +548,7 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) bo
 	// Check secrets checksum annotation (triggers rolling restart when secrets change)
 	existingSecretsChecksum := existing.Spec.Template.Annotations["checksum/secrets"]
 	desiredSecretsChecksum := desired.Spec.Template.Annotations["checksum/secrets"]
-	if existingSecretsChecksum != desiredSecretsChecksum {
-		return true
-	}
-
-	return false
+	return existingSecretsChecksum != desiredSecretsChecksum
 }
 
 func boolPtr(b bool) *bool {

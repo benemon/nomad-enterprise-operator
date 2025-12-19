@@ -431,7 +431,7 @@ func (r *NomadSnapshotReconciler) tryDeleteToken(accessorID, nomadAddr, bootstra
 }
 
 // reconcileConfigMap creates or updates the snapshot agent ConfigMap
-func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster) error {
+func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, _ *nomadv1alpha1.NomadCluster) error {
 	configMapName := snapshot.Name + "-snapshot-config"
 
 	// Generate HCL config

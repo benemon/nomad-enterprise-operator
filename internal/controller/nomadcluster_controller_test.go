@@ -36,20 +36,19 @@ import (
 
 // Test helper functions
 
-func createTestNamespace(ctx context.Context, name string) *corev1.Namespace {
+func createTestNamespace(ctx context.Context, name string) {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
 	}
 	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-	return ns
 }
 
-func createLicenseSecret(ctx context.Context, namespace, name string) *corev1.Secret {
+func createLicenseSecret(ctx context.Context, namespace string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      "nomad-license",
 			Namespace: namespace,
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -58,10 +57,9 @@ func createLicenseSecret(ctx context.Context, namespace, name string) *corev1.Se
 		},
 	}
 	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-	return secret
 }
 
-func createTLSSecret(ctx context.Context, namespace, name string) *corev1.Secret {
+func createTLSSecret(ctx context.Context, namespace, name string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -75,7 +73,6 @@ func createTLSSecret(ctx context.Context, namespace, name string) *corev1.Secret
 		},
 	}
 	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-	return secret
 }
 
 func createGossipSecret(ctx context.Context, namespace, name, key string) *corev1.Secret {
@@ -150,7 +147,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-happy-path-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -346,7 +343,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-missing-tls-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 			// Intentionally NOT creating the TLS secret
 		})
 
@@ -406,7 +403,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-valid-tls-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 			createTLSSecret(ctx, namespace, "nomad-tls")
 		})
 
@@ -434,7 +431,7 @@ var _ = Describe("NomadCluster Controller", func() {
 				if err != nil {
 					Fail(fmt.Sprintf("Reconciliation failed with error: %v", err))
 				}
-				if !result.Requeue && result.RequeueAfter == 30*time.Second {
+				if result.RequeueAfter == 30*time.Second {
 					break
 				}
 			}
@@ -486,7 +483,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-gossip-auto-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -542,7 +539,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-gossip-ext-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 			createGossipSecret(ctx, namespace, "external-gossip", "my-external-key-1234567890123456789012")
 		})
 
@@ -599,7 +596,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-acl-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -648,7 +645,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-defaults-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -720,7 +717,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-deletion-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -777,7 +774,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-replicas-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {

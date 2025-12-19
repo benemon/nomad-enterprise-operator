@@ -31,6 +31,11 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
+const (
+	testACLBootstrapSecretName = "nomad-acl-bootstrap"
+	testTLSSecretName          = "nomad-tls"
+)
+
 // newTestSnapshot creates a NomadSnapshot with sensible test defaults.
 func newTestSnapshot(namespace, name, clusterName string) *nomadv1alpha1.NomadSnapshot {
 	return &nomadv1alpha1.NomadSnapshot{
@@ -57,7 +62,7 @@ func newTestSnapshot(namespace, name, clusterName string) *nomadv1alpha1.NomadSn
 }
 
 // createBootstrapSecret creates the ACL bootstrap secret that NomadSnapshot expects.
-func createBootstrapSecret(ctx context.Context, namespace, name string) *corev1.Secret {
+func createBootstrapSecret(ctx context.Context, namespace, name string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -70,7 +75,6 @@ func createBootstrapSecret(ctx context.Context, namespace, name string) *corev1.
 		},
 	}
 	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-	return secret
 }
 
 func reconcileSnapshot(ctx context.Context, name types.NamespacedName) (reconcile.Result, error) {
@@ -153,7 +157,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-snapshot-not-bootstrapped-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -220,7 +224,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-snapshot-configmap-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -239,11 +243,11 @@ var _ = Describe("NomadSnapshot Controller", func() {
 
 			// Simulate ACL bootstrap by updating status
 			cluster.Status.ACLBootstrapped = true
-			cluster.Status.ACLBootstrapSecretName = "nomad-acl-bootstrap"
+			cluster.Status.ACLBootstrapSecretName = testACLBootstrapSecretName
 			Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
 
 			// Create bootstrap secret
-			createBootstrapSecret(ctx, namespace, "nomad-acl-bootstrap")
+			createBootstrapSecret(ctx, namespace, testACLBootstrapSecretName)
 
 			By("Creating a NomadSnapshot with local storage")
 			snapshot = newTestSnapshot(namespace, "hourly-backup", "nomad")
@@ -280,7 +284,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-snapshot-tls-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -296,19 +300,19 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("Creating a TLS-enabled NomadCluster")
 			cluster = newTestCluster(namespace, "nomad")
 			cluster.Spec.Server.TLS.Enabled = true
-			cluster.Spec.Server.TLS.SecretName = "nomad-tls"
+			cluster.Spec.Server.TLS.SecretName = testTLSSecretName
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			// Create TLS secret
-			createTLSSecret(ctx, namespace, "nomad-tls")
+			createTLSSecret(ctx, namespace, testTLSSecretName)
 
 			// Simulate ACL bootstrap
 			cluster.Status.ACLBootstrapped = true
-			cluster.Status.ACLBootstrapSecretName = "nomad-acl-bootstrap"
+			cluster.Status.ACLBootstrapSecretName = testACLBootstrapSecretName
 			cluster.Status.AdvertiseAddress = "10.0.0.100"
 			Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
 
-			createBootstrapSecret(ctx, namespace, "nomad-acl-bootstrap")
+			createBootstrapSecret(ctx, namespace, testACLBootstrapSecretName)
 
 			By("Creating a NomadSnapshot")
 			snapshot = newTestSnapshot(namespace, "tls-backup", "nomad")
@@ -411,7 +415,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-snapshot-status-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {
@@ -429,10 +433,10 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			cluster.Status.ACLBootstrapped = true
-			cluster.Status.ACLBootstrapSecretName = "nomad-acl-bootstrap"
+			cluster.Status.ACLBootstrapSecretName = testACLBootstrapSecretName
 			Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
 
-			createBootstrapSecret(ctx, namespace, "nomad-acl-bootstrap")
+			createBootstrapSecret(ctx, namespace, testACLBootstrapSecretName)
 
 			snapshot = newTestSnapshot(namespace, "status-test", "nomad")
 			Expect(k8sClient.Create(ctx, snapshot)).To(Succeed())
@@ -494,7 +498,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			ctx = context.Background()
 			namespace = fmt.Sprintf("test-snapshot-pvc-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
-			createLicenseSecret(ctx, namespace, "nomad-license")
+			createLicenseSecret(ctx, namespace)
 		})
 
 		AfterEach(func() {

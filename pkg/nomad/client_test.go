@@ -483,7 +483,7 @@ func TestGetAutopilotHealth(t *testing.T) {
 			name: "server error",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte("service unavailable"))
+				_, _ = w.Write([]byte("service unavailable"))
 			},
 			token:   "test-token",
 			wantErr: true,
