@@ -30,6 +30,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
+const (
+	testAnnotationTrue = "true"
+	testInlineCACert   = "inline-ca-cert"
+)
+
 func init() {
 	_ = nomadv1alpha1.AddToScheme(scheme.Scheme)
 }
@@ -422,7 +427,7 @@ func TestServicesPhase_Annotations(t *testing.T) {
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Services.External.Annotations = map[string]string{
-		"service.beta.kubernetes.io/aws-load-balancer-internal": "true",
+		"service.beta.kubernetes.io/aws-load-balancer-internal": testAnnotationTrue,
 	}
 
 	result := phase.Execute(context.Background(), cluster)
@@ -437,7 +442,7 @@ func TestServicesPhase_Annotations(t *testing.T) {
 		Namespace: "test-ns",
 	}, externalSvc)
 
-	if externalSvc.Annotations["service.beta.kubernetes.io/aws-load-balancer-internal"] != "true" {
+	if externalSvc.Annotations["service.beta.kubernetes.io/aws-load-balancer-internal"] != testAnnotationTrue {
 		t.Error("External service missing expected annotation")
 	}
 }
@@ -939,7 +944,7 @@ func TestSecretsPhase_InlineLicense(t *testing.T) {
 	if string(createdSecret.Data["license"]) != "inline-license-content" {
 		t.Errorf("Created secret data = %q, want %q", string(createdSecret.Data["license"]), "inline-license-content")
 	}
-	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != testAnnotationTrue {
 		t.Error("Created secret should have managed annotation")
 	}
 }
@@ -951,7 +956,7 @@ func TestSecretsPhase_InlineLicense_Update(t *testing.T) {
 			Name:      "test-cluster-license",
 			Namespace: "test-ns",
 			Annotations: map[string]string{
-				"nomad.hashicorp.com/managed": "true",
+				"nomad.hashicorp.com/managed": testAnnotationTrue,
 			},
 		},
 		Data: map[string][]byte{
@@ -1021,7 +1026,7 @@ func TestSecretsPhase_InlineTLS(t *testing.T) {
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.CACert = "inline-ca-cert"
+	cluster.Spec.Server.TLS.CACert = testInlineCACert
 	cluster.Spec.Server.TLS.ServerCert = "inline-server-cert"
 	cluster.Spec.Server.TLS.ServerKey = "inline-server-key"
 
@@ -1040,8 +1045,8 @@ func TestSecretsPhase_InlineTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get created TLS secret: %v", err)
 	}
-	if string(createdSecret.Data["ca.crt"]) != "inline-ca-cert" {
-		t.Errorf("ca.crt = %q, want %q", string(createdSecret.Data["ca.crt"]), "inline-ca-cert")
+	if string(createdSecret.Data["ca.crt"]) != testInlineCACert {
+		t.Errorf("ca.crt = %q, want %q", string(createdSecret.Data["ca.crt"]), testInlineCACert)
 	}
 	if string(createdSecret.Data["server.crt"]) != "inline-server-cert" {
 		t.Errorf("server.crt = %q, want %q", string(createdSecret.Data["server.crt"]), "inline-server-cert")
@@ -1049,7 +1054,7 @@ func TestSecretsPhase_InlineTLS(t *testing.T) {
 	if string(createdSecret.Data["server.key"]) != "inline-server-key" {
 		t.Errorf("server.key = %q, want %q", string(createdSecret.Data["server.key"]), "inline-server-key")
 	}
-	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != testAnnotationTrue {
 		t.Error("Created TLS secret should have managed annotation")
 	}
 }
@@ -1070,7 +1075,7 @@ func TestSecretsPhase_InlineTLS_PartialInline(t *testing.T) {
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.CACert = "inline-ca-cert"
+	cluster.Spec.Server.TLS.CACert = testInlineCACert
 	// Missing serverCert and serverKey - should fail
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1124,7 +1129,7 @@ func TestSecretsPhase_InlineS3Credentials(t *testing.T) {
 	if string(createdSecret.Data["secret-access-key"]) != "wJalrXUtnFEMI/K7MDENG" {
 		t.Errorf("secret-access-key = %q, want %q", string(createdSecret.Data["secret-access-key"]), "wJalrXUtnFEMI/K7MDENG")
 	}
-	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != testAnnotationTrue {
 		t.Error("Created S3 secret should have managed annotation")
 	}
 }
