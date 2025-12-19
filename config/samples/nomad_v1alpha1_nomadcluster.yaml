@@ -11,8 +11,11 @@ spec:
     repository: hashicorp/nomad
     tag: "1.11-ent"
   license:
+    # Option 1: Reference an existing secret
     secretName: nomad-license
     secretKey: license
+    # Option 2: Provide license inline (operator creates/manages secret)
+    # value: "<your-license-content>"
   topology:
     region: global
     # datacenter defaults to namespace if empty
@@ -39,6 +42,22 @@ spec:
       enabled: true  # Auto-bootstrapped by operator
     tls:
       enabled: false
+      # When enabled, provide certificates via:
+      # Option 1: Reference an existing secret (ca.crt, server.crt, server.key)
+      # secretName: nomad-tls
+      # Option 2: Provide inline certificates (operator creates/manages secret)
+      # caCert: |
+      #   -----BEGIN CERTIFICATE-----
+      #   ...
+      #   -----END CERTIFICATE-----
+      # serverCert: |
+      #   -----BEGIN CERTIFICATE-----
+      #   ...
+      #   -----END CERTIFICATE-----
+      # serverKey: |
+      #   -----BEGIN RSA PRIVATE KEY-----
+      #   ...
+      #   -----END RSA PRIVATE KEY-----
     autopilot:
       cleanupDeadServers: true
       lastContactThreshold: "200ms"
@@ -49,6 +68,22 @@ spec:
       format: json
       rotateDuration: "24h"
       rotateMaxFiles: 15
+    # Snapshot configuration (S3 bucket required when enabled)
+    # snapshot:
+    #   enabled: true
+    #   interval: "1h"
+    #   retain: 24
+    #   s3:
+    #     bucket: my-snapshot-bucket
+    #     region: us-east-1
+    #     endpoint: ""  # Optional: for S3-compatible storage
+    #     forcePathStyle: true
+    #     # Option 1: Reference an existing secret
+    #     # credentialsSecretName: s3-credentials
+    #     # Option 2: Provide credentials inline (operator creates/manages secret)
+    #     # accessKeyId: "AKIAIOSFODNN7EXAMPLE"
+    #     # secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    #     # Option 3: No credentials (uses IAM role/IRSA)
   persistence:
     enabled: true
     size: 10Gi

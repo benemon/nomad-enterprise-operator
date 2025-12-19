@@ -1,0 +1,439 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: nomadsnapshots.nomad.hashicorp.com
+spec:
+  group: nomad.hashicorp.com
+  names:
+    kind: NomadSnapshot
+    listKind: NomadSnapshotList
+    plural: nomadsnapshots
+    shortNames:
+    - ns
+    - snapshot
+    singular: nomadsnapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef.name
+      name: Cluster
+      type: string
+    - jsonPath: .spec.schedule.interval
+      name: Interval
+      type: string
+    - jsonPath: .spec.schedule.retain
+      name: Retain
+      type: integer
+    - jsonPath: .status.lastSnapshot.time
+      name: Last Snapshot
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NomadSnapshot is the Schema for the nomadsnapshots API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NomadSnapshotSpec defines the desired state of NomadSnapshot.
+            properties:
+              clusterRef:
+                description: ClusterRef references the NomadCluster to snapshot
+                properties:
+                  name:
+                    description: Name of the NomadCluster
+                    type: string
+                  namespace:
+                    description: Namespace of the NomadCluster (defaults to same namespace
+                      as NomadSnapshot)
+                    type: string
+                required:
+                - name
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: NodeSelector for snapshot agent pod scheduling
+                type: object
+              resources:
+                description: Resources defines CPU and memory for the snapshot agent
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This is an alpha field and requires enabling the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              schedule:
+                description: Schedule defines snapshot timing
+                properties:
+                  interval:
+                    default: 1h
+                    description: Interval between snapshots (e.g., "1h", "24h")
+                    type: string
+                  retain:
+                    default: 24
+                    description: Retain is the number of snapshots to keep
+                    minimum: 1
+                    type: integer
+                  stale:
+                    default: false
+                    description: Stale allows reading from non-leader for snapshots
+                    type: boolean
+                type: object
+              target:
+                description: Target defines where to store snapshots
+                properties:
+                  azure:
+                    description: Azure configuration for Azure Blob Storage
+                    properties:
+                      accountName:
+                        description: AccountName is the Azure storage account name
+                        type: string
+                      container:
+                        description: Container name
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a secret containing Azure credentials
+                          Expected key: AZURE_BLOB_ACCOUNT_KEY
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - accountName
+                    - container
+                    type: object
+                  gcs:
+                    description: GCS configuration for Google Cloud Storage
+                    properties:
+                      bucket:
+                        description: Bucket name
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a secret containing GCP credentials
+                          Expected key: GOOGLE_APPLICATION_CREDENTIALS (JSON service account key)
+                          If not specified, uses workload identity
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                    required:
+                    - bucket
+                    type: object
+                  local:
+                    description: Local configuration for local/PVC storage
+                    properties:
+                      path:
+                        default: /snapshots
+                        description: Path within the PVC to store snapshots
+                        type: string
+                      size:
+                        default: 10Gi
+                        description: Size of the PVC to create (e.g., "10Gi")
+                        type: string
+                      storageClassName:
+                        description: StorageClassName for the PVC (optional, uses
+                          cluster default if not specified)
+                        type: string
+                    type: object
+                  s3:
+                    description: S3 configuration for AWS S3 or S3-compatible storage
+                    properties:
+                      bucket:
+                        description: Bucket name
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a secret containing AWS credentials
+                          Expected keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+                          If not specified, uses IAM role/IRSA
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      endpoint:
+                        description: Endpoint URL for S3-compatible storage (optional)
+                        type: string
+                      forcePathStyle:
+                        default: false
+                        description: ForcePathStyle forces path-style URLs (required
+                          for some S3-compatible storage)
+                        type: boolean
+                      region:
+                        description: Region (e.g., "us-east-1")
+                        type: string
+                    required:
+                    - bucket
+                    - region
+                    type: object
+                type: object
+              tolerations:
+                description: Tolerations for snapshot agent pod scheduling
+                items:
+                  description: |-
+                    The pod this Toleration is attached to tolerates any taint that matches
+                    the triple <key,value,effect> using the matching operator <operator>.
+                  properties:
+                    effect:
+                      description: |-
+                        Effect indicates the taint effect to match. Empty means match all taint effects.
+                        When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                      type: string
+                    key:
+                      description: |-
+                        Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                        If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                      type: string
+                    operator:
+                      description: |-
+                        Operator represents a key's relationship to the value.
+                        Valid operators are Exists and Equal. Defaults to Equal.
+                        Exists is equivalent to wildcard for value, so that a pod can
+                        tolerate all taints of a particular category.
+                      type: string
+                    tolerationSeconds:
+                      description: |-
+                        TolerationSeconds represents the period of time the toleration (which must be
+                        of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                        it is not set, which means tolerate the taint forever (do not evict). Zero and
+                        negative values will be treated as 0 (evict immediately) by the system.
+                      format: int64
+                      type: integer
+                    value:
+                      description: |-
+                        Value is the taint value the toleration matches to.
+                        If the operator is Exists, the value should be empty, otherwise just a regular string.
+                      type: string
+                  type: object
+                type: array
+            required:
+            - clusterRef
+            - schedule
+            - target
+            type: object
+            x-kubernetes-validations:
+            - message: one of target.s3, target.gcs, target.azure, or target.local
+                must be specified
+              rule: has(self.target.s3) || has(self.target.gcs) || has(self.target.azure)
+                || has(self.target.local)
+          status:
+            description: NomadSnapshotStatus defines the observed state of NomadSnapshot.
+            properties:
+              conditions:
+                description: Conditions represent the latest observations of the snapshot
+                  agent state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              configMapName:
+                description: ConfigMapName is the name of the snapshot agent configuration
+                  ConfigMap
+                type: string
+              deploymentName:
+                description: DeploymentName is the name of the snapshot agent deployment
+                type: string
+              desiredReplicas:
+                description: DesiredReplicas is the desired number of snapshot agent
+                  replicas
+                format: int32
+                type: integer
+              lastSnapshot:
+                description: LastSnapshot contains information about the most recent
+                  snapshot
+                properties:
+                  error:
+                    description: Error message if snapshot failed
+                    type: string
+                  location:
+                    description: Location is the storage path/URL of the snapshot
+                    type: string
+                  size:
+                    description: Size of the snapshot
+                    type: string
+                  status:
+                    description: Status of the snapshot (Success, Failed)
+                    type: string
+                  time:
+                    description: Time when the snapshot was taken
+                    format: date-time
+                    type: string
+                type: object
+              nextScheduled:
+                description: NextScheduled is when the next snapshot is expected
+                format: date-time
+                type: string
+              nomadAddress:
+                description: NomadAddress is the internal Nomad cluster address used
+                  by the snapshot agent
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the last observed generation
+                format: int64
+                type: integer
+              readyReplicas:
+                description: ReadyReplicas is the number of ready snapshot agent replicas
+                format: int32
+                type: integer
+              snapshotCount:
+                description: SnapshotCount is the total number of snapshots stored
+                type: integer
+              tokenAccessorID:
+                description: TokenAccessorID is the Nomad ACL token accessor ID for
+                  cleanup
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

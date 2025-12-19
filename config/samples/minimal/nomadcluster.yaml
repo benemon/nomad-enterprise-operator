@@ -1,0 +1,31 @@
+# Minimal NomadCluster CR - relies on operator defaults
+#
+# This CR demonstrates the opinionated nature of the operator.
+# Only the license is required - everything else uses sensible defaults:
+#
+# Defaults applied automatically:
+#   replicas: 3
+#   image: hashicorp/nomad:1.11-ent
+#   region: global
+#   datacenter: <namespace>
+#   gossip key: auto-generated
+#   acl: enabled (auto-bootstrapped, token stored in <name>-acl-bootstrap secret)
+#   persistence: 10Gi
+#   audit: enabled (5Gi volume, json format, 24h rotation)
+#   autopilot: cleanup dead servers, 200ms threshold, 250 trailing logs
+#   resources: 250m/512Mi requests, 2/2Gi limits
+#   affinity: preferred pod anti-affinity on hostname
+#   services: LoadBalancer for external access
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: nomad
+spec:
+  license:
+    secretName: nomad-license  # Only required field - reference existing secret
+    # Or use inline: value: "<license-content>"
+  # To disable ACLs (not recommended for production):
+  # server:
+  #   acl:
+  #     enabled: false

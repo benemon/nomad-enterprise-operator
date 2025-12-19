@@ -19,12 +19,14 @@ limitations under the License.
 package nomad
 
 import (
-	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -124,91 +126,113 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 // BootstrapACL performs ACL bootstrap and returns the management token.
 // This endpoint does not require authentication.
-// Note: We use a raw HTTP request instead of the Nomad Go client because
-// the client has issues parsing ExpirationTTL as time.Duration in newer Nomad versions.
 func (c *Client) BootstrapACL() (*ACLBootstrapResult, error) {
-	// Get the address from the client config
-	addr := c.api.Address()
-
-	// Make raw HTTP POST request to bootstrap endpoint
-	req, err := http.NewRequest("POST", addr+"/v1/acl/bootstrap", bytes.NewReader(nil))
+	token, _, err := c.api.ACLTokens().Bootstrap(nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create bootstrap request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ACL bootstrap failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read bootstrap response: %w", err)
-	}
-
-	// Check for error responses
-	if resp.StatusCode != http.StatusOK {
-		bodyStr := string(body)
-		if strings.Contains(bodyStr, "ACL bootstrap already done") ||
-			strings.Contains(bodyStr, "already bootstrapped") {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "ACL bootstrap already done") ||
+			strings.Contains(errMsg, "already bootstrapped") {
 			return nil, ErrAlreadyBootstrapped
 		}
-		return nil, fmt.Errorf("ACL bootstrap failed (status %d): %s", resp.StatusCode, bodyStr)
-	}
-
-	// Parse response manually to handle duration fields as strings
-	var result struct {
-		AccessorID string `json:"AccessorID"`
-		SecretID   string `json:"SecretID"`
-		Name       string `json:"Name"`
-		Type       string `json:"Type"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse bootstrap response: %w", err)
+		return nil, fmt.Errorf("ACL bootstrap failed: %w", err)
 	}
 
 	return &ACLBootstrapResult{
-		AccessorID: result.AccessorID,
-		SecretID:   result.SecretID,
-		Name:       result.Name,
-		Type:       result.Type,
+		AccessorID:     token.AccessorID,
+		SecretID:       token.SecretID,
+		Name:           token.Name,
+		Type:           token.Type,
+		CreateTime:     token.CreateTime,
+		ExpirationTime: token.ExpirationTime,
 	}, nil
 }
 
 // CreateACLPolicy creates or updates an ACL policy.
 // Requires a management token for authentication.
-func (c *Client) CreateACLPolicy(token, name, description, rules string) error {
-	addr := c.api.Address()
-
-	policy := map[string]string{
-		"Name":        name,
-		"Description": description,
-		"Rules":       rules,
+func (c *Client) CreateACLPolicy(authToken, name, description, rules string) error {
+	policy := &nomadapi.ACLPolicy{
+		Name:        name,
+		Description: description,
+		Rules:       rules,
 	}
 
-	body, err := json.Marshal(policy)
-	if err != nil {
-		return fmt.Errorf("failed to marshal policy: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", addr+"/v1/acl/policy/"+name, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create policy request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
+	_, err := c.api.ACLPolicies().Upsert(policy, &nomadapi.WriteOptions{
+		AuthToken: authToken,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create ACL policy: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to create ACL policy (status %d): %s", resp.StatusCode, string(respBody))
+	return nil
+}
+
+// ACLTokenResult contains the result of ACL token operations.
+type ACLTokenResult struct {
+	AccessorID     string
+	SecretID       string
+	Name           string
+	Type           string
+	CreateTime     time.Time
+	ExpirationTime *time.Time
+}
+
+// CreateACLToken creates a new ACL token.
+// Requires a management token for authentication.
+func (c *Client) CreateACLToken(authToken, name, tokenType string) (*ACLTokenResult, error) {
+	token := &nomadapi.ACLToken{
+		Name: name,
+		Type: tokenType,
+	}
+
+	result, _, err := c.api.ACLTokens().Create(token, &nomadapi.WriteOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ACL token: %w", err)
+	}
+
+	return &ACLTokenResult{
+		AccessorID:     result.AccessorID,
+		SecretID:       result.SecretID,
+		Name:           result.Name,
+		Type:           result.Type,
+		CreateTime:     result.CreateTime,
+		ExpirationTime: result.ExpirationTime,
+	}, nil
+}
+
+// GetACLToken retrieves an ACL token by accessor ID.
+// Requires a management token for authentication.
+func (c *Client) GetACLToken(authToken, accessorID string) (*ACLTokenResult, error) {
+	token, _, err := c.api.ACLTokens().Info(accessorID, &nomadapi.QueryOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		// Check if token not found
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get ACL token: %w", err)
+	}
+
+	return &ACLTokenResult{
+		AccessorID:     token.AccessorID,
+		SecretID:       token.SecretID,
+		Name:           token.Name,
+		Type:           token.Type,
+		CreateTime:     token.CreateTime,
+		ExpirationTime: token.ExpirationTime,
+	}, nil
+}
+
+// DeleteACLToken deletes an ACL token by accessor ID.
+// Requires a management token for authentication.
+func (c *Client) DeleteACLToken(authToken, accessorID string) error {
+	_, err := c.api.ACLTokens().Delete(accessorID, &nomadapi.WriteOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete ACL token: %w", err)
 	}
 
 	return nil
@@ -277,10 +301,10 @@ func (c *Client) CheckHealth() (*HealthResult, error) {
 
 // GetLicense retrieves the current Nomad Enterprise license information.
 // Requires an ACL token with operator:read capability.
-func (c *Client) GetLicense(token string) (*LicenseResult, error) {
+func (c *Client) GetLicense(ctx context.Context, token string) (*LicenseResult, error) {
 	addr := c.api.Address()
 
-	req, err := http.NewRequest("GET", addr+"/v1/operator/license", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", addr+"/v1/operator/license", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create license request: %w", err)
 	}
@@ -326,10 +350,10 @@ func (c *Client) GetLicense(token string) (*LicenseResult, error) {
 
 // GetAutopilotHealth retrieves the Raft autopilot health information.
 // Requires an ACL token with operator:read capability.
-func (c *Client) GetAutopilotHealth(token string) (*AutopilotHealthResult, error) {
+func (c *Client) GetAutopilotHealth(ctx context.Context, token string) (*AutopilotHealthResult, error) {
 	addr := c.api.Address()
 
-	req, err := http.NewRequest("GET", addr+"/v1/operator/autopilot/health", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", addr+"/v1/operator/autopilot/health", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create autopilot health request: %w", err)
 	}
@@ -404,10 +428,12 @@ func (c *Client) GetAutopilotHealth(token string) (*AutopilotHealthResult, error
 
 // ACLBootstrapResult contains the result of ACL bootstrap.
 type ACLBootstrapResult struct {
-	AccessorID string
-	SecretID   string
-	Name       string
-	Type       string
+	AccessorID     string
+	SecretID       string
+	Name           string
+	Type           string
+	CreateTime     time.Time
+	ExpirationTime *time.Time
 }
 
 // ServerMembersResult contains server membership information.
@@ -498,3 +524,64 @@ host_volume "*" {
   policy = "read"
 }
 `
+
+// InternalServiceAddress returns the internal K8s service address for a Nomad cluster.
+// This address is only resolvable from within the Kubernetes cluster.
+func InternalServiceAddress(clusterName, namespace string, tlsEnabled bool) string {
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s-internal.%s.svc:4646", scheme, clusterName, namespace)
+}
+
+// LoadBalancerAddress returns the LoadBalancer address for a Nomad cluster.
+// Returns empty string if advertiseAddress is empty.
+func LoadBalancerAddress(advertiseAddress string, tlsEnabled bool) string {
+	if advertiseAddress == "" {
+		return ""
+	}
+	scheme := "http"
+	if tlsEnabled {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s:4646", scheme, advertiseAddress)
+}
+
+// IsNetworkError checks if the error is a network connectivity error
+// (DNS lookup failure, connection refused, timeout, etc.)
+func IsNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for DNS lookup errors
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+
+	// Check for connection refused or timeout
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	// Check error message for common network issues
+	errMsg := strings.ToLower(err.Error())
+	networkErrors := []string{
+		"no such host",
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"network is unreachable",
+		"no route to host",
+	}
+	for _, netErr := range networkErrors {
+		if strings.Contains(errMsg, netErr) {
+			return true
+		}
+	}
+
+	return false
+}

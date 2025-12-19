@@ -90,10 +90,11 @@ func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		return Error(err, "Failed to get ConfigMap")
 	}
 
-	// Update if content changed
+	// Auto-remediate: Update if content changed (handles config drift)
 	if !configMapDataEqual(existing.Data, cm.Data) {
 		existing.Data = cm.Data
-		p.Log.Info("Updating ConfigMap", "name", cm.Name)
+		p.Log.Info("Auto-remediating ConfigMap drift", "name", cm.Name,
+			"reason", "ConfigMap content differs from desired state")
 		if err := p.Client.Update(ctx, existing); err != nil {
 			return Error(err, "Failed to update ConfigMap")
 		}

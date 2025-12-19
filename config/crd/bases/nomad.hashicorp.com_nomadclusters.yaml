@@ -144,16 +144,29 @@ spec:
                 properties:
                   secretKey:
                     default: license
-                    description: 'SecretKey is the key within the secret (default:
-                      "license")'
+                    description: |-
+                      SecretKey is the key within the secret (default: "license")
+                      Only used when SecretName is specified.
                     type: string
                   secretName:
-                    description: SecretName is the name of the secret containing the
-                      license
+                    description: |-
+                      SecretName is the name of an existing secret containing the license.
+                      Mutually exclusive with Value.
                     type: string
-                required:
-                - secretName
+                  value:
+                    description: |-
+                      Value is the license content provided directly.
+                      The operator will create and manage a secret from this value.
+                      Mutually exclusive with SecretName.
+                    type: string
                 type: object
+                x-kubernetes-validations:
+                - message: either secretName or value must be specified
+                  rule: (has(self.secretName) && size(self.secretName) > 0) || (has(self.value)
+                    && size(self.value) > 0)
+                - message: secretName and value are mutually exclusive
+                  rule: '!((has(self.secretName) && size(self.secretName) > 0) &&
+                    (has(self.value) && size(self.value) > 0))'
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -376,8 +389,9 @@ spec:
                           token (auto-created)
                         type: string
                       enabled:
-                        default: false
-                        description: Enabled determines if ACLs are enabled
+                        default: true
+                        description: Enabled determines if ACLs are enabled (defaults
+                          to true for security)
                         type: boolean
                     type: object
                   audit:
@@ -466,12 +480,19 @@ spec:
                       s3:
                         description: S3 configuration for snapshot storage
                         properties:
+                          accessKeyId:
+                            description: |-
+                              AccessKeyID is the S3 access key ID provided directly.
+                              The operator will create and manage a secret from inline credentials.
+                              Must be provided together with SecretAccessKey.
+                            type: string
                           bucket:
                             description: Bucket name
                             type: string
                           credentialsSecretName:
-                            description: CredentialsSecretName containing access-key-id
-                              and secret-access-key
+                            description: |-
+                              CredentialsSecretName is the name of an existing secret containing access-key-id and secret-access-key.
+                              Mutually exclusive with inline credentials.
                             type: string
                           endpoint:
                             description: Endpoint URL for S3-compatible storage
@@ -484,20 +505,58 @@ spec:
                             default: us-east-1
                             description: Region
                             type: string
+                          secretAccessKey:
+                            description: |-
+                              SecretAccessKey is the S3 secret access key provided directly.
+                              Must be provided together with AccessKeyID.
+                            type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: credentialsSecretName and inline credentials are
+                            mutually exclusive
+                          rule: '!((has(self.credentialsSecretName) && size(self.credentialsSecretName)
+                            > 0) && (has(self.accessKeyId) && size(self.accessKeyId)
+                            > 0))'
                     type: object
                   tls:
                     description: TLS configuration
                     properties:
+                      caCert:
+                        description: |-
+                          CACert is the CA certificate in PEM format.
+                          The operator will create and manage a secret from inline certificates.
+                          Must be provided together with ServerCert and ServerKey.
+                        type: string
                       enabled:
                         default: false
                         description: Enabled determines if TLS is enabled
                         type: boolean
                       secretName:
-                        description: SecretName containing TLS certificates (ca.crt,
-                          server.crt, server.key)
+                        description: |-
+                          SecretName containing TLS certificates (ca.crt, server.crt, server.key).
+                          Mutually exclusive with inline certificates.
+                        type: string
+                      serverCert:
+                        description: |-
+                          ServerCert is the server certificate in PEM format.
+                          Must be provided together with CACert and ServerKey.
+                        type: string
+                      serverKey:
+                        description: |-
+                          ServerKey is the server private key in PEM format.
+                          Must be provided together with CACert and ServerCert.
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: when TLS is enabled, either secretName or all inline
+                        certificates (caCert, serverCert, serverKey) must be specified
+                      rule: '!self.enabled || (has(self.secretName) && size(self.secretName)
+                        > 0) || (has(self.caCert) && size(self.caCert) > 0 && has(self.serverCert)
+                        && size(self.serverCert) > 0 && has(self.serverKey) && size(self.serverKey)
+                        > 0)'
+                    - message: secretName and inline certificates are mutually exclusive
+                      rule: '!((has(self.secretName) && size(self.secretName) > 0)
+                        && (has(self.caCert) && size(self.caCert) > 0))'
                 type: object
               services:
                 description: Services configuration for Nomad endpoints
@@ -751,14 +810,10 @@ spec:
             - license
             type: object
             x-kubernetes-validations:
-            - message: server.tls.secretName is required when server.tls.enabled is
-                true
-              rule: '!has(self.server.tls) || !self.server.tls.enabled || size(self.server.tls.secretName)
-                > 0'
             - message: server.snapshot.s3.bucket is required when server.snapshot.enabled
                 is true
-              rule: '!has(self.server.snapshot) || !self.server.snapshot.enabled ||
-                size(self.server.snapshot.s3.bucket) > 0'
+              rule: '!has(self.server) || !has(self.server.snapshot) || !self.server.snapshot.enabled
+                || size(self.server.snapshot.s3.bucket) > 0'
           status:
             description: NomadClusterStatus defines the observed state of NomadCluster.
             properties:

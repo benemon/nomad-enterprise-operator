@@ -18,7 +18,10 @@ package phases
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
 	"strconv"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -49,7 +52,7 @@ func (p *StatefulSetPhase) Name() string {
 
 // Execute creates or updates the Nomad server StatefulSet.
 func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	sts, err := p.buildStatefulSet(cluster)
+	sts, err := p.buildStatefulSet(ctx, cluster)
 	if err != nil {
 		return Error(err, "Failed to build StatefulSet spec")
 	}
@@ -87,7 +90,7 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 	return OK()
 }
 
-func (p *StatefulSetPhase) buildStatefulSet(cluster *nomadv1alpha1.NomadCluster) (*appsv1.StatefulSet, error) {
+func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*appsv1.StatefulSet, error) {
 	replicas := cluster.Spec.Replicas
 	if replicas == 0 {
 		replicas = 3
@@ -140,7 +143,7 @@ func (p *StatefulSetPhase) buildStatefulSet(cluster *nomadv1alpha1.NomadCluster)
 				Name:            "nomad",
 				Image:           imageFull,
 				ImagePullPolicy: pullPolicy,
-				Command:         []string{"nomad", "agent", "-config=/nomad/config/server.hcl"},
+				Command:         []string{"nomad", "agent", "-config=/nomad/config"},
 				Env:             env,
 				Ports: []corev1.ContainerPort{
 					{Name: "http", ContainerPort: 4646, Protocol: corev1.ProtocolTCP},
@@ -209,6 +212,14 @@ func (p *StatefulSetPhase) buildStatefulSet(cluster *nomadv1alpha1.NomadCluster)
 		"snapshotEndpoint": cluster.Spec.Server.Snapshot.S3.Endpoint,
 	})
 
+	// Get secrets checksum for pod annotation - hash actual secret contents
+	// This ensures pods restart when referenced secrets change
+	secretsChecksum, err := p.computeSecretsChecksum(ctx, cluster)
+	if err != nil {
+		p.Log.Error(err, "Failed to compute secrets checksum, using empty hash")
+		secretsChecksum = ""
+	}
+
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
@@ -229,7 +240,8 @@ func (p *StatefulSetPhase) buildStatefulSet(cluster *nomadv1alpha1.NomadCluster)
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: GetSelectorLabels(cluster),
 					Annotations: map[string]string{
-						"checksum/config": configChecksum,
+						"checksum/config":  configChecksum,
+						"checksum/secrets": secretsChecksum,
 					},
 				},
 				Spec: podSpec,
@@ -242,6 +254,8 @@ func (p *StatefulSetPhase) buildStatefulSet(cluster *nomadv1alpha1.NomadCluster)
 }
 
 func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
+	// Get the effective license secret name (handles inline vs external)
+	licenseSecretName := GetLicenseSecretName(cluster)
 	licenseKey := cluster.Spec.License.SecretKey
 	if licenseKey == "" {
 		licenseKey = "license"
@@ -253,7 +267,7 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: cluster.Spec.License.SecretName,
+						Name: licenseSecretName,
 					},
 					Key: licenseKey,
 				},
@@ -285,15 +299,16 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 		},
 	}
 
-	// Add S3 credentials for snapshots
-	if cluster.Spec.Server.Snapshot.Enabled && cluster.Spec.Server.Snapshot.S3.CredentialsSecretName != "" {
+	// Add S3 credentials for snapshots (handles both inline and external secrets)
+	s3CredentialsSecretName := GetS3CredentialsSecretName(cluster)
+	if cluster.Spec.Server.Snapshot.Enabled && s3CredentialsSecretName != "" {
 		env = append(env,
 			corev1.EnvVar{
 				Name: "AWS_ACCESS_KEY_ID",
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: cluster.Spec.Server.Snapshot.S3.CredentialsSecretName,
+							Name: s3CredentialsSecretName,
 						},
 						Key: "access-key-id",
 					},
@@ -304,7 +319,7 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 				ValueFrom: &corev1.EnvVarSource{
 					SecretKeyRef: &corev1.SecretKeySelector{
 						LocalObjectReference: corev1.LocalObjectReference{
-							Name: cluster.Spec.Server.Snapshot.S3.CredentialsSecretName,
+							Name: s3CredentialsSecretName,
 						},
 						Key: "secret-access-key",
 					},
@@ -363,13 +378,14 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 		},
 	}
 
-	// Add TLS volume from secret
+	// Add TLS volume from secret (handles both inline and external secrets)
 	if cluster.Spec.Server.TLS.Enabled {
+		tlsSecretName := GetTLSSecretName(cluster)
 		volumes = append(volumes, corev1.Volume{
 			Name: "tls",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: cluster.Spec.Server.TLS.SecretName,
+					SecretName: tlsSecretName,
 				},
 			},
 		})
@@ -532,6 +548,13 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) bo
 		return true
 	}
 
+	// Check secrets checksum annotation (triggers rolling restart when secrets change)
+	existingSecretsChecksum := existing.Spec.Template.Annotations["checksum/secrets"]
+	desiredSecretsChecksum := desired.Spec.Template.Annotations["checksum/secrets"]
+	if existingSecretsChecksum != desiredSecretsChecksum {
+		return true
+	}
+
 	return false
 }
 
@@ -569,4 +592,82 @@ func getResourcesWithDefaults(resources corev1.ResourceRequirements) corev1.Reso
 	}
 
 	return *result
+}
+
+// computeSecretsChecksum reads all referenced secrets and computes a combined hash.
+// When any secret changes, the hash changes, triggering a rolling restart.
+func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (string, error) {
+	h := sha256.New()
+
+	// Collect secret names to hash
+	secretNames := []string{}
+
+	// License secret
+	if licenseSecret := GetLicenseSecretName(cluster); licenseSecret != "" {
+		secretNames = append(secretNames, licenseSecret)
+	}
+
+	// Gossip secret
+	if gossipSecret := GetGossipSecretName(cluster); gossipSecret != "" {
+		secretNames = append(secretNames, gossipSecret)
+	}
+
+	// TLS secret
+	if cluster.Spec.Server.TLS.Enabled {
+		if tlsSecret := GetTLSSecretName(cluster); tlsSecret != "" {
+			secretNames = append(secretNames, tlsSecret)
+		}
+	}
+
+	// S3 credentials secret
+	if cluster.Spec.Server.Snapshot.Enabled {
+		if s3Secret := GetS3CredentialsSecretName(cluster); s3Secret != "" {
+			secretNames = append(secretNames, s3Secret)
+		}
+	}
+
+	// Sort for deterministic ordering
+	sort.Strings(secretNames)
+
+	// Read and hash each secret's data
+	for _, name := range secretNames {
+		secret := &corev1.Secret{}
+		err := p.Client.Get(ctx, types.NamespacedName{
+			Name:      name,
+			Namespace: cluster.Namespace,
+		}, secret)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Secret doesn't exist yet, include name with empty data
+				h.Write([]byte(name + ":"))
+				continue
+			}
+			return "", fmt.Errorf("failed to get secret %s: %w", name, err)
+		}
+
+		// Hash secret name and data
+		h.Write([]byte(name + ":"))
+
+		// Sort keys for deterministic ordering
+		keys := make([]string, 0, len(secret.Data))
+		for k := range secret.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		for _, k := range keys {
+			h.Write([]byte(k))
+			h.Write(secret.Data[k])
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+// GetGossipSecretName returns the gossip secret name for the cluster.
+func GetGossipSecretName(cluster *nomadv1alpha1.NomadCluster) string {
+	if cluster.Spec.Gossip.SecretName != "" {
+		return cluster.Spec.Gossip.SecretName
+	}
+	return cluster.Name + "-gossip"
 }

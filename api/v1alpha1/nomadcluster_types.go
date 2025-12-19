@@ -22,8 +22,7 @@ import (
 )
 
 // NomadClusterSpec defines the desired state of NomadCluster.
-// +kubebuilder:validation:XValidation:rule="!has(self.server.tls) || !self.server.tls.enabled || size(self.server.tls.secretName) > 0",message="server.tls.secretName is required when server.tls.enabled is true"
-// +kubebuilder:validation:XValidation:rule="!has(self.server.snapshot) || !self.server.snapshot.enabled || size(self.server.snapshot.s3.bucket) > 0",message="server.snapshot.s3.bucket is required when server.snapshot.enabled is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.server) || !has(self.server.snapshot) || !self.server.snapshot.enabled || size(self.server.snapshot.s3.bucket) > 0",message="server.snapshot.s3.bucket is required when server.snapshot.enabled is true"
 type NomadClusterSpec struct {
 	// Replicas is the number of Nomad server replicas (should be 1, 3, or 5)
 	// +kubebuilder:validation:Enum=1;3;5
@@ -101,14 +100,26 @@ type ImageSpec struct {
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
 }
 
-// LicenseSpec defines the Nomad Enterprise license configuration
+// LicenseSpec defines the Nomad Enterprise license configuration.
+// Exactly one of SecretName or Value must be specified.
+// +kubebuilder:validation:XValidation:rule="(has(self.secretName) && size(self.secretName) > 0) || (has(self.value) && size(self.value) > 0)",message="either secretName or value must be specified"
+// +kubebuilder:validation:XValidation:rule="!((has(self.secretName) && size(self.secretName) > 0) && (has(self.value) && size(self.value) > 0))",message="secretName and value are mutually exclusive"
 type LicenseSpec struct {
-	// SecretName is the name of the secret containing the license
-	SecretName string `json:"secretName"`
+	// SecretName is the name of an existing secret containing the license.
+	// Mutually exclusive with Value.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
 
 	// SecretKey is the key within the secret (default: "license")
+	// Only used when SecretName is specified.
 	// +kubebuilder:default="license"
 	SecretKey string `json:"secretKey,omitempty"`
+
+	// Value is the license content provided directly.
+	// The operator will create and manage a secret from this value.
+	// Mutually exclusive with SecretName.
+	// +optional
+	Value string `json:"value,omitempty"`
 }
 
 // TopologySpec defines Nomad topology configuration
@@ -280,8 +291,8 @@ type ServerSpec struct {
 
 // ACLSpec defines ACL configuration
 type ACLSpec struct {
-	// Enabled determines if ACLs are enabled
-	// +kubebuilder:default=false
+	// Enabled determines if ACLs are enabled (defaults to true for security)
+	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
 
 	// BootstrapSecretName is the secret to store bootstrap token (auto-created)
@@ -289,15 +300,35 @@ type ACLSpec struct {
 	BootstrapSecretName string `json:"bootstrapSecretName,omitempty"`
 }
 
-// TLSSpec defines TLS configuration
+// TLSSpec defines TLS configuration.
+// When Enabled is true, either SecretName or inline certificates (CACert, ServerCert, ServerKey) must be provided.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.secretName) && size(self.secretName) > 0) || (has(self.caCert) && size(self.caCert) > 0 && has(self.serverCert) && size(self.serverCert) > 0 && has(self.serverKey) && size(self.serverKey) > 0)",message="when TLS is enabled, either secretName or all inline certificates (caCert, serverCert, serverKey) must be specified"
+// +kubebuilder:validation:XValidation:rule="!((has(self.secretName) && size(self.secretName) > 0) && (has(self.caCert) && size(self.caCert) > 0))",message="secretName and inline certificates are mutually exclusive"
 type TLSSpec struct {
 	// Enabled determines if TLS is enabled
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// SecretName containing TLS certificates (ca.crt, server.crt, server.key)
+	// SecretName containing TLS certificates (ca.crt, server.crt, server.key).
+	// Mutually exclusive with inline certificates.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// CACert is the CA certificate in PEM format.
+	// The operator will create and manage a secret from inline certificates.
+	// Must be provided together with ServerCert and ServerKey.
+	// +optional
+	CACert string `json:"caCert,omitempty"`
+
+	// ServerCert is the server certificate in PEM format.
+	// Must be provided together with CACert and ServerKey.
+	// +optional
+	ServerCert string `json:"serverCert,omitempty"`
+
+	// ServerKey is the server private key in PEM format.
+	// Must be provided together with CACert and ServerCert.
+	// +optional
+	ServerKey string `json:"serverKey,omitempty"`
 }
 
 // AutopilotSpec defines Autopilot configuration
@@ -374,7 +405,9 @@ type SnapshotSpec struct {
 	S3 S3Spec `json:"s3,omitempty"`
 }
 
-// S3Spec defines S3-compatible storage configuration
+// S3Spec defines S3-compatible storage configuration.
+// Credentials can be provided via CredentialsSecretName or inline (AccessKeyID + SecretAccessKey).
+// +kubebuilder:validation:XValidation:rule="!((has(self.credentialsSecretName) && size(self.credentialsSecretName) > 0) && (has(self.accessKeyId) && size(self.accessKeyId) > 0))",message="credentialsSecretName and inline credentials are mutually exclusive"
 type S3Spec struct {
 	// Endpoint URL for S3-compatible storage
 	// +optional
@@ -392,9 +425,21 @@ type S3Spec struct {
 	// +kubebuilder:default=true
 	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
 
-	// CredentialsSecretName containing access-key-id and secret-access-key
+	// CredentialsSecretName is the name of an existing secret containing access-key-id and secret-access-key.
+	// Mutually exclusive with inline credentials.
 	// +optional
 	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
+
+	// AccessKeyID is the S3 access key ID provided directly.
+	// The operator will create and manage a secret from inline credentials.
+	// Must be provided together with SecretAccessKey.
+	// +optional
+	AccessKeyID string `json:"accessKeyId,omitempty"`
+
+	// SecretAccessKey is the S3 secret access key provided directly.
+	// Must be provided together with AccessKeyID.
+	// +optional
+	SecretAccessKey string `json:"secretAccessKey,omitempty"`
 }
 
 // PersistenceSpec defines storage configuration

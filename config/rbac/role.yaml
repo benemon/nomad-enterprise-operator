@@ -24,6 +24,7 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - deployments
   - statefulsets
   verbs:
   - create
@@ -50,6 +51,7 @@ rules:
   - nomad.hashicorp.com
   resources:
   - nomadclusters
+  - nomadsnapshots
   verbs:
   - create
   - delete
@@ -62,12 +64,14 @@ rules:
   - nomad.hashicorp.com
   resources:
   - nomadclusters/finalizers
+  - nomadsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
   - nomad.hashicorp.com
   resources:
   - nomadclusters/status
+  - nomadsnapshots/status
   verbs:
   - get
   - patch

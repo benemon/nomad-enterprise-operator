@@ -1,0 +1,97 @@
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  labels:
+    app.kubernetes.io/name: nomad-enterprise-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: hourly-backup
+spec:
+  # Reference to the NomadCluster to snapshot
+  clusterRef:
+    name: nomad
+    # namespace: default  # Optional, defaults to same namespace
+
+  # Snapshot schedule
+  schedule:
+    interval: "1h"
+    retain: 24
+    stale: false
+
+  # Storage target - local PVC (easiest for demos)
+  # PVC is auto-created with name: <snapshot-name>-snapshots
+  target:
+    local:
+      path: /snapshots
+      size: 10Gi
+      # storageClassName: standard  # Optional, uses cluster default if not specified
+
+  # Optional: resource limits for snapshot agent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+---
+# Example: Daily snapshots to S3
+# apiVersion: nomad.hashicorp.com/v1alpha1
+# kind: NomadSnapshot
+# metadata:
+#   name: daily-s3-backup
+# spec:
+#   clusterRef:
+#     name: nomad
+#   schedule:
+#     interval: "24h"
+#     retain: 7
+#   target:
+#     s3:
+#       bucket: my-nomad-snapshots
+#       region: us-east-1
+#       # endpoint: ""  # Optional: for S3-compatible storage (MinIO, etc.)
+#       # forcePathStyle: false
+#       credentialsSecretRef:
+#         name: s3-snapshot-credentials
+#         # Expected keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+#         # If not specified, uses IAM role/IRSA
+
+---
+# Example: Weekly snapshots to GCS
+# apiVersion: nomad.hashicorp.com/v1alpha1
+# kind: NomadSnapshot
+# metadata:
+#   name: weekly-gcs-backup
+# spec:
+#   clusterRef:
+#     name: nomad
+#   schedule:
+#     interval: "168h"  # 7 days
+#     retain: 4
+#   target:
+#     gcs:
+#       bucket: my-gcs-nomad-snapshots
+#       credentialsSecretRef:
+#         name: gcs-credentials
+#         # Expected key: GOOGLE_APPLICATION_CREDENTIALS (JSON service account key)
+
+---
+# Example: Daily snapshots to Azure Blob
+# apiVersion: nomad.hashicorp.com/v1alpha1
+# kind: NomadSnapshot
+# metadata:
+#   name: daily-azure-backup
+# spec:
+#   clusterRef:
+#     name: nomad
+#   schedule:
+#     interval: "24h"
+#     retain: 7
+#   target:
+#     azure:
+#       container: nomad-snapshots
+#       accountName: mystorageaccount
+#       credentialsSecretRef:
+#         name: azure-credentials
+#         # Expected key: AZURE_BLOB_ACCOUNT_KEY

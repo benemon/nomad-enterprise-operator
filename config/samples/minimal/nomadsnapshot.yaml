@@ -1,0 +1,18 @@
+# Minimal NomadSnapshot example - pairs with minimal.yaml NomadCluster
+#
+# This creates hourly snapshots stored on a local PVC.
+# The PVC is auto-created with name: <snapshot-name>-snapshots
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: nomad-backup
+spec:
+  clusterRef:
+    name: nomad  # References the cluster from minimal.yaml
+  schedule:
+    interval: "1h"
+    retain: 24
+  target:
+    local:
+      size: 10Gi

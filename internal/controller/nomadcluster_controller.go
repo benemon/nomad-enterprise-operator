@@ -25,15 +25,18 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
@@ -74,12 +77,11 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Fetch the NomadCluster instance
 	cluster := &nomadv1alpha1.NomadCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
-		if errors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			log.Info("NomadCluster resource not found, ignoring")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get NomadCluster")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to get NomadCluster: %w", err)
 	}
 
 	// Handle deletion
@@ -220,7 +222,7 @@ func (r *NomadClusterReconciler) cleanupPVCs(ctx context.Context, cluster *nomad
 	// Delete each PVC
 	for _, pvc := range pvcList.Items {
 		log.Info("Deleting PVC", "name", pvc.Name)
-		if err := r.Delete(ctx, &pvc); err != nil && !errors.IsNotFound(err) {
+		if err := r.Delete(ctx, &pvc); err != nil && !k8serrors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -232,7 +234,7 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 	// Get StatefulSet status
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}, sts); err != nil {
-		if !errors.IsNotFound(err) {
+		if !k8serrors.IsNotFound(err) {
 			return err
 		}
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
@@ -544,6 +546,73 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&appsv1.StatefulSet{}).
+		// Watch external secrets (not owned by NomadCluster) for rolling restarts
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findClustersReferencingSecret),
+		).
 		Named("nomadcluster").
 		Complete(r)
+}
+
+// findClustersReferencingSecret returns reconcile requests for NomadClusters that reference the given secret.
+// This enables rolling restarts when external secrets (TLS, license, S3 credentials) change.
+func (r *NomadClusterReconciler) findClustersReferencingSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	// Skip secrets owned by a NomadCluster (already handled by Owns)
+	for _, ref := range secret.GetOwnerReferences() {
+		if ref.Kind == "NomadCluster" {
+			return nil
+		}
+	}
+
+	// List all NomadClusters in the same namespace
+	clusterList := &nomadv1alpha1.NomadClusterList{}
+	if err := r.List(ctx, clusterList, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, cluster := range clusterList.Items {
+		// Check if this cluster references the secret
+		if r.clusterReferencesSecret(&cluster, secret.Name) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      cluster.Name,
+					Namespace: cluster.Namespace,
+				},
+			})
+		}
+	}
+
+	return requests
+}
+
+// clusterReferencesSecret checks if a NomadCluster references the given secret name.
+func (r *NomadClusterReconciler) clusterReferencesSecret(cluster *nomadv1alpha1.NomadCluster, secretName string) bool {
+	// Check license secret (external reference only - inline creates a managed secret)
+	if cluster.Spec.License.SecretName == secretName {
+		return true
+	}
+
+	// Check TLS secret (external reference only)
+	if cluster.Spec.Server.TLS.Enabled && cluster.Spec.Server.TLS.SecretName == secretName {
+		return true
+	}
+
+	// Check gossip secret (external reference)
+	if cluster.Spec.Gossip.SecretName == secretName {
+		return true
+	}
+
+	// Check S3 credentials secret (external reference only)
+	if cluster.Spec.Server.Snapshot.Enabled && cluster.Spec.Server.Snapshot.S3.CredentialsSecretName == secretName {
+		return true
+	}
+
+	return false
 }

@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strings"
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -142,19 +140,16 @@ func (p *ACLBootstrapPhase) checkPodsReady(ctx context.Context, cluster *nomadv1
 }
 
 func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*nomad.ACLBootstrapResult, error) {
-	scheme := "http"
-	if cluster.Spec.Server.TLS.Enabled {
-		scheme = "https"
-	}
+	tlsEnabled := cluster.Spec.Server.TLS.Enabled
 
 	// Build base client config
 	cfg := nomad.ClientConfig{
-		TLSEnabled: cluster.Spec.Server.TLS.Enabled,
+		TLSEnabled: tlsEnabled,
 		Timeout:    30 * time.Second,
 	}
 
 	// If TLS is enabled, get the CA cert from the TLS secret
-	if cluster.Spec.Server.TLS.Enabled && cluster.Spec.Server.TLS.SecretName != "" {
+	if tlsEnabled && cluster.Spec.Server.TLS.SecretName != "" {
 		tlsSecret := &corev1.Secret{}
 		err := p.Client.Get(ctx, types.NamespacedName{
 			Name:      cluster.Spec.Server.TLS.SecretName,
@@ -167,8 +162,7 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 	}
 
 	// Try internal service first (operator typically runs in-cluster)
-	internalAddress := fmt.Sprintf("%s://%s-internal.%s.svc:4646",
-		scheme, cluster.Name, cluster.Namespace)
+	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
 	cfg.Address = internalAddress
 
 	p.Log.Info("Attempting ACL bootstrap via internal service", "address", internalAddress)
@@ -185,7 +179,7 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 	}
 
 	// Check if it's a network error (internal service not reachable)
-	if !isNetworkError(err) {
+	if !nomad.IsNetworkError(err) {
 		// Not a network error - return the actual error (e.g., already bootstrapped)
 		return nil, err
 	}
@@ -195,12 +189,12 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 		"loadBalancerAddress", p.AdvertiseAddress)
 
 	// Fall back to LoadBalancer address
-	if p.AdvertiseAddress == "" {
+	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+	if loadBalancerAddress == "" {
 		return nil, fmt.Errorf("ACL bootstrap failed: internal service not reachable (%v) and no LoadBalancer address available. "+
 			"Ensure the operator is running in-cluster, or that the LoadBalancer service has an external IP assigned", err)
 	}
 
-	loadBalancerAddress := fmt.Sprintf("%s://%s:4646", scheme, p.AdvertiseAddress)
 	cfg.Address = loadBalancerAddress
 
 	p.Log.Info("Attempting ACL bootstrap via LoadBalancer", "address", loadBalancerAddress)
@@ -212,7 +206,7 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 
 	result, err = nomadClient.BootstrapACL()
 	if err != nil {
-		if isNetworkError(err) {
+		if nomad.IsNetworkError(err) {
 			return nil, fmt.Errorf("ACL bootstrap failed: neither internal service nor LoadBalancer address reachable. "+
 				"Internal service error: DNS/network issue. LoadBalancer error: %v. "+
 				"To resolve: 1) Ensure pods are running and healthy, 2) Check LoadBalancer has external IP, "+
@@ -225,57 +219,28 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 	return result, nil
 }
 
-// isNetworkError checks if the error is a network connectivity error
-func isNetworkError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Check for DNS lookup errors
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return true
-	}
-
-	// Check for connection refused or timeout
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-
-	// Check error message for common network issues
-	errMsg := strings.ToLower(err.Error())
-	networkErrors := []string{
-		"no such host",
-		"connection refused",
-		"connection reset",
-		"i/o timeout",
-		"network is unreachable",
-		"no route to host",
-	}
-	for _, netErr := range networkErrors {
-		if strings.Contains(errMsg, netErr) {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretName string, result *nomad.ACLBootstrapResult) PhaseResult {
+	secretData := map[string]string{
+		"accessor-id": result.AccessorID,
+		"secret-id":   result.SecretID,
+		"name":        result.Name,
+		"type":        result.Type,
+		"create-time": result.CreateTime.Format(time.RFC3339),
+	}
+
+	// Only include expiration-time if set (bootstrap tokens typically don't expire)
+	if result.ExpirationTime != nil {
+		secretData["expiration-time"] = result.ExpirationTime.Format(time.RFC3339)
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: cluster.Namespace,
 			Labels:    GetLabels(cluster),
 		},
-		Type: corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"accessor-id": result.AccessorID,
-			"secret-id":   result.SecretID,
-			"name":        result.Name,
-			"type":        result.Type,
-		},
+		Type:       corev1.SecretTypeOpaque,
+		StringData: secretData,
 	}
 
 	if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
@@ -291,19 +256,16 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 }
 
 func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, token string) error {
-	scheme := "http"
-	if cluster.Spec.Server.TLS.Enabled {
-		scheme = "https"
-	}
+	tlsEnabled := cluster.Spec.Server.TLS.Enabled
 
 	cfg := nomad.ClientConfig{
 		Token:      token,
-		TLSEnabled: cluster.Spec.Server.TLS.Enabled,
+		TLSEnabled: tlsEnabled,
 		Timeout:    30 * time.Second,
 	}
 
 	// If TLS is enabled, get the CA cert
-	if cluster.Spec.Server.TLS.Enabled && cluster.Spec.Server.TLS.SecretName != "" {
+	if tlsEnabled && cluster.Spec.Server.TLS.SecretName != "" {
 		tlsSecret := &corev1.Secret{}
 		err := p.Client.Get(ctx, types.NamespacedName{
 			Name:      cluster.Spec.Server.TLS.SecretName,
@@ -316,7 +278,7 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *
 	}
 
 	// Try internal service first, fall back to LoadBalancer
-	cfg.Address = fmt.Sprintf("%s://%s-internal.%s.svc:4646", scheme, cluster.Name, cluster.Namespace)
+	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
 
 	nomadClient, err := nomad.NewClient(cfg)
 	if err != nil {
@@ -324,13 +286,14 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *
 	}
 
 	err = nomadClient.CreateACLPolicy(token, "anonymous", "Allow anonymous read access for cluster visibility", nomad.AnonymousPolicyRules)
-	if err != nil && !isNetworkError(err) {
+	if err != nil && !nomad.IsNetworkError(err) {
 		return err
 	}
 
 	// If internal service failed with network error, try LoadBalancer
-	if err != nil && p.AdvertiseAddress != "" {
-		cfg.Address = fmt.Sprintf("%s://%s:4646", scheme, p.AdvertiseAddress)
+	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+	if err != nil && loadBalancerAddress != "" {
+		cfg.Address = loadBalancerAddress
 		nomadClient, err = nomad.NewClient(cfg)
 		if err != nil {
 			return fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", err)

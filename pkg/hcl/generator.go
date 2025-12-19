@@ -302,7 +302,7 @@ snapshot_agent {
   snapshot {
     interval         = "{{ .SnapshotInterval }}"
     retain           = {{ .SnapshotRetain }}
-    stale_reads      = false
+    stale            = false
     deregister_after = "8h"
   }
 

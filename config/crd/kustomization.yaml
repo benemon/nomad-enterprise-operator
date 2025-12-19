@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/nomad.hashicorp.com_nomadclusters.yaml
+- bases/nomad.hashicorp.com_nomadsnapshots.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -910,6 +910,452 @@ func TestSecretsPhase_S3Credentials_MissingKeys(t *testing.T) {
 }
 
 // =============================================================================
+// Inline License Tests
+// =============================================================================
+
+func TestSecretsPhase_InlineLicense(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.License.SecretName = ""
+	cluster.Spec.License.Value = "inline-license-content"
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	// Verify managed secret was created
+	createdSecret := &corev1.Secret{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-license",
+		Namespace: "test-ns",
+	}, createdSecret)
+	if err != nil {
+		t.Fatalf("Failed to get created license secret: %v", err)
+	}
+	if string(createdSecret.Data["license"]) != "inline-license-content" {
+		t.Errorf("Created secret data = %q, want %q", string(createdSecret.Data["license"]), "inline-license-content")
+	}
+	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+		t.Error("Created secret should have managed annotation")
+	}
+}
+
+func TestSecretsPhase_InlineLicense_Update(t *testing.T) {
+	// Create existing managed secret with old value
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-license",
+			Namespace: "test-ns",
+			Annotations: map[string]string{
+				"nomad.hashicorp.com/managed": "true",
+			},
+		},
+		Data: map[string][]byte{
+			"license": []byte("old-license-value"),
+		},
+	}
+
+	ctx := newTestPhaseContext(existingSecret)
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.License.SecretName = ""
+	cluster.Spec.License.Value = "new-license-value"
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	// Verify secret was updated
+	updatedSecret := &corev1.Secret{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-license",
+		Namespace: "test-ns",
+	}, updatedSecret)
+	if err != nil {
+		t.Fatalf("Failed to get updated license secret: %v", err)
+	}
+	if string(updatedSecret.Data["license"]) != "new-license-value" {
+		t.Errorf("Updated secret data = %q, want %q", string(updatedSecret.Data["license"]), "new-license-value")
+	}
+}
+
+func TestSecretsPhase_NoLicenseConfigured(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.License.SecretName = ""
+	cluster.Spec.License.Value = ""
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error == nil {
+		t.Error("Execute() should return error when no license configured")
+	}
+}
+
+// =============================================================================
+// Inline TLS Tests
+// =============================================================================
+
+func TestSecretsPhase_InlineTLS(t *testing.T) {
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nomad-license",
+			Namespace: "test-ns",
+		},
+		Data: map[string][]byte{
+			"license": []byte("license-content"),
+		},
+	}
+
+	ctx := newTestPhaseContext(licenseSecret)
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.Server.TLS.Enabled = true
+	cluster.Spec.Server.TLS.CACert = "inline-ca-cert"
+	cluster.Spec.Server.TLS.ServerCert = "inline-server-cert"
+	cluster.Spec.Server.TLS.ServerKey = "inline-server-key"
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	// Verify managed TLS secret was created
+	createdSecret := &corev1.Secret{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-tls",
+		Namespace: "test-ns",
+	}, createdSecret)
+	if err != nil {
+		t.Fatalf("Failed to get created TLS secret: %v", err)
+	}
+	if string(createdSecret.Data["ca.crt"]) != "inline-ca-cert" {
+		t.Errorf("ca.crt = %q, want %q", string(createdSecret.Data["ca.crt"]), "inline-ca-cert")
+	}
+	if string(createdSecret.Data["server.crt"]) != "inline-server-cert" {
+		t.Errorf("server.crt = %q, want %q", string(createdSecret.Data["server.crt"]), "inline-server-cert")
+	}
+	if string(createdSecret.Data["server.key"]) != "inline-server-key" {
+		t.Errorf("server.key = %q, want %q", string(createdSecret.Data["server.key"]), "inline-server-key")
+	}
+	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+		t.Error("Created TLS secret should have managed annotation")
+	}
+}
+
+func TestSecretsPhase_InlineTLS_PartialInline(t *testing.T) {
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nomad-license",
+			Namespace: "test-ns",
+		},
+		Data: map[string][]byte{
+			"license": []byte("license-content"),
+		},
+	}
+
+	ctx := newTestPhaseContext(licenseSecret)
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.Server.TLS.Enabled = true
+	cluster.Spec.Server.TLS.CACert = "inline-ca-cert"
+	// Missing serverCert and serverKey - should fail
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error == nil {
+		t.Error("Execute() should return error when TLS inline is partial (missing certs)")
+	}
+}
+
+// =============================================================================
+// Inline S3 Credentials Tests
+// =============================================================================
+
+func TestSecretsPhase_InlineS3Credentials(t *testing.T) {
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nomad-license",
+			Namespace: "test-ns",
+		},
+		Data: map[string][]byte{
+			"license": []byte("license-content"),
+		},
+	}
+
+	ctx := newTestPhaseContext(licenseSecret)
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.Server.Snapshot.Enabled = true
+	cluster.Spec.Server.Snapshot.S3.AccessKeyID = "AKIAIOSFODNN7EXAMPLE"
+	cluster.Spec.Server.Snapshot.S3.SecretAccessKey = "wJalrXUtnFEMI/K7MDENG"
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	// Verify managed S3 secret was created
+	createdSecret := &corev1.Secret{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-s3-credentials",
+		Namespace: "test-ns",
+	}, createdSecret)
+	if err != nil {
+		t.Fatalf("Failed to get created S3 credentials secret: %v", err)
+	}
+	if string(createdSecret.Data["access-key-id"]) != "AKIAIOSFODNN7EXAMPLE" {
+		t.Errorf("access-key-id = %q, want %q", string(createdSecret.Data["access-key-id"]), "AKIAIOSFODNN7EXAMPLE")
+	}
+	if string(createdSecret.Data["secret-access-key"]) != "wJalrXUtnFEMI/K7MDENG" {
+		t.Errorf("secret-access-key = %q, want %q", string(createdSecret.Data["secret-access-key"]), "wJalrXUtnFEMI/K7MDENG")
+	}
+	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+		t.Error("Created S3 secret should have managed annotation")
+	}
+}
+
+func TestSecretsPhase_S3_NoCredentials_IAMRole(t *testing.T) {
+	licenseSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nomad-license",
+			Namespace: "test-ns",
+		},
+		Data: map[string][]byte{
+			"license": []byte("license-content"),
+		},
+	}
+
+	ctx := newTestPhaseContext(licenseSecret)
+	phase := NewSecretsPhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.Server.Snapshot.Enabled = true
+	// No credentials specified - should assume IAM role authentication
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+}
+
+// =============================================================================
+// Helper Function Tests
+// =============================================================================
+
+func TestGetLicenseSecretName(t *testing.T) {
+	tests := []struct {
+		name     string
+		cluster  *nomadv1alpha1.NomadCluster
+		expected string
+	}{
+		{
+			name: "inline value",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					License: nomadv1alpha1.LicenseSpec{
+						Value: "license-content",
+					},
+				},
+			},
+			expected: "my-cluster-license",
+		},
+		{
+			name: "external secret",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					License: nomadv1alpha1.LicenseSpec{
+						SecretName: "external-license",
+					},
+				},
+			},
+			expected: "external-license",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetLicenseSecretName(tt.cluster)
+			if got != tt.expected {
+				t.Errorf("GetLicenseSecretName() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetTLSSecretName(t *testing.T) {
+	tests := []struct {
+		name     string
+		cluster  *nomadv1alpha1.NomadCluster
+		expected string
+	}{
+		{
+			name: "inline certs",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					Server: nomadv1alpha1.ServerSpec{
+						TLS: nomadv1alpha1.TLSSpec{
+							Enabled:    true,
+							CACert:     "ca-cert",
+							ServerCert: "server-cert",
+							ServerKey:  "server-key",
+						},
+					},
+				},
+			},
+			expected: "my-cluster-tls",
+		},
+		{
+			name: "external secret",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					Server: nomadv1alpha1.ServerSpec{
+						TLS: nomadv1alpha1.TLSSpec{
+							Enabled:    true,
+							SecretName: "external-tls",
+						},
+					},
+				},
+			},
+			expected: "external-tls",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetTLSSecretName(tt.cluster)
+			if got != tt.expected {
+				t.Errorf("GetTLSSecretName() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetS3CredentialsSecretName(t *testing.T) {
+	tests := []struct {
+		name     string
+		cluster  *nomadv1alpha1.NomadCluster
+		expected string
+	}{
+		{
+			name: "inline credentials",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					Server: nomadv1alpha1.ServerSpec{
+						Snapshot: nomadv1alpha1.SnapshotSpec{
+							Enabled: true,
+							S3: nomadv1alpha1.S3Spec{
+								AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
+								SecretAccessKey: "secret",
+							},
+						},
+					},
+				},
+			},
+			expected: "my-cluster-s3-credentials",
+		},
+		{
+			name: "external secret",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					Server: nomadv1alpha1.ServerSpec{
+						Snapshot: nomadv1alpha1.SnapshotSpec{
+							Enabled: true,
+							S3: nomadv1alpha1.S3Spec{
+								CredentialsSecretName: "external-s3-creds",
+							},
+						},
+					},
+				},
+			},
+			expected: "external-s3-creds",
+		},
+		{
+			name: "no credentials (IAM)",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					Server: nomadv1alpha1.ServerSpec{
+						Snapshot: nomadv1alpha1.SnapshotSpec{
+							Enabled: true,
+						},
+					},
+				},
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetS3CredentialsSecretName(tt.cluster)
+			if got != tt.expected {
+				t.Errorf("GetS3CredentialsSecretName() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetGossipSecretName(t *testing.T) {
+	tests := []struct {
+		name     string
+		cluster  *nomadv1alpha1.NomadCluster
+		expected string
+	}{
+		{
+			name: "external secret",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec: nomadv1alpha1.NomadClusterSpec{
+					Gossip: nomadv1alpha1.GossipSpec{
+						SecretName: "external-gossip",
+					},
+				},
+			},
+			expected: "external-gossip",
+		},
+		{
+			name: "auto-generated",
+			cluster: &nomadv1alpha1.NomadCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
+				Spec:       nomadv1alpha1.NomadClusterSpec{},
+			},
+			expected: "my-cluster-gossip",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetGossipSecretName(tt.cluster)
+			if got != tt.expected {
+				t.Errorf("GetGossipSecretName() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
 // RoutePhase Tests
 // =============================================================================
 
