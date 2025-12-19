@@ -174,7 +174,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			// First reconcile - adds finalizer
 			result, err := reconcileCluster(ctx, namespacedName)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.Requeue).To(BeTrue())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
 
 			// Continue reconciling until we get a stable state
 			for i := 0; i < 10; i++ {
@@ -182,7 +182,7 @@ var _ = Describe("NomadCluster Controller", func() {
 				if err != nil {
 					break
 				}
-				if !result.Requeue && result.RequeueAfter == 30*time.Second {
+				if result.RequeueAfter == 30*time.Second {
 					// Default requeue interval means reconciliation completed
 					break
 				}
@@ -523,7 +523,7 @@ var _ = Describe("NomadCluster Controller", func() {
 
 			// Verify key is valid base64 and correct length (32 bytes encoded)
 			gossipKey := string(gossipSecret.Data["gossip-key"])
-			Expect(len(gossipKey)).To(Equal(44)) // 32 bytes in base64 = 44 chars
+			Expect(gossipKey).To(HaveLen(44)) // 32 bytes in base64 = 44 chars
 
 			By("Verifying owner reference is set")
 			Expect(gossipSecret.OwnerReferences).NotTo(BeEmpty())

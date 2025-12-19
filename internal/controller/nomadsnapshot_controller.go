@@ -84,7 +84,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, snapshot); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Resolve cluster reference
@@ -311,7 +311,7 @@ func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *
 	log := logf.FromContext(ctx)
 
 	// Create nomad client
-	client, err := nomad.NewClient(nomad.ClientConfig{
+	nomadClient, err := nomad.NewClient(nomad.ClientConfig{
 		Address: nomadAddr,
 	})
 	if err != nil {
@@ -320,7 +320,7 @@ func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *
 
 	// If we already have a token accessor ID, try to look up the token
 	if snapshot.Status.TokenAccessorID != "" {
-		token, err := client.GetACLToken(bootstrapToken, snapshot.Status.TokenAccessorID)
+		token, err := nomadClient.GetACLToken(bootstrapToken, snapshot.Status.TokenAccessorID)
 		if err == nil && token != nil {
 			log.Info("Using existing snapshot agent token", "accessor", snapshot.Status.TokenAccessorID)
 			return token.SecretID, nil
@@ -331,7 +331,7 @@ func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *
 
 	// Create new management token
 	tokenName := fmt.Sprintf("snapshot-agent-%s-%s", snapshot.Namespace, snapshot.Name)
-	newToken, err := client.CreateACLToken(bootstrapToken, tokenName, "management")
+	newToken, err := nomadClient.CreateACLToken(bootstrapToken, tokenName, "management")
 	if err != nil {
 		return "", fmt.Errorf("failed to create management token: %w", err)
 	}
@@ -416,14 +416,14 @@ func (r *NomadSnapshotReconciler) deleteSnapshotToken(ctx context.Context, snaps
 
 // tryDeleteToken attempts to delete a token using a specific address
 func (r *NomadSnapshotReconciler) tryDeleteToken(accessorID, nomadAddr, bootstrapToken string) error {
-	client, err := nomad.NewClient(nomad.ClientConfig{
+	nomadClient, err := nomad.NewClient(nomad.ClientConfig{
 		Address: nomadAddr,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client: %w", err)
 	}
 
-	if err := client.DeleteACLToken(bootstrapToken, accessorID); err != nil {
+	if err := nomadClient.DeleteACLToken(bootstrapToken, accessorID); err != nil {
 		return fmt.Errorf("failed to delete token: %w", err)
 	}
 

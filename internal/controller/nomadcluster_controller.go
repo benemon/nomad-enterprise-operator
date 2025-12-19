@@ -95,7 +95,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if err := r.Update(ctx, cluster); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Initialize status if needed

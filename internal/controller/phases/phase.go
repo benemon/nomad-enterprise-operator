@@ -105,9 +105,9 @@ type PhaseContext struct {
 }
 
 // NewPhaseContext creates a new phase context.
-func NewPhaseContext(client client.Client, scheme *runtime.Scheme, log logr.Logger, restConfig *rest.Config) *PhaseContext {
+func NewPhaseContext(k8sClient client.Client, scheme *runtime.Scheme, log logr.Logger, restConfig *rest.Config) *PhaseContext {
 	return &PhaseContext{
-		Client:     client,
+		Client:     k8sClient,
 		Scheme:     scheme,
 		Log:        log,
 		RESTConfig: restConfig,

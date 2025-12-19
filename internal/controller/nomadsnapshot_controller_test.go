@@ -117,8 +117,8 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("First reconcile to add finalizer")
 			result, err := reconcileSnapshot(ctx, nsName)
 			Expect(err).NotTo(HaveOccurred())
-			// First reconcile adds finalizer and requeues
-			Expect(result.Requeue).To(BeTrue())
+			// First reconcile adds finalizer and requeues after 1 second
+			Expect(result.RequeueAfter).To(Equal(time.Second))
 
 			By("Second reconcile to check cluster")
 			result, err = reconcileSnapshot(ctx, nsName)
@@ -184,8 +184,8 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("First reconcile to add finalizer")
 			result, err := reconcileSnapshot(ctx, nsName)
 			Expect(err).NotTo(HaveOccurred())
-			// First reconcile adds finalizer and requeues
-			Expect(result.Requeue).To(BeTrue())
+			// First reconcile adds finalizer and requeues after 1 second
+			Expect(result.RequeueAfter).To(Equal(time.Second))
 
 			By("Second reconcile to check ACL bootstrap status")
 			result, err = reconcileSnapshot(ctx, nsName)

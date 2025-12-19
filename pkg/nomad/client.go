@@ -316,7 +316,7 @@ func (c *Client) GetLicense(ctx context.Context, token string) (*LicenseResult, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get license: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -365,7 +365,7 @@ func (c *Client) GetAutopilotHealth(ctx context.Context, token string) (*Autopil
 	if err != nil {
 		return nil, fmt.Errorf("failed to get autopilot health: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

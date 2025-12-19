@@ -292,7 +292,7 @@ func TestGetLicense(t *testing.T) {
 						"Features":        []string{"Namespaces", "Sentinel"},
 					},
 				}
-				json.NewEncoder(w).Encode(resp)
+				_ = json.NewEncoder(w).Encode(resp)
 			},
 			token:   "test-token",
 			wantErr: false,
@@ -307,7 +307,7 @@ func TestGetLicense(t *testing.T) {
 			name: "unauthorized",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusUnauthorized)
-				w.Write([]byte("unauthorized"))
+				_, _ = w.Write([]byte("unauthorized"))
 			},
 			token:   "bad-token",
 			wantErr: true,
@@ -316,7 +316,7 @@ func TestGetLicense(t *testing.T) {
 			name: "server error",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte("internal error"))
+				_, _ = w.Write([]byte("internal error"))
 			},
 			token:   "test-token",
 			wantErr: true,
@@ -324,7 +324,7 @@ func TestGetLicense(t *testing.T) {
 		{
 			name: "invalid JSON response",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte("not json"))
+				_, _ = w.Write([]byte("not json"))
 			},
 			token:   "test-token",
 			wantErr: true,
@@ -371,7 +371,7 @@ func TestGetLicenseContextCancellation(t *testing.T) {
 				"LicenseID": "license-123",
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -438,7 +438,7 @@ func TestGetAutopilotHealth(t *testing.T) {
 						},
 					},
 				}
-				json.NewEncoder(w).Encode(resp)
+				_ = json.NewEncoder(w).Encode(resp)
 			},
 			token:   "test-token",
 			wantErr: false,
@@ -469,7 +469,7 @@ func TestGetAutopilotHealth(t *testing.T) {
 						},
 					},
 				}
-				json.NewEncoder(w).Encode(resp)
+				_ = json.NewEncoder(w).Encode(resp)
 			},
 			token:   "test-token",
 			wantErr: false,
@@ -532,7 +532,7 @@ func TestGetAutopilotHealthContextCancellation(t *testing.T) {
 			"Healthy": true,
 			"Servers": []map[string]interface{}{},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
