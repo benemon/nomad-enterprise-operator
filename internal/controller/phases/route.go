@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -113,7 +114,7 @@ func (p *RoutePhase) buildRoute(cluster *nomadv1alpha1.NomadCluster) *routev1.Ro
 			To: routev1.RouteTargetReference{
 				Kind:   "Service",
 				Name:   cluster.Name + "-internal",
-				Weight: ptr(int32(100)),
+				Weight: ptr.To(int32(100)),
 			},
 			Port: &routev1.RoutePort{
 				TargetPort: intstr.FromString("http"),
@@ -149,8 +150,4 @@ func (p *RoutePhase) routeNeedsUpdate(existing, desired *routev1.Route) bool {
 		return true
 	}
 	return false
-}
-
-func ptr[T any](v T) *T {
-	return &v
 }

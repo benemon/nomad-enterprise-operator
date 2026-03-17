@@ -19,11 +19,15 @@ package phases
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -132,4 +136,57 @@ func GetSelectorLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
 		"app":                        "nomad",
 		"component":                  "server",
 	}
+}
+
+// BuildClientConfig assembles a nomad.ClientConfig for the given cluster,
+// reading the TLS CA certificate from the cluster's TLS secret if TLS is enabled.
+func (pc *PhaseContext) BuildClientConfig(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string) (nomad.ClientConfig, error) {
+	tlsEnabled := cluster.Spec.Server.TLS.Enabled
+
+	cfg := nomad.ClientConfig{
+		Token:      token,
+		TLSEnabled: tlsEnabled,
+		Timeout:    timeout,
+	}
+
+	if tlsEnabled {
+		tlsSecretName := getTLSSecretName(cluster)
+		if tlsSecretName != "" {
+			tlsSecret := &corev1.Secret{}
+			err := pc.Client.Get(ctx, types.NamespacedName{
+				Name:      tlsSecretName,
+				Namespace: cluster.Namespace,
+			}, tlsSecret)
+			if err != nil {
+				return cfg, fmt.Errorf("failed to get TLS secret: %w", err)
+			}
+			keys := cluster.Spec.Server.TLS.ResolvedTLSKeys()
+			cfg.CACert = tlsSecret.Data[keys.CACert]
+		}
+	}
+
+	return cfg, nil
+}
+
+// CheckPodsReady returns true if at least one pod matching the cluster's selector labels is ready.
+func (pc *PhaseContext) CheckPodsReady(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (bool, error) {
+	podList := &corev1.PodList{}
+	if err := pc.Client.List(ctx, podList,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(GetSelectorLabels(cluster)),
+	); err != nil {
+		return false, err
+	}
+
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodRunning {
+			for _, cond := range pod.Status.Conditions {
+				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	return false, nil
 }

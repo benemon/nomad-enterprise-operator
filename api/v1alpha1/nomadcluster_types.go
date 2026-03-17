@@ -22,7 +22,6 @@ import (
 )
 
 // NomadClusterSpec defines the desired state of NomadCluster.
-// +kubebuilder:validation:XValidation:rule="!has(self.server) || !has(self.server.snapshot) || !self.server.snapshot.enabled || size(self.server.snapshot.s3.bucket) > 0",message="server.snapshot.s3.bucket is required when server.snapshot.enabled is true"
 type NomadClusterSpec struct {
 	// Replicas is the number of Nomad server replicas (should be 1, 3, or 5)
 	// +kubebuilder:validation:Enum=1;3;5
@@ -233,33 +232,6 @@ type MonitoringSpec struct {
 	// PrometheusRulesEnabled determines if PrometheusRule is created
 	// +kubebuilder:default=false
 	PrometheusRulesEnabled bool `json:"prometheusRulesEnabled,omitempty"`
-
-	// ServiceMonitor configuration (DEPRECATED - use flattened fields above)
-	// +optional
-	ServiceMonitor ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
-
-	// PrometheusRule configuration (DEPRECATED - use prometheusRulesEnabled)
-	// +optional
-	PrometheusRule PrometheusRuleSpec `json:"prometheusRule,omitempty"`
-}
-
-// ServiceMonitorSpec defines ServiceMonitor configuration (DEPRECATED)
-type ServiceMonitorSpec struct {
-	// Interval for scraping metrics (DEPRECATED - use MonitoringSpec.ScrapeInterval)
-	Interval string `json:"interval,omitempty"`
-
-	// ScrapeTimeout for metric collection (DEPRECATED - use MonitoringSpec.ScrapeTimeout)
-	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
-
-	// AdditionalLabels to add to ServiceMonitor (DEPRECATED - use MonitoringSpec.AdditionalLabels)
-	// +optional
-	AdditionalLabels map[string]string `json:"additionalLabels,omitempty"`
-}
-
-// PrometheusRuleSpec defines PrometheusRule configuration (DEPRECATED)
-type PrometheusRuleSpec struct {
-	// Enabled determines if PrometheusRule is created (DEPRECATED - use MonitoringSpec.PrometheusRulesEnabled)
-	Enabled bool `json:"enabled,omitempty"`
 }
 
 // ServerSpec defines Nomad server configuration
@@ -279,10 +251,6 @@ type ServerSpec struct {
 	// Audit logging configuration
 	// +optional
 	Audit AuditSpec `json:"audit,omitempty"`
-
-	// Snapshot agent configuration
-	// +optional
-	Snapshot SnapshotSpec `json:"snapshot,omitempty"`
 
 	// ExtraConfig is raw HCL to append to server configuration
 	// +optional
@@ -309,10 +277,17 @@ type TLSSpec struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// SecretName containing TLS certificates (ca.crt, server.crt, server.key).
+	// SecretName containing TLS certificates.
 	// Mutually exclusive with inline certificates.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// SecretKeys allows overriding the expected key names within the TLS secret.
+	// Useful when the secret is produced by cert-manager or another provider
+	// that uses different key names (e.g., tls.crt instead of server.crt).
+	// Only used when SecretName is specified.
+	// +optional
+	SecretKeys TLSSecretKeys `json:"secretKeys,omitempty"`
 
 	// CACert is the CA certificate in PEM format.
 	// The operator will create and manage a secret from inline certificates.
@@ -329,6 +304,38 @@ type TLSSpec struct {
 	// Must be provided together with CACert and ServerCert.
 	// +optional
 	ServerKey string `json:"serverKey,omitempty"`
+}
+
+// TLSSecretKeys defines the key names within a TLS secret.
+// Defaults match the operator's managed secret layout (ca.crt, server.crt, server.key).
+type TLSSecretKeys struct {
+	// CACert is the key name for the CA certificate in the TLS secret.
+	// +kubebuilder:default="ca.crt"
+	CACert string `json:"caCert,omitempty"`
+
+	// ServerCert is the key name for the server certificate in the TLS secret.
+	// +kubebuilder:default="server.crt"
+	ServerCert string `json:"serverCert,omitempty"`
+
+	// ServerKey is the key name for the server private key in the TLS secret.
+	// +kubebuilder:default="server.key"
+	ServerKey string `json:"serverKey,omitempty"`
+}
+
+// ResolvedTLSKeys returns the effective secret key names, applying defaults
+// for any empty values.
+func (t TLSSpec) ResolvedTLSKeys() TLSSecretKeys {
+	keys := t.SecretKeys
+	if keys.CACert == "" {
+		keys.CACert = "ca.crt"
+	}
+	if keys.ServerCert == "" {
+		keys.ServerCert = "server.crt"
+	}
+	if keys.ServerKey == "" {
+		keys.ServerKey = "server.key"
+	}
+	return keys
 }
 
 // AutopilotSpec defines Autopilot configuration
@@ -386,69 +393,8 @@ type AuditSpec struct {
 	StorageClassName string `json:"storageClassName,omitempty"`
 }
 
-// SnapshotSpec defines snapshot agent configuration
-type SnapshotSpec struct {
-	// Enabled determines if snapshots are enabled
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-
-	// Interval between snapshots
-	// +kubebuilder:default="1h"
-	Interval string `json:"interval,omitempty"`
-
-	// Retain number of snapshots
-	// +kubebuilder:default=24
-	Retain int `json:"retain,omitempty"`
-
-	// S3 configuration for snapshot storage
-	// +optional
-	S3 S3Spec `json:"s3,omitempty"`
-}
-
-// S3Spec defines S3-compatible storage configuration.
-// Credentials can be provided via CredentialsSecretName or inline (AccessKeyID + SecretAccessKey).
-// +kubebuilder:validation:XValidation:rule="!((has(self.credentialsSecretName) && size(self.credentialsSecretName) > 0) && (has(self.accessKeyId) && size(self.accessKeyId) > 0))",message="credentialsSecretName and inline credentials are mutually exclusive"
-type S3Spec struct {
-	// Endpoint URL for S3-compatible storage
-	// +optional
-	Endpoint string `json:"endpoint,omitempty"`
-
-	// Bucket name
-	// +optional
-	Bucket string `json:"bucket,omitempty"`
-
-	// Region
-	// +kubebuilder:default="us-east-1"
-	Region string `json:"region,omitempty"`
-
-	// ForcePathStyle enables path-style addressing
-	// +kubebuilder:default=true
-	ForcePathStyle bool `json:"forcePathStyle,omitempty"`
-
-	// CredentialsSecretName is the name of an existing secret containing access-key-id and secret-access-key.
-	// Mutually exclusive with inline credentials.
-	// +optional
-	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
-
-	// AccessKeyID is the S3 access key ID provided directly.
-	// The operator will create and manage a secret from inline credentials.
-	// Must be provided together with SecretAccessKey.
-	// +optional
-	AccessKeyID string `json:"accessKeyId,omitempty"`
-
-	// SecretAccessKey is the S3 secret access key provided directly.
-	// Must be provided together with AccessKeyID.
-	// +optional
-	SecretAccessKey string `json:"secretAccessKey,omitempty"`
-}
-
 // PersistenceSpec defines storage configuration
 type PersistenceSpec struct {
-	// Enabled is DEPRECATED - persistence is now inferred from Size being non-empty.
-	// If Size is set, persistence is enabled. This field is ignored.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
 	// StorageClassName for the PVC (uses cluster default if empty)
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
@@ -456,25 +402,6 @@ type PersistenceSpec struct {
 	// Size of the data volume. If set, persistence is enabled.
 	// Set to empty string to disable persistence (use emptyDir).
 	// +kubebuilder:default="10Gi"
-	Size string `json:"size,omitempty"`
-
-	// Audit volume configuration (DEPRECATED - use server.audit.size instead)
-	// +optional
-	Audit AuditPersistenceSpec `json:"audit,omitempty"`
-}
-
-// AuditPersistenceSpec defines audit log storage
-type AuditPersistenceSpec struct {
-	// Enabled determines if separate audit volume is used
-	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
-	// StorageClassName for the audit PVC
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-
-	// Size of the audit volume
-	// +kubebuilder:default="5Gi"
 	Size string `json:"size,omitempty"`
 }
 
@@ -514,7 +441,6 @@ const (
 	ClusterPhasePending  ClusterPhase = "Pending"
 	ClusterPhaseCreating ClusterPhase = "Creating"
 	ClusterPhaseRunning  ClusterPhase = "Running"
-	ClusterPhaseUpdating ClusterPhase = "Updating"
 	ClusterPhaseFailed   ClusterPhase = "Failed"
 )
 
@@ -621,7 +547,7 @@ type ServerStatus struct {
 // NomadClusterStatus defines the observed state of NomadCluster.
 type NomadClusterStatus struct {
 	// Phase represents the current phase of the cluster
-	// +kubebuilder:validation:Enum=Pending;Creating;Running;Updating;Failed
+	// +kubebuilder:validation:Enum=Pending;Creating;Running;Failed
 	Phase ClusterPhase `json:"phase,omitempty"`
 
 	// Conditions represent the latest observations of the cluster state

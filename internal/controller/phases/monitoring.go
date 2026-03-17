@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -56,10 +57,8 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 		return result
 	}
 
-	// Create PrometheusRule if enabled (check new field first, then deprecated)
-	prometheusRulesEnabled := cluster.Spec.OpenShift.Monitoring.PrometheusRulesEnabled ||
-		cluster.Spec.OpenShift.Monitoring.PrometheusRule.Enabled
-	if prometheusRulesEnabled {
+	// Create PrometheusRule if enabled
+	if cluster.Spec.OpenShift.Monitoring.PrometheusRulesEnabled {
 		if result := p.ensurePrometheusRule(ctx, cluster); result.Error != nil || result.Requeue {
 			return result
 		}
@@ -71,30 +70,18 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 func (p *MonitoringPhase) ensureServiceMonitor(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	monitoring := cluster.Spec.OpenShift.Monitoring
 
-	// Use flattened fields first, fall back to deprecated nested fields
 	interval := monitoring.ScrapeInterval
-	if interval == "" {
-		interval = monitoring.ServiceMonitor.Interval
-	}
 	if interval == "" {
 		interval = "30s"
 	}
 
 	scrapeTimeout := monitoring.ScrapeTimeout
 	if scrapeTimeout == "" {
-		scrapeTimeout = monitoring.ServiceMonitor.ScrapeTimeout
-	}
-	if scrapeTimeout == "" {
 		scrapeTimeout = "10s"
 	}
 
-	// Build labels - prefer flattened field, fall back to deprecated
 	labels := GetLabels(cluster)
-	additionalLabels := monitoring.AdditionalLabels
-	if len(additionalLabels) == 0 {
-		additionalLabels = monitoring.ServiceMonitor.AdditionalLabels
-	}
-	for k, v := range additionalLabels {
+	for k, v := range monitoring.AdditionalLabels {
 		labels[k] = v
 	}
 
@@ -170,7 +157,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadJobFailed",
 							Expr:  intstr.FromString(`nomad_nomad_job_summary_failed{exported_job!~".*periodic.*"} > 0`),
-							For:   ptr(monitoringv1.Duration("5m")),
+							For:   ptr.To(monitoringv1.Duration("5m")),
 							Labels: map[string]string{
 								"severity": "warning",
 							},
@@ -182,7 +169,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadClusterLeaderLost",
 							Expr:  intstr.FromString(`changes(nomad_raft_leader_lastContact_count[5m]) > 5`),
-							For:   ptr(monitoringv1.Duration("2m")),
+							For:   ptr.To(monitoringv1.Duration("2m")),
 							Labels: map[string]string{
 								"severity": "critical",
 							},
@@ -194,7 +181,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadServerDown",
 							Expr:  intstr.FromString(`up{job=~".*nomad.*"} == 0`),
-							For:   ptr(monitoringv1.Duration("1m")),
+							For:   ptr.To(monitoringv1.Duration("1m")),
 							Labels: map[string]string{
 								"severity": "critical",
 							},
@@ -206,7 +193,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadHighMemoryUsage",
 							Expr:  intstr.FromString(`nomad_runtime_alloc_bytes / nomad_runtime_sys_bytes * 100 > 90`),
-							For:   ptr(monitoringv1.Duration("10m")),
+							For:   ptr.To(monitoringv1.Duration("10m")),
 							Labels: map[string]string{
 								"severity": "warning",
 							},
@@ -218,7 +205,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadRaftBehind",
 							Expr:  intstr.FromString(`nomad_raft_commitNumLogs - nomad_raft_appliedIndex > 1000`),
-							For:   ptr(monitoringv1.Duration("5m")),
+							For:   ptr.To(monitoringv1.Duration("5m")),
 							Labels: map[string]string{
 								"severity": "warning",
 							},
@@ -230,7 +217,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadLicenseExpiringSoon",
 							Expr:  intstr.FromString(`(nomad_license_expiration_time_epoch - time()) / 86400 < 30 and (nomad_license_expiration_time_epoch - time()) > 0`),
-							For:   ptr(monitoringv1.Duration("1h")),
+							For:   ptr.To(monitoringv1.Duration("1h")),
 							Labels: map[string]string{
 								"severity": "warning",
 							},
@@ -242,7 +229,7 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 						{
 							Alert: "NomadLicenseExpired",
 							Expr:  intstr.FromString(`nomad_license_expiration_time_epoch - time() < 0`),
-							For:   ptr(monitoringv1.Duration("5m")),
+							For:   ptr.To(monitoringv1.Duration("5m")),
 							Labels: map[string]string{
 								"severity": "critical",
 							},

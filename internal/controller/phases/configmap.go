@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"sort"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -91,7 +92,7 @@ func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	}
 
 	// Auto-remediate: Update if content changed (handles config drift)
-	if !configMapDataEqual(existing.Data, cm.Data) {
+	if !maps.Equal(existing.Data, cm.Data) {
 		existing.Data = cm.Data
 		p.Log.Info("Auto-remediating ConfigMap drift", "name", cm.Name,
 			"reason", "ConfigMap content differs from desired state")
@@ -119,16 +120,4 @@ func ConfigChecksum(data map[string]string) string {
 		h.Write([]byte(data[k]))
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))[:16]
-}
-
-func configMapDataEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
 }

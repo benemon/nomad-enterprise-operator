@@ -649,10 +649,5 @@ func (r *NomadClusterReconciler) clusterReferencesSecret(cluster *nomadv1alpha1.
 		return true
 	}
 
-	// Check S3 credentials secret (external reference only)
-	if cluster.Spec.Server.Snapshot.Enabled && cluster.Spec.Server.Snapshot.S3.CredentialsSecretName == secretName {
-		return true
-	}
-
 	return false
 }

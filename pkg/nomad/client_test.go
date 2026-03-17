@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -577,21 +578,8 @@ func TestAnonymousPolicyRules(t *testing.T) {
 	}
 
 	for _, section := range expectedSections {
-		if !containsString(AnonymousPolicyRules, section) {
+		if !strings.Contains(AnonymousPolicyRules, section) {
 			t.Errorf("AnonymousPolicyRules missing expected section: %s", section)
 		}
 	}
-}
-
-func containsString(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStringHelper(s, substr))
-}
-
-func containsStringHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

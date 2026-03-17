@@ -78,18 +78,14 @@ type templateData struct {
 	GossipKey              string
 	ACLEnabled             bool
 	TLSEnabled             bool
+	TLSCAFile              string
+	TLSCertFile            string
+	TLSKeyFile             string
 	AuditEnabled           bool
 	AuditDeliveryGuarantee string
 	AuditFormat            string
 	AuditRotateDur         string
 	AuditRotateMax         int
-	SnapshotEnabled        bool
-	SnapshotInterval       string
-	SnapshotRetain         int
-	S3Endpoint             string
-	S3Bucket               string
-	S3Region               string
-	S3ForcePathStyle       bool
 	Autopilot              autopilotData
 }
 
@@ -156,21 +152,8 @@ func (g *Generator) buildTemplateData() templateData {
 		auditRotateMax = 15
 	}
 
-	// Snapshot defaults
-	snapshotInterval := cluster.Spec.Server.Snapshot.Interval
-	if snapshotInterval == "" {
-		snapshotInterval = "1h"
-	}
-
-	snapshotRetain := cluster.Spec.Server.Snapshot.Retain
-	if snapshotRetain == 0 {
-		snapshotRetain = 24
-	}
-
-	s3Region := cluster.Spec.Server.Snapshot.S3.Region
-	if s3Region == "" {
-		s3Region = "us-east-1"
-	}
+	// Resolve TLS key names for file paths in the volume mount
+	tlsKeys := cluster.Spec.Server.TLS.ResolvedTLSKeys()
 
 	return templateData{
 		Region:                 region,
@@ -183,18 +166,14 @@ func (g *Generator) buildTemplateData() templateData {
 		GossipKey:              g.gossipKey,
 		ACLEnabled:             cluster.Spec.Server.ACL.Enabled,
 		TLSEnabled:             cluster.Spec.Server.TLS.Enabled,
+		TLSCAFile:              "/nomad/tls/" + tlsKeys.CACert,
+		TLSCertFile:            "/nomad/tls/" + tlsKeys.ServerCert,
+		TLSKeyFile:             "/nomad/tls/" + tlsKeys.ServerKey,
 		AuditEnabled:           cluster.Spec.Server.Audit.Enabled,
 		AuditDeliveryGuarantee: auditDeliveryGuarantee,
 		AuditFormat:            auditFormat,
 		AuditRotateDur:         auditRotateDur,
 		AuditRotateMax:         auditRotateMax,
-		SnapshotEnabled:        cluster.Spec.Server.Snapshot.Enabled,
-		SnapshotInterval:       snapshotInterval,
-		SnapshotRetain:         snapshotRetain,
-		S3Endpoint:             cluster.Spec.Server.Snapshot.S3.Endpoint,
-		S3Bucket:               cluster.Spec.Server.Snapshot.S3.Bucket,
-		S3Region:               s3Region,
-		S3ForcePathStyle:       cluster.Spec.Server.Snapshot.S3.ForcePathStyle,
 		Autopilot: autopilotData{
 			CleanupDeadServers:      cluster.Spec.Server.Autopilot.CleanupDeadServers,
 			LastContactThreshold:    lastContactThreshold,
@@ -272,9 +251,9 @@ tls {
   http = true
   rpc  = true
 
-  ca_file   = "/nomad/tls/ca.crt"
-  cert_file = "/nomad/tls/server.crt"
-  key_file  = "/nomad/tls/server.key"
+  ca_file   = "{{ .TLSCAFile }}"
+  cert_file = "{{ .TLSCertFile }}"
+  key_file  = "{{ .TLSKeyFile }}"
 
   verify_server_hostname = true
   verify_https_client    = true
@@ -292,27 +271,6 @@ audit {
     delivery_guarantee = "{{ .AuditDeliveryGuarantee }}"
     rotate_duration    = "{{ .AuditRotateDur }}"
     rotate_max_files   = {{ .AuditRotateMax }}
-  }
-}
-{{ end }}
-
-{{ if .SnapshotEnabled -}}
-# Snapshot agent configuration
-snapshot_agent {
-  snapshot {
-    interval         = "{{ .SnapshotInterval }}"
-    retain           = {{ .SnapshotRetain }}
-    stale            = false
-    deregister_after = "8h"
-  }
-
-  aws_s3 {
-    endpoint                       = "{{ .S3Endpoint }}"
-    bucket                         = "{{ .S3Bucket }}"
-    region                         = "{{ .S3Region }}"
-    s3_force_path_style            = {{ .S3ForcePathStyle }}
-    disable_ssl                    = false
-    skip_head_object_before_upload = true
   }
 }
 {{ end }}

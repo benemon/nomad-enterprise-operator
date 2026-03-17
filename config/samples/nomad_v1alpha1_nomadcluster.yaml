@@ -32,19 +32,23 @@ spec:
         insecureEdgeTerminationPolicy: Redirect
     monitoring:
       enabled: true
-      serviceMonitor:
-        interval: 30s
-        scrapeTimeout: 10s
-      prometheusRule:
-        enabled: true
+      scrapeInterval: 30s
+      scrapeTimeout: 10s
+      prometheusRulesEnabled: true
   server:
     acl:
       enabled: true  # Auto-bootstrapped by operator
     tls:
       enabled: false
       # When enabled, provide certificates via:
-      # Option 1: Reference an existing secret (ca.crt, server.crt, server.key)
+      # Option 1: Reference an existing secret (default keys: ca.crt, server.crt, server.key)
       # secretName: nomad-tls
+      # Option 1b: With cert-manager or other providers that use different key names:
+      # secretName: nomad-tls
+      # secretKeys:
+      #   caCert: ca.crt        # default: ca.crt
+      #   serverCert: tls.crt   # default: server.crt
+      #   serverKey: tls.key    # default: server.key
       # Option 2: Provide inline certificates (operator creates/manages secret)
       # caCert: |
       #   -----BEGIN CERTIFICATE-----
@@ -68,28 +72,8 @@ spec:
       format: json
       rotateDuration: "24h"
       rotateMaxFiles: 15
-    # Snapshot configuration (S3 bucket required when enabled)
-    # snapshot:
-    #   enabled: true
-    #   interval: "1h"
-    #   retain: 24
-    #   s3:
-    #     bucket: my-snapshot-bucket
-    #     region: us-east-1
-    #     endpoint: ""  # Optional: for S3-compatible storage
-    #     forcePathStyle: true
-    #     # Option 1: Reference an existing secret
-    #     # credentialsSecretName: s3-credentials
-    #     # Option 2: Provide credentials inline (operator creates/manages secret)
-    #     # accessKeyId: "AKIAIOSFODNN7EXAMPLE"
-    #     # secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-    #     # Option 3: No credentials (uses IAM role/IRSA)
   persistence:
-    enabled: true
     size: 10Gi
-    audit:
-      enabled: true
-      size: 5Gi
   resources:
     limits:
       cpu: "2"

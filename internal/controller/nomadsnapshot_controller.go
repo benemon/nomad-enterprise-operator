@@ -156,7 +156,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
 	if bootstrapToken == "" {
-		log.Error(nil, "Bootstrap secret has no secret-id", "secret", bootstrapSecretName)
+		log.Info("Bootstrap secret has no secret-id", "secret", bootstrapSecretName)
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
@@ -181,6 +181,12 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
+	// Store snapshot agent token in a Secret (avoids plaintext in Deployment spec)
+	if err := r.reconcileTokenSecret(ctx, snapshot, snapshotToken); err != nil {
+		log.Error(err, "Failed to reconcile token secret")
+		return ctrl.Result{}, err
+	}
+
 	// Create PVC for local storage if specified
 	if snapshot.Spec.Target.Local != nil {
 		if err := r.reconcilePVC(ctx, snapshot); err != nil {
@@ -190,14 +196,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Create ConfigMap with snapshot agent config
-	if err := r.reconcileConfigMap(ctx, snapshot, cluster); err != nil {
+	if err := r.reconcileConfigMap(ctx, snapshot); err != nil {
 		log.Error(err, "Failed to reconcile ConfigMap")
 		return ctrl.Result{}, err
 	}
 
 	// Create Deployment for snapshot agent
 	// Always use internal address for the deployment since it runs inside the cluster
-	if err := r.reconcileDeployment(ctx, snapshot, cluster, internalAddr, snapshotToken); err != nil {
+	if err := r.reconcileDeployment(ctx, snapshot, cluster, internalAddr); err != nil {
 		log.Error(err, "Failed to reconcile Deployment")
 		return ctrl.Result{}, err
 	}
@@ -431,7 +437,7 @@ func (r *NomadSnapshotReconciler) tryDeleteToken(accessorID, nomadAddr, bootstra
 }
 
 // reconcileConfigMap creates or updates the snapshot agent ConfigMap
-func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, _ *nomadv1alpha1.NomadCluster) error {
+func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot) error {
 	configMapName := snapshot.Name + "-snapshot-config"
 
 	// Generate HCL config
@@ -525,21 +531,36 @@ local_storage {
 	return config
 }
 
+// reconcileTokenSecret creates or updates the Secret holding the snapshot agent's Nomad token.
+func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, nomadToken string) error {
+	secretName := snapshot.Name + "-snapshot-token"
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: snapshot.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		secret.Type = corev1.SecretTypeOpaque
+		secret.Data = map[string][]byte{
+			"token": []byte(nomadToken),
+		}
+		return controllerutil.SetControllerReference(snapshot, secret, r.Scheme)
+	})
+
+	return err
+}
+
 // reconcileDeployment creates or updates the snapshot agent Deployment
-func (r *NomadSnapshotReconciler) reconcileDeployment(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster, nomadAddr, nomadToken string) error {
+func (r *NomadSnapshotReconciler) reconcileDeployment(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster, nomadAddr string) error {
 	deploymentName := snapshot.Name + "-snapshot-agent"
 	configMapName := snapshot.Name + "-snapshot-config"
+	tokenSecretName := snapshot.Name + "-snapshot-token"
 
-	// Get image from cluster (match statefulset.go logic)
-	imageRepo := cluster.Spec.Image.Repository
-	if imageRepo == "" {
-		imageRepo = "hashicorp/nomad"
-	}
-	imageTag := cluster.Spec.Image.Tag
-	if imageTag == "" {
-		imageTag = "1.11-ent"
-	}
-	image := fmt.Sprintf("%s:%s", imageRepo, imageTag)
+	// Image defaults set via kubebuilder tags on ImageSpec
+	image := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
 
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -579,8 +600,15 @@ func (r *NomadSnapshotReconciler) reconcileDeployment(ctx context.Context, snaps
 									Value: nomadAddr,
 								},
 								{
-									Name:  "NOMAD_TOKEN",
-									Value: nomadToken, // Injected directly, not via Secret
+									Name: "NOMAD_TOKEN",
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: tokenSecretName,
+											},
+											Key: "token",
+										},
+									},
 								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
@@ -729,11 +757,6 @@ func (r *NomadSnapshotReconciler) reconcilePVC(ctx context.Context, snapshot *no
 	return err
 }
 
-// getPVCName returns the PVC name for local storage
-func (r *NomadSnapshotReconciler) getPVCName(snapshot *nomadv1alpha1.NomadSnapshot) string {
-	return snapshot.Name + "-snapshots"
-}
-
 // addLocalStorage adds PVC mount for local storage
 func (r *NomadSnapshotReconciler) addLocalStorage(snapshot *nomadv1alpha1.NomadSnapshot, podSpec *corev1.PodSpec) {
 	local := snapshot.Spec.Target.Local
@@ -742,7 +765,7 @@ func (r *NomadSnapshotReconciler) addLocalStorage(snapshot *nomadv1alpha1.NomadS
 		path = "/snapshots"
 	}
 
-	pvcName := r.getPVCName(snapshot)
+	pvcName := snapshot.Name + "-snapshots"
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: "snapshots",
@@ -771,6 +794,7 @@ func (r *NomadSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadSnapshot{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
 		Named("nomadsnapshot").

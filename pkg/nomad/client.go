@@ -256,34 +256,6 @@ func (c *Client) GetPeers() ([]string, error) {
 	return peers, nil
 }
 
-// GetServerMembers returns information about the server members.
-func (c *Client) GetServerMembers() (*ServerMembersResult, error) {
-	members, err := c.api.Agent().Members()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get server members: %w", err)
-	}
-
-	result := &ServerMembersResult{
-		ServerName:   members.ServerName,
-		ServerRegion: members.ServerRegion,
-		ServerDC:     members.ServerDC,
-		Members:      make([]ServerMember, 0, len(members.Members)),
-	}
-
-	for _, m := range members.Members {
-		result.Members = append(result.Members, ServerMember{
-			Name:   m.Name,
-			Addr:   m.Addr,
-			Port:   m.Port,
-			Status: m.Status,
-			Region: m.Tags["region"],
-			DC:     m.Tags["dc"],
-		})
-	}
-
-	return result, nil
-}
-
 // CheckHealth performs a health check against the Nomad server.
 func (c *Client) CheckHealth() (*HealthResult, error) {
 	health, err := c.api.Agent().Health()
@@ -436,24 +408,6 @@ type ACLBootstrapResult struct {
 	ExpirationTime *time.Time
 }
 
-// ServerMembersResult contains server membership information.
-type ServerMembersResult struct {
-	ServerName   string
-	ServerRegion string
-	ServerDC     string
-	Members      []ServerMember
-}
-
-// ServerMember represents a single server member.
-type ServerMember struct {
-	Name   string
-	Addr   string
-	Port   uint16
-	Status string
-	Region string
-	DC     string
-}
-
 // HealthResult contains health check results.
 type HealthResult struct {
 	Server HealthStatus
@@ -466,7 +420,7 @@ type HealthStatus struct {
 }
 
 // ErrAlreadyBootstrapped is returned when ACL bootstrap has already been performed.
-var ErrAlreadyBootstrapped = fmt.Errorf("ACL already bootstrapped")
+var ErrAlreadyBootstrapped = errors.New("ACL already bootstrapped")
 
 // LicenseResult contains Nomad Enterprise license information.
 type LicenseResult struct {

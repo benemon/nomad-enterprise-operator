@@ -28,7 +28,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -72,7 +71,7 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 	}
 
 	// Wait for at least one pod to be ready before attempting bootstrap
-	ready, err := p.checkPodsReady(ctx, cluster)
+	ready, err := p.CheckPodsReady(ctx, cluster)
 	if err != nil {
 		return Error(err, "Failed to check pod readiness")
 	}
@@ -117,49 +116,13 @@ func (p *ACLBootstrapPhase) getBootstrapSecretName(cluster *nomadv1alpha1.NomadC
 	return cluster.Name + "-acl-bootstrap"
 }
 
-func (p *ACLBootstrapPhase) checkPodsReady(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (bool, error) {
-	podList := &corev1.PodList{}
-	if err := p.Client.List(ctx, podList,
-		client.InNamespace(cluster.Namespace),
-		client.MatchingLabels(GetSelectorLabels(cluster)),
-	); err != nil {
-		return false, err
-	}
-
-	for _, pod := range podList.Items {
-		if pod.Status.Phase == corev1.PodRunning {
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-					return true, nil
-				}
-			}
-		}
-	}
-
-	return false, nil
-}
-
 func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*nomad.ACLBootstrapResult, error) {
+	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, "")
+	if err != nil {
+		return nil, err
+	}
+
 	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
-	// Build base client config
-	cfg := nomad.ClientConfig{
-		TLSEnabled: tlsEnabled,
-		Timeout:    30 * time.Second,
-	}
-
-	// If TLS is enabled, get the CA cert from the TLS secret
-	if tlsEnabled && cluster.Spec.Server.TLS.SecretName != "" {
-		tlsSecret := &corev1.Secret{}
-		err := p.Client.Get(ctx, types.NamespacedName{
-			Name:      cluster.Spec.Server.TLS.SecretName,
-			Namespace: cluster.Namespace,
-		}, tlsSecret)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get TLS secret for bootstrap: %w", err)
-		}
-		cfg.CACert = tlsSecret.Data["ca.crt"]
-	}
 
 	// Try internal service first (operator typically runs in-cluster)
 	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
@@ -256,26 +219,12 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 }
 
 func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, token string) error {
+	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, token)
+	if err != nil {
+		return err
+	}
+
 	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
-	cfg := nomad.ClientConfig{
-		Token:      token,
-		TLSEnabled: tlsEnabled,
-		Timeout:    30 * time.Second,
-	}
-
-	// If TLS is enabled, get the CA cert
-	if tlsEnabled && cluster.Spec.Server.TLS.SecretName != "" {
-		tlsSecret := &corev1.Secret{}
-		err := p.Client.Get(ctx, types.NamespacedName{
-			Name:      cluster.Spec.Server.TLS.SecretName,
-			Namespace: cluster.Namespace,
-		}, tlsSecret)
-		if err != nil {
-			return fmt.Errorf("failed to get TLS secret: %w", err)
-		}
-		cfg.CACert = tlsSecret.Data["ca.crt"]
-	}
 
 	// Try internal service first, fall back to LoadBalancer
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)

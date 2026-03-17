@@ -57,13 +57,6 @@ func (p *SecretsPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		}
 	}
 
-	// Handle S3 credentials if snapshots are enabled (inline or external)
-	if cluster.Spec.Server.Snapshot.Enabled {
-		if result := p.handleS3CredentialsSecret(ctx, cluster); result.Error != nil || result.Requeue {
-			return result
-		}
-	}
-
 	return OK()
 }
 
@@ -117,7 +110,7 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 func (p *SecretsPhase) handleTLSSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	tls := cluster.Spec.Server.TLS
 
-	// Inline TLS - create/update managed secret
+	// Inline TLS - create/update managed secret with fixed key names
 	if tls.CACert != "" && tls.ServerCert != "" && tls.ServerKey != "" {
 		return p.ensureManagedSecret(ctx, cluster, managedSecretConfig{
 			name:   cluster.Name + "-tls",
@@ -144,13 +137,14 @@ func (p *SecretsPhase) handleTLSSecret(ctx context.Context, cluster *nomadv1alph
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return Error(fmt.Errorf("TLS secret %q not found", tls.SecretName),
-				"TLS secret not found - create it with ca.crt, server.crt, and server.key")
+				"TLS secret not found - create it with the required certificate keys")
 		}
 		return Error(err, "Failed to get TLS secret")
 	}
 
-	// Validate required keys
-	requiredKeys := []string{"ca.crt", "server.crt", "server.key"}
+	// Validate required keys using configurable key names
+	keys := tls.ResolvedTLSKeys()
+	requiredKeys := []string{keys.CACert, keys.ServerCert, keys.ServerKey}
 	for _, key := range requiredKeys {
 		if _, ok := secret.Data[key]; !ok {
 			return Error(fmt.Errorf("key %q not found in TLS secret", key),
@@ -159,55 +153,6 @@ func (p *SecretsPhase) handleTLSSecret(ctx context.Context, cluster *nomadv1alph
 	}
 
 	p.Log.V(1).Info("TLS secret validated", "secretName", tls.SecretName)
-	return OK()
-}
-
-// handleS3CredentialsSecret creates or validates the S3 credentials secret.
-func (p *SecretsPhase) handleS3CredentialsSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	s3 := cluster.Spec.Server.Snapshot.S3
-
-	// Inline S3 credentials - create/update managed secret
-	if s3.AccessKeyID != "" && s3.SecretAccessKey != "" {
-		return p.ensureManagedSecret(ctx, cluster, managedSecretConfig{
-			name:   cluster.Name + "-s3-credentials",
-			labels: GetLabels(cluster),
-			data: map[string]string{
-				"access-key-id":     s3.AccessKeyID,
-				"secret-access-key": s3.SecretAccessKey,
-			},
-		})
-	}
-
-	// External S3 credentials - validate if specified
-	if s3.CredentialsSecretName == "" {
-		// No credentials specified - might be using IAM roles
-		p.Log.V(1).Info("No S3 credentials specified, assuming IAM role authentication")
-		return OK()
-	}
-
-	secret := &corev1.Secret{}
-	err := p.Client.Get(ctx, types.NamespacedName{
-		Name:      s3.CredentialsSecretName,
-		Namespace: cluster.Namespace,
-	}, secret)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return Error(fmt.Errorf("S3 credentials secret %q not found", s3.CredentialsSecretName),
-				"S3 credentials secret not found for snapshots")
-		}
-		return Error(err, "Failed to get S3 credentials secret")
-	}
-
-	// Validate required keys
-	requiredKeys := []string{"access-key-id", "secret-access-key"}
-	for _, key := range requiredKeys {
-		if _, ok := secret.Data[key]; !ok {
-			return Error(fmt.Errorf("key %q not found in S3 credentials secret", key),
-				"S3 credentials secret missing required key: "+key)
-		}
-	}
-
-	p.Log.V(1).Info("S3 credentials secret validated", "secretName", s3.CredentialsSecretName)
 	return OK()
 }
 
@@ -282,26 +227,18 @@ func (p *SecretsPhase) ensureManagedSecret(ctx context.Context, cluster *nomadv1
 	return OK()
 }
 
-// GetLicenseSecretName returns the effective license secret name.
-func GetLicenseSecretName(cluster *nomadv1alpha1.NomadCluster) string {
+// getLicenseSecretName returns the effective license secret name.
+func getLicenseSecretName(cluster *nomadv1alpha1.NomadCluster) string {
 	if cluster.Spec.License.Value != "" {
 		return cluster.Name + "-license"
 	}
 	return cluster.Spec.License.SecretName
 }
 
-// GetTLSSecretName returns the effective TLS secret name.
-func GetTLSSecretName(cluster *nomadv1alpha1.NomadCluster) string {
+// getTLSSecretName returns the effective TLS secret name.
+func getTLSSecretName(cluster *nomadv1alpha1.NomadCluster) string {
 	if cluster.Spec.Server.TLS.CACert != "" {
 		return cluster.Name + "-tls"
 	}
 	return cluster.Spec.Server.TLS.SecretName
-}
-
-// GetS3CredentialsSecretName returns the effective S3 credentials secret name.
-func GetS3CredentialsSecretName(cluster *nomadv1alpha1.NomadCluster) string {
-	if cluster.Spec.Server.Snapshot.S3.AccessKeyID != "" {
-		return cluster.Name + "-s3-credentials"
-	}
-	return cluster.Spec.Server.Snapshot.S3.CredentialsSecretName
 }

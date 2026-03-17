@@ -70,7 +70,7 @@ func TestGenerator_Generate_BasicConfiguration(t *testing.T) {
 	}
 
 	// Verify optional blocks are NOT present
-	optionalBlocks := []string{"acl {", "tls {", "audit {", "snapshot_agent {"}
+	optionalBlocks := []string{"acl {", "tls {", "audit {"}
 	for _, block := range optionalBlocks {
 		if strings.Contains(hcl, block) {
 			t.Errorf("Generate() should not contain %q when not enabled", block)
@@ -195,6 +195,51 @@ func TestGenerator_Generate_TLSEnabled(t *testing.T) {
 	}
 }
 
+func TestGenerator_Generate_TLSCustomSecretKeys(t *testing.T) {
+	cluster := &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "nomad",
+		},
+		Spec: nomadv1alpha1.NomadClusterSpec{
+			Replicas: 3,
+			Server: nomadv1alpha1.ServerSpec{
+				TLS: nomadv1alpha1.TLSSpec{
+					Enabled:    true,
+					SecretName: "cert-manager-tls",
+					SecretKeys: nomadv1alpha1.TLSSecretKeys{
+						CACert:     "ca.crt",
+						ServerCert: "tls.crt",
+						ServerKey:  "tls.key",
+					},
+				},
+			},
+		},
+	}
+
+	gen := NewGenerator(cluster, "10.0.0.100", "key")
+	hcl, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	// Verify custom file paths in TLS block
+	assertions := []struct {
+		name     string
+		contains string
+	}{
+		{"ca_file", `ca_file   = "/nomad/tls/ca.crt"`},
+		{"cert_file", `cert_file = "/nomad/tls/tls.crt"`},
+		{"key_file", `key_file  = "/nomad/tls/tls.key"`},
+	}
+
+	for _, a := range assertions {
+		if !strings.Contains(hcl, a.contains) {
+			t.Errorf("Generate() missing custom TLS %s: expected to contain %q", a.name, a.contains)
+		}
+	}
+}
+
 func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 	cluster := &nomadv1alpha1.NomadCluster{
 		ObjectMeta: metav1.ObjectMeta{
@@ -282,104 +327,6 @@ func TestGenerator_Generate_AuditDefaults(t *testing.T) {
 	}
 }
 
-func TestGenerator_Generate_SnapshotEnabled(t *testing.T) {
-	cluster := &nomadv1alpha1.NomadCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster",
-			Namespace: "nomad",
-		},
-		Spec: nomadv1alpha1.NomadClusterSpec{
-			Replicas: 3,
-			Server: nomadv1alpha1.ServerSpec{
-				Snapshot: nomadv1alpha1.SnapshotSpec{
-					Enabled:  true,
-					Interval: "30m",
-					Retain:   48,
-					S3: nomadv1alpha1.S3Spec{
-						Endpoint:       "https://minio.example.com",
-						Bucket:         "nomad-snapshots",
-						Region:         "us-east-1",
-						ForcePathStyle: true,
-					},
-				},
-			},
-		},
-	}
-
-	gen := NewGenerator(cluster, "10.0.0.100", "key")
-	hcl, err := gen.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error = %v", err)
-	}
-
-	// Verify snapshot block is present
-	assertions := []struct {
-		name     string
-		contains string
-	}{
-		{"snapshot comment", "# Snapshot agent configuration"},
-		{"snapshot_agent block", "snapshot_agent {"},
-		{"snapshot block", "snapshot {"},
-		{"interval", `interval         = "30m"`},
-		{"retain", "retain           = 48"},
-		{"aws_s3 block", "aws_s3 {"},
-		{"endpoint", `endpoint                       = "https://minio.example.com"`},
-		{"bucket", `bucket                         = "nomad-snapshots"`},
-		{"region", `region                         = "us-east-1"`},
-		{"force_path_style", "s3_force_path_style            = true"},
-	}
-
-	for _, a := range assertions {
-		if !strings.Contains(hcl, a.contains) {
-			t.Errorf("Generate() missing snapshot %s: expected to contain %q", a.name, a.contains)
-		}
-	}
-}
-
-func TestGenerator_Generate_SnapshotDefaults(t *testing.T) {
-	cluster := &nomadv1alpha1.NomadCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster",
-			Namespace: "nomad",
-		},
-		Spec: nomadv1alpha1.NomadClusterSpec{
-			Replicas: 3,
-			Server: nomadv1alpha1.ServerSpec{
-				Snapshot: nomadv1alpha1.SnapshotSpec{
-					Enabled: true,
-					// Leave interval, retain, region empty to test defaults
-					S3: nomadv1alpha1.S3Spec{
-						Endpoint: "https://s3.amazonaws.com",
-						Bucket:   "my-bucket",
-					},
-				},
-			},
-		},
-	}
-
-	gen := NewGenerator(cluster, "10.0.0.100", "key")
-	hcl, err := gen.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error = %v", err)
-	}
-
-	// Verify default snapshot values
-	assertions := []struct {
-		name     string
-		contains string
-	}{
-		{"default interval", `interval         = "1h"`},
-		{"default retain", "retain           = 24"},
-		{"default region", `region                         = "us-east-1"`},
-	}
-
-	for _, a := range assertions {
-		if !strings.Contains(hcl, a.contains) {
-			t.Errorf("Generate() missing default snapshot %s: expected to contain %q", a.name, a.contains)
-		}
-	}
-}
-
 func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 	cluster := &nomadv1alpha1.NomadCluster{
 		ObjectMeta: metav1.ObjectMeta{
@@ -402,13 +349,6 @@ func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 				Audit: nomadv1alpha1.AuditSpec{
 					Enabled: true,
 				},
-				Snapshot: nomadv1alpha1.SnapshotSpec{
-					Enabled: true,
-					S3: nomadv1alpha1.S3Spec{
-						Endpoint: "https://s3.eu-west-1.amazonaws.com",
-						Bucket:   "prod-snapshots",
-					},
-				},
 				Autopilot: nomadv1alpha1.AutopilotSpec{
 					CleanupDeadServers:      true,
 					LastContactThreshold:    "500ms",
@@ -430,7 +370,6 @@ func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 		"acl {",
 		"tls {",
 		"audit {",
-		"snapshot_agent {",
 		"autopilot {",
 	}
 

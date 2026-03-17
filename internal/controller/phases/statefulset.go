@@ -93,21 +93,9 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		replicas = 3
 	}
 
-	// Build container image
-	image := cluster.Spec.Image.Repository
-	if image == "" {
-		image = "hashicorp/nomad"
-	}
-	tag := cluster.Spec.Image.Tag
-	if tag == "" {
-		tag = "1.11-ent"
-	}
-	imageFull := fmt.Sprintf("%s:%s", image, tag)
-
+	// Build container image (defaults set via kubebuilder tags on ImageSpec)
+	imageFull := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
 	pullPolicy := cluster.Spec.Image.PullPolicy
-	if pullPolicy == "" {
-		pullPolicy = corev1.PullIfNotPresent
-	}
 
 	// Determine probe scheme
 	probeScheme := corev1.URISchemeHTTP
@@ -131,10 +119,10 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	podSpec := corev1.PodSpec{
 		ServiceAccountName: cluster.Name,
 		ImagePullSecrets:   cluster.Spec.ImagePullSecrets,
-		SecurityContext: &corev1.PodSecurityContext{
-			RunAsNonRoot: boolPtr(true),
-			// fsGroup is managed by OpenShift SCC
-		},
+		// SecurityContext is intentionally minimal:
+		// On OpenShift, the SCC injects RunAsUser and fsGroup automatically.
+		// On vanilla Kubernetes, the Nomad image runs as root by default.
+		SecurityContext: &corev1.PodSecurityContext{},
 		Containers: []corev1.Container{
 			{
 				Name:            "nomad",
@@ -195,18 +183,15 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// Get config checksum for pod annotation - include all config-affecting fields
 	// This ensures pods restart when any config changes
 	configChecksum := ConfigChecksum(map[string]string{
-		"advertise":        p.AdvertiseAddress,
-		"gossip":           p.GossipKey,
-		"acl":              strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
-		"tls":              strconv.FormatBool(cluster.Spec.Server.TLS.Enabled),
-		"audit":            strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
-		"auditDelivery":    cluster.Spec.Server.Audit.DeliveryGuarantee,
-		"replicas":         strconv.Itoa(int(replicas)),
-		"region":           cluster.Spec.Topology.Region,
-		"datacenter":       cluster.Spec.Topology.Datacenter,
-		"snapshotEnabled":  strconv.FormatBool(cluster.Spec.Server.Snapshot.Enabled),
-		"snapshotBucket":   cluster.Spec.Server.Snapshot.S3.Bucket,
-		"snapshotEndpoint": cluster.Spec.Server.Snapshot.S3.Endpoint,
+		"advertise":     p.AdvertiseAddress,
+		"gossip":        p.GossipKey,
+		"acl":           strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
+		"tls":           strconv.FormatBool(cluster.Spec.Server.TLS.Enabled),
+		"audit":         strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
+		"auditDelivery": cluster.Spec.Server.Audit.DeliveryGuarantee,
+		"replicas":      strconv.Itoa(int(replicas)),
+		"region":        cluster.Spec.Topology.Region,
+		"datacenter":    cluster.Spec.Topology.Datacenter,
 	})
 
 	// Get secrets checksum for pod annotation - hash actual secret contents
@@ -252,7 +237,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 
 func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
 	// Get the effective license secret name (handles inline vs external)
-	licenseSecretName := GetLicenseSecretName(cluster)
+	licenseSecretName := getLicenseSecretName(cluster)
 	licenseKey := cluster.Spec.License.SecretKey
 	if licenseKey == "" {
 		licenseKey = "license"
@@ -294,35 +279,6 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 				},
 			},
 		},
-	}
-
-	// Add S3 credentials for snapshots (handles both inline and external secrets)
-	s3CredentialsSecretName := GetS3CredentialsSecretName(cluster)
-	if cluster.Spec.Server.Snapshot.Enabled && s3CredentialsSecretName != "" {
-		env = append(env,
-			corev1.EnvVar{
-				Name: "AWS_ACCESS_KEY_ID",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: s3CredentialsSecretName,
-						},
-						Key: "access-key-id",
-					},
-				},
-			},
-			corev1.EnvVar{
-				Name: "AWS_SECRET_ACCESS_KEY",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: s3CredentialsSecretName,
-						},
-						Key: "secret-access-key",
-					},
-				},
-			},
-		)
 	}
 
 	return env
@@ -377,7 +333,7 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 
 	// Add TLS volume from secret (handles both inline and external secrets)
 	if cluster.Spec.Server.TLS.Enabled {
-		tlsSecretName := GetTLSSecretName(cluster)
+		tlsSecretName := getTLSSecretName(cluster)
 		volumes = append(volumes, corev1.Volume{
 			Name: "tls",
 			VolumeSource: corev1.VolumeSource{
@@ -440,19 +396,12 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 
 	// Add audit volume when audit is enabled (opinionated: audit always gets persistent storage)
 	if cluster.Spec.Server.Audit.Enabled {
-		// Prefer new AuditSpec fields, fall back to persistence.audit for backward compatibility
 		auditSize := cluster.Spec.Server.Audit.Size
-		if auditSize == "" {
-			auditSize = cluster.Spec.Persistence.Audit.Size
-		}
 		if auditSize == "" {
 			auditSize = "5Gi"
 		}
 
 		auditStorageClass := cluster.Spec.Server.Audit.StorageClassName
-		if auditStorageClass == "" {
-			auditStorageClass = cluster.Spec.Persistence.Audit.StorageClassName
-		}
 
 		auditPVC := corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
@@ -551,10 +500,6 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) bo
 	return existingSecretsChecksum != desiredSecretsChecksum
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 // getResourcesWithDefaults returns resource requirements with sensible defaults applied.
 // Defaults: requests: cpu=250m, memory=512Mi; limits: cpu=2, memory=2Gi
 func getResourcesWithDefaults(resources corev1.ResourceRequirements) corev1.ResourceRequirements {
@@ -596,26 +541,19 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 	secretNames := []string{}
 
 	// License secret
-	if licenseSecret := GetLicenseSecretName(cluster); licenseSecret != "" {
+	if licenseSecret := getLicenseSecretName(cluster); licenseSecret != "" {
 		secretNames = append(secretNames, licenseSecret)
 	}
 
 	// Gossip secret
-	if gossipSecret := GetGossipSecretName(cluster); gossipSecret != "" {
+	if gossipSecret := getGossipSecretName(cluster); gossipSecret != "" {
 		secretNames = append(secretNames, gossipSecret)
 	}
 
 	// TLS secret
 	if cluster.Spec.Server.TLS.Enabled {
-		if tlsSecret := GetTLSSecretName(cluster); tlsSecret != "" {
+		if tlsSecret := getTLSSecretName(cluster); tlsSecret != "" {
 			secretNames = append(secretNames, tlsSecret)
-		}
-	}
-
-	// S3 credentials secret
-	if cluster.Spec.Server.Snapshot.Enabled {
-		if s3Secret := GetS3CredentialsSecretName(cluster); s3Secret != "" {
-			secretNames = append(secretNames, s3Secret)
 		}
 	}
 
@@ -657,8 +595,8 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
-// GetGossipSecretName returns the gossip secret name for the cluster.
-func GetGossipSecretName(cluster *nomadv1alpha1.NomadCluster) string {
+// getGossipSecretName returns the gossip secret name for the cluster.
+func getGossipSecretName(cluster *nomadv1alpha1.NomadCluster) string {
 	if cluster.Spec.Gossip.SecretName != "" {
 		return cluster.Spec.Gossip.SecretName
 	}

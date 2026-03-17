@@ -1,0 +1,33 @@
+# NomadSnapshot with local PVC storage for OpenShift
+#
+# Takes hourly snapshots of the referenced NomadCluster and stores them
+# on a persistent volume. The operator automatically:
+#   - Creates a PVC named <snapshot-name>-snapshots
+#   - Provisions an ACL token with snapshot permissions
+#   - Deploys a snapshot agent using the same Nomad image as the cluster
+#
+# The snapshot agent connects to the NomadCluster's internal service.
+# If ACLs are enabled, the operator creates a dedicated token and stores
+# it in <snapshot-name>-snapshot-token.
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: hourly-backup
+spec:
+  clusterRef:
+    name: nomad-enterprise
+  schedule:
+    interval: "1h"
+    retain: 24
+  target:
+    local:
+      path: /snapshots
+      size: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

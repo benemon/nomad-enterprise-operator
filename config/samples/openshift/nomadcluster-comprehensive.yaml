@@ -1,0 +1,74 @@
+# Comprehensive OpenShift NomadCluster - production-ready 3-replica configuration
+#
+# This CR exercises the full feature set available on OpenShift:
+#   - 3-replica HA cluster with pod anti-affinity
+#   - TLS via cert-manager with custom secret key names
+#   - ACL with auto-bootstrap
+#   - Audit logging with persistent storage
+#   - OpenShift Route with edge TLS termination
+#   - ServiceMonitor and PrometheusRule for observability
+#   - Custom resource limits for production workloads
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: nomad-enterprise
+spec:
+  replicas: 3
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+  topology:
+    region: global
+    # datacenter defaults to namespace if empty
+  openshift:
+    enabled: true
+    route:
+      enabled: true
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+    monitoring:
+      enabled: true
+      scrapeInterval: 30s
+      scrapeTimeout: 10s
+      prometheusRulesEnabled: true
+  server:
+    acl:
+      enabled: true
+    tls:
+      enabled: true
+      # Vault Secrets Operator PKI Secrets resource should target this secret name
+      secretName: nomad-tls
+      secretKeys:
+        caCert: ca.crt
+        serverCert: tls.crt
+        serverKey: tls.key
+    autopilot:
+      cleanupDeadServers: true
+      lastContactThreshold: "200ms"
+      maxTrailingLogs: 250
+      serverStabilizationTime: "10s"
+    audit:
+      enabled: true
+      format: json
+      rotateDuration: "24h"
+      rotateMaxFiles: 15
+      size: 5Gi
+  persistence:
+    size: 10Gi
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  affinity:
+    podAntiAffinity:
+      enabled: true
+      type: preferred
+      weight: 100
+      topologyKey: kubernetes.io/hostname
