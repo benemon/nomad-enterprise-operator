@@ -139,7 +139,8 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		licensePath := filepath.Join(projectDir, "test", "e2e", "testdata", "nomad.hclic")
 		_, err = os.Stat(licensePath)
-		Expect(err).NotTo(HaveOccurred(), "License file not found at %s — place your Nomad Enterprise license there", licensePath)
+		Expect(err).NotTo(HaveOccurred(),
+			"License file not found at %s — place your Nomad Enterprise license there", licensePath)
 
 		cmd = exec.Command("kubectl", "create", "secret", "generic", "nomad-license",
 			"--namespace", namespace,
@@ -1187,7 +1188,8 @@ spec:
 
 		AfterAll(func() {
 			By("deleting the cert-manager TLS NomadCluster CR")
-			cmd := exec.Command("kubectl", "delete", "nomadcluster", certManagerClusterName, "-n", namespace, "--ignore-not-found")
+			cmd := exec.Command("kubectl", "delete", "nomadcluster",
+				certManagerClusterName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 
 			Eventually(func(g Gomega) {
