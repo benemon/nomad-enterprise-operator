@@ -26,6 +26,13 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
+      - name: Write Nomad Enterprise license file
+        env:
+          NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+        run: |
+          mkdir -p test/e2e/testdata
+          echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
+
       - name: Running Test e2e
         run: |
           go mod tidy
