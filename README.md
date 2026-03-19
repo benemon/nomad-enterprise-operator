@@ -22,16 +22,71 @@
 - kubectl version v1.11.3+.
 - Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+### Container Images
 
-```sh
-make docker-build docker-push IMG=<some-registry>/nomad-enterprise-operator:tag
+All images are published to quay.io:
+
+| Image | Description |
+|-------|-------------|
+| `quay.io/benjamin_holmes/nomad-enterprise-operator:v<version>` | Operator controller |
+| `quay.io/benjamin_holmes/nomad-enterprise-operator-bundle:v<version>` | OLM bundle |
+| `quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v<version>` | OLM catalog |
+
+### Install on OpenShift (OLM)
+
+1. Create a CatalogSource to make the operator available in OperatorHub:
+
+```yaml
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: nomad-enterprise-operator-catalog
+  namespace: openshift-marketplace
+spec:
+  sourceType: grpc
+  image: quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v0.0.1
+  displayName: Nomad Enterprise Operator
+  publisher: benemon
+  updateStrategy:
+    registryPoll:
+      interval: 30m
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+2. Create a Subscription to install the operator:
+
+```yaml
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: nomad-enterprise-operator
+  namespace: <target-namespace>
+spec:
+  channel: alpha
+  name: nomad-enterprise-operator
+  source: nomad-enterprise-operator-catalog
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic
+```
+
+Alternatively, once the CatalogSource is created, the operator appears in
+the OpenShift console under **OperatorHub** and can be installed from the UI.
+
+### Install with YAML manifests
+
+Build and apply the consolidated installer:
+
+```sh
+make build-installer IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+kubectl apply -f dist/install.yaml
+```
+
+### To Deploy for Development
+
+**Build and push your image:**
+
+```sh
+make docker-build docker-push IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+```
 
 **Install the CRDs into the cluster:**
 
@@ -39,10 +94,10 @@ Make sure you have the proper permission to the registry if the above commands d
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+**Deploy the Manager to the cluster:**
 
 ```sh
-make deploy IMG=<some-registry>/nomad-enterprise-operator:tag
+make deploy IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
@@ -54,8 +109,6 @@ You can apply the samples (examples) from the config/sample:
 ```sh
 kubectl apply -k config/samples/
 ```
-
->**NOTE**: Ensure that the samples has default values to test it out.
 
 ### To Uninstall
 **Delete the instances (CRs) from the cluster:**
@@ -75,50 +128,6 @@ make uninstall
 ```sh
 make undeploy
 ```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/nomad-enterprise-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/nomad-enterprise-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-operator-sdk edit --plugins=helm/v1-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
 
 ## Contributing
 // TODO(user): Add detailed information on how you would like others to contribute to this project
