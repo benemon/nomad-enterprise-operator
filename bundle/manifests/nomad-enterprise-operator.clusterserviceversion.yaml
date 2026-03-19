@@ -1,0 +1,406 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "nomad.hashicorp.com/v1alpha1",
+          "kind": "NomadCluster",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "nomad-enterprise-operator"
+            },
+            "name": "nomad-enterprise"
+          },
+          "spec": {
+            "affinity": {
+              "podAntiAffinity": {
+                "enabled": true,
+                "topologyKey": "kubernetes.io/hostname",
+                "type": "preferred",
+                "weight": 100
+              }
+            },
+            "image": {
+              "repository": "hashicorp/nomad",
+              "tag": "1.11-ent"
+            },
+            "license": {
+              "secretKey": "license",
+              "secretName": "nomad-license"
+            },
+            "openshift": {
+              "enabled": true,
+              "monitoring": {
+                "enabled": true,
+                "prometheusRulesEnabled": true,
+                "scrapeInterval": "30s",
+                "scrapeTimeout": "10s"
+              },
+              "route": {
+                "enabled": true,
+                "tls": {
+                  "insecureEdgeTerminationPolicy": "Redirect",
+                  "termination": "edge"
+                }
+              }
+            },
+            "persistence": {
+              "size": "10Gi"
+            },
+            "replicas": 3,
+            "resources": {
+              "limits": {
+                "cpu": "2",
+                "memory": "2Gi"
+              },
+              "requests": {
+                "cpu": "500m",
+                "memory": "1Gi"
+              }
+            },
+            "server": {
+              "acl": {
+                "enabled": true
+              },
+              "audit": {
+                "enabled": true,
+                "format": "json",
+                "rotateDuration": "24h",
+                "rotateMaxFiles": 15
+              },
+              "autopilot": {
+                "cleanupDeadServers": true,
+                "lastContactThreshold": "200ms",
+                "maxTrailingLogs": 250,
+                "serverStabilizationTime": "10s"
+              },
+              "tls": {
+                "enabled": false
+              }
+            },
+            "services": {
+              "external": {
+                "type": "LoadBalancer"
+              }
+            },
+            "topology": {
+              "region": "global"
+            }
+          }
+        },
+        {
+          "apiVersion": "nomad.hashicorp.com/v1alpha1",
+          "kind": "NomadSnapshot",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "nomad-enterprise-operator"
+            },
+            "name": "hourly-backup"
+          },
+          "spec": {
+            "clusterRef": {
+              "name": "nomad"
+            },
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            },
+            "schedule": {
+              "interval": "1h",
+              "retain": 24,
+              "stale": false
+            },
+            "target": {
+              "local": {
+                "path": "/snapshots",
+                "size": "10Gi"
+              }
+            }
+          }
+        }
+      ]
+    capabilities: Basic Install
+    categories: Integration & Delivery
+    containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+    createdAt: "2026-03-19T11:32:23Z"
+    description: Community operator for managing HashiCorp Nomad Enterprise clusters
+      on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
+    operators.operatorframework.io/builder: operator-sdk-v1.42.0
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+  name: nomad-enterprise-operator.v0.0.1
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: NomadCluster is the Schema for the nomadclusters API.
+      displayName: Nomad Cluster
+      kind: NomadCluster
+      name: nomadclusters.nomad.hashicorp.com
+      version: v1alpha1
+    - description: NomadSnapshot is the Schema for the nomadsnapshots API.
+      displayName: Nomad Snapshot
+      kind: NomadSnapshot
+      name: nomadsnapshots.nomad.hashicorp.com
+      version: v1alpha1
+  description: |
+    The Nomad Enterprise Operator is a community project that automates the
+    deployment and lifecycle management of HashiCorp Nomad Enterprise server
+    clusters on Kubernetes and OpenShift.
+
+    This operator is not maintained or supported by HashiCorp. The
+    nomad.hashicorp.com API group is a structural identifier, not an
+    endorsement.
+
+    Features include TLS certificate management, ACL bootstrap, gossip
+    encryption, Prometheus monitoring, OpenShift Routes, persistent storage,
+    and automated snapshots.
+  displayName: Nomad Enterprise Operator
+  icon:
+  - base64data: ""
+    mediatype: image/png
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          - persistentvolumeclaims
+          - pods
+          - secrets
+          - serviceaccounts
+          - services
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          - statefulsets
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - monitoring.coreos.com
+          resources:
+          - prometheusrules
+          - servicemonitors
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - nomad.hashicorp.com
+          resources:
+          - nomadclusters
+          - nomadsnapshots
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - nomad.hashicorp.com
+          resources:
+          - nomadclusters/finalizers
+          - nomadsnapshots/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - nomad.hashicorp.com
+          resources:
+          - nomadclusters/status
+          - nomadsnapshots/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - rbac.authorization.k8s.io
+          resources:
+          - rolebindings
+          - roles
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - route.openshift.io
+          resources:
+          - routes
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
+        serviceAccountName: nomad-enterprise-operator-controller-manager
+      deployments:
+      - label:
+          app.kubernetes.io/managed-by: kustomize
+          app.kubernetes.io/name: nomad-enterprise-operator
+          control-plane: controller-manager
+        name: nomad-enterprise-operator-controller-manager
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: nomad-enterprise-operator
+              control-plane: controller-manager
+          strategy: {}
+          template:
+            metadata:
+              annotations:
+                kubectl.kubernetes.io/default-container: manager
+              labels:
+                app.kubernetes.io/name: nomad-enterprise-operator
+                control-plane: controller-manager
+            spec:
+              containers:
+              - args:
+                - --metrics-bind-address=:8443
+                - --leader-elect
+                - --health-probe-bind-address=:8081
+                command:
+                - /manager
+                image: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8081
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                name: manager
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8081
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 128Mi
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              serviceAccountName: nomad-enterprise-operator-controller-manager
+              terminationGracePeriodSeconds: 10
+      permissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        serviceAccountName: nomad-enterprise-operator-controller-manager
+    strategy: deployment
+  installModes:
+  - supported: true
+    type: OwnNamespace
+  - supported: true
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: false
+    type: AllNamespaces
+  keywords:
+  - nomad
+  - orchestration
+  - openshift
+  links:
+  - name: Source Code
+    url: https://github.com/benemon/nomad-enterprise-operator
+  - name: Nomad Documentation
+    url: https://developer.hashicorp.com/nomad
+  maintainers:
+  - name: benemon
+  maturity: alpha
+  minKubeVersion: 1.28.0
+  provider:
+    name: benemon
+    url: https://github.com/benemon
+  version: 0.0.1

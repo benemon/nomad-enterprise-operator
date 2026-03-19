@@ -20,4 +20,13 @@ resources:
   kind: NomadCluster
   path: github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: hashicorp.com
+  group: nomad
+  kind: NomadSnapshot
+  path: github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

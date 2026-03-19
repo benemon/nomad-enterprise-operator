@@ -3,6 +3,12 @@
 [![Tests](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test.yml)
 
 # nomad-enterprise-operator
+
+> **Community Project** - This operator is not maintained or supported by
+> HashiCorp. It is an independent community project. The `nomad.hashicorp.com`
+> API group used by CRDs in this project is a structural identifier inherited
+> from the Nomad ecosystem, not an endorsement or affiliation.
+
 // TODO(user): Add simple overview of use/purpose
 
 ## Description
