@@ -9,18 +9,19 @@
 > API group used by CRDs in this project is a structural identifier inherited
 > from the Nomad ecosystem, not an endorsement or affiliation.
 
-// TODO(user): Add simple overview of use/purpose
+A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise server clusters on OpenShift and Kubernetes.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+
+The Nomad Enterprise Operator manages the full lifecycle of Nomad Enterprise server clusters through two custom resources: `NomadCluster` and `NomadSnapshot`. A `NomadCluster` resource deploys a Nomad server cluster as a StatefulSet with configurable replicas (1, 3, or 5), handling TLS certificate generation, ACL bootstrapping, gossip encryption, persistent storage, and Prometheus monitoring. On OpenShift, it can also create Routes for external access. A `NomadSnapshot` resource manages automated Nomad snapshots with support for local, S3, GCS, and Azure Blob storage backends.
 
 ## Getting Started
 
 ### Prerequisites
-- go version v1.24.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- Go v1.25.0+
+- Docker v17.03+
+- kubectl v1.11.3+
+- Access to a Kubernetes v1.11.3+ cluster
 
 ### Container Images
 
@@ -103,8 +104,7 @@ make deploy IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
 privileges or be logged in as admin.
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+**Create sample custom resources:**
 
 ```sh
 kubectl apply -k config/samples/
@@ -117,24 +117,23 @@ kubectl apply -k config/samples/
 kubectl delete -k config/samples/
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+**Delete the CRDs from the cluster:**
 
 ```sh
 make uninstall
 ```
 
-**UnDeploy the controller from the cluster:**
+**Undeploy the controller from the cluster:**
 
 ```sh
 make undeploy
 ```
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/benemon/nomad-enterprise-operator).
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+Run `make help` for more information on all available `make` targets.
 
 ## License
 
