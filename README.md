@@ -45,7 +45,7 @@ metadata:
   namespace: openshift-marketplace
 spec:
   sourceType: grpc
-  image: quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v0.0.1
+  image: quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v<version>
   displayName: Nomad Enterprise Operator
   publisher: benemon
   updateStrategy:
@@ -53,14 +53,32 @@ spec:
       interval: 30m
 ```
 
-2. Create a Subscription to install the operator:
+2. Create a namespace and OperatorGroup for the operator:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nomad-enterprise-operator-system
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: nomad-enterprise-operator
+  namespace: nomad-enterprise-operator-system
+spec:
+  targetNamespaces:
+    - nomad-enterprise-operator-system
+```
+
+3. Create a Subscription to install the operator:
 
 ```yaml
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
   name: nomad-enterprise-operator
-  namespace: <target-namespace>
+  namespace: nomad-enterprise-operator-system
 spec:
   channel: alpha
   name: nomad-enterprise-operator
@@ -71,13 +89,14 @@ spec:
 
 Alternatively, once the CatalogSource is created, the operator appears in
 the OpenShift console under **OperatorHub** and can be installed from the UI.
+The suggested namespace `nomad-enterprise-operator-system` will be pre-filled.
 
 ### Install with YAML manifests
 
 Build and apply the consolidated installer:
 
 ```sh
-make build-installer IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+make build-installer IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v<version>
 kubectl apply -f dist/install.yaml
 ```
 
@@ -86,7 +105,7 @@ kubectl apply -f dist/install.yaml
 **Build and push your image:**
 
 ```sh
-make docker-build docker-push IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+make docker-build docker-push IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v<version>
 ```
 
 **Install the CRDs into the cluster:**
@@ -98,7 +117,7 @@ make install
 **Deploy the Manager to the cluster:**
 
 ```sh
-make deploy IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
+make deploy IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v<version>
 ```
 
 > **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
