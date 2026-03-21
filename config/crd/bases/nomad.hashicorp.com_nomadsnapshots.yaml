@@ -421,6 +421,11 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              policyName:
+                description: |-
+                  PolicyName is the Nomad ACL policy created for the snapshot agent.
+                  Stored here so it can be cleaned up when the NomadSnapshot is deleted.
+                type: string
               readyReplicas:
                 description: ReadyReplicas is the number of ready snapshot agent replicas
                 format: int32
