@@ -40,28 +40,14 @@ spec:
       enabled: true  # Auto-bootstrapped by operator
     tls:
       enabled: false
-      # When enabled, provide certificates via:
-      # Option 1: Reference an existing secret (default keys: ca.crt, server.crt, server.key)
-      # secretName: nomad-tls
-      # Option 1b: With cert-manager or other providers that use different key names:
-      # secretName: nomad-tls
-      # secretKeys:
-      #   caCert: ca.crt        # default: ca.crt
-      #   serverCert: tls.crt   # default: server.crt
-      #   serverKey: tls.key    # default: server.key
-      # Option 2: Provide inline certificates (operator creates/manages secret)
-      # caCert: |
-      #   -----BEGIN CERTIFICATE-----
-      #   ...
-      #   -----END CERTIFICATE-----
-      # serverCert: |
-      #   -----BEGIN CERTIFICATE-----
-      #   ...
-      #   -----END CERTIFICATE-----
-      # serverKey: |
-      #   -----BEGIN RSA PRIVATE KEY-----
-      #   ...
-      #   -----END RSA PRIVATE KEY-----
+      # When enabled, the operator automatically generates and manages all
+      # certificates (CA, server, operator client). No additional config needed.
+      # To use your own CA instead of an operator-generated one:
+      # ca:
+      #   secretName: my-ca-secret  # Secret with tls.crt and tls.key
+      #   secretKeys:               # Override key names if needed
+      #     certificate: tls.crt    # default: tls.crt
+      #     privateKey: tls.key     # default: tls.key
     autopilot:
       cleanupDeadServers: true
       lastContactThreshold: "200ms"

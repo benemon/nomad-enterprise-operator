@@ -171,6 +171,7 @@ func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.
 		phases.NewServiceAccountPhase(ctx),
 		phases.NewRBACPhase(ctx),
 		phases.NewGossipPhase(ctx),
+		phases.NewCertificatePhase(ctx),
 		phases.NewServicesPhase(ctx),
 		phases.NewAdvertisePhase(ctx),
 		phases.NewSecretsPhase(ctx),
@@ -639,8 +640,8 @@ func (r *NomadClusterReconciler) clusterReferencesSecret(cluster *nomadv1alpha1.
 		return true
 	}
 
-	// Check TLS secret (external reference only)
-	if cluster.Spec.Server.TLS.Enabled && cluster.Spec.Server.TLS.SecretName == secretName {
+	// Check user-provided CA secret
+	if cluster.Spec.Server.TLS.Enabled && cluster.Spec.Server.TLS.CA != nil && cluster.Spec.Server.TLS.CA.SecretName == secretName {
 		return true
 	}
 

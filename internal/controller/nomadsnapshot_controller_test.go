@@ -300,11 +300,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("Creating a TLS-enabled NomadCluster")
 			cluster = newTestCluster(namespace, "nomad")
 			cluster.Spec.Server.TLS.Enabled = true
-			cluster.Spec.Server.TLS.SecretName = testTLSSecretName
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-
-			// Create TLS secret
-			createTLSSecret(ctx, namespace, testTLSSecretName)
 
 			// Simulate ACL bootstrap
 			cluster.Status.ACLBootstrapped = true

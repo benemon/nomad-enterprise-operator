@@ -331,14 +331,13 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 		},
 	}
 
-	// Add TLS volume from secret (handles both inline and external secrets)
+	// Add TLS volume from the operator-managed server certificate secret
 	if cluster.Spec.Server.TLS.Enabled {
-		tlsSecretName := getTLSSecretName(cluster)
 		volumes = append(volumes, corev1.Volume{
 			Name: "tls",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: tlsSecretName,
+					SecretName: cluster.Name + "-tls",
 				},
 			},
 		})
@@ -552,9 +551,7 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 
 	// TLS secret
 	if cluster.Spec.Server.TLS.Enabled {
-		if tlsSecret := getTLSSecretName(cluster); tlsSecret != "" {
-			secretNames = append(secretNames, tlsSecret)
-		}
+		secretNames = append(secretNames, cluster.Name+"-tls")
 	}
 
 	// Sort for deterministic ordering

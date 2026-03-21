@@ -13,7 +13,37 @@ A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise serv
 
 ## Description
 
-The Nomad Enterprise Operator manages the full lifecycle of Nomad Enterprise server clusters through two custom resources: `NomadCluster` and `NomadSnapshot`. A `NomadCluster` resource deploys a Nomad server cluster as a StatefulSet with configurable replicas (1, 3, or 5), handling TLS certificate generation, ACL bootstrapping, gossip encryption, persistent storage, and Prometheus monitoring. On OpenShift, it can also create Routes for external access. A `NomadSnapshot` resource manages automated Nomad snapshots with support for local, S3, GCS, and Azure Blob storage backends.
+The Nomad Enterprise Operator manages the full lifecycle of Nomad Enterprise server clusters through two custom resources: `NomadCluster` and `NomadSnapshot`. A `NomadCluster` resource deploys a Nomad server cluster as a StatefulSet with configurable replicas (1, 3, or 5), handling automatic TLS/mTLS certificate management, ACL bootstrapping, gossip encryption, persistent storage, and Prometheus monitoring. On OpenShift, it can also create Routes for external access. A `NomadSnapshot` resource manages automated Nomad snapshots with support for local, S3, GCS, and Azure Blob storage backends.
+
+### TLS
+
+Setting `server.tls.enabled: true` is the only input required for full TLS. The operator automatically:
+
+- Generates a self-signed ECDSA P-256 CA (or uses a user-provided CA)
+- Issues server certificates with correct Nomad SANs (`server.<region>.nomad`, pod FQDNs, service FQDNs)
+- Issues an operator client certificate for mTLS when querying the Nomad API
+- Distributes a CA bundle ConfigMap for external consumers
+- Rotates certificates approaching expiry (30-day warning window)
+- Configures `verify_server_hostname` and `verify_https_client` in the Nomad HCL
+- Switches OpenShift Routes to `reencrypt` termination with the CA as `destinationCACertificate`
+
+**Operator-managed TLS (default):**
+
+```yaml
+server:
+  tls:
+    enabled: true
+```
+
+**User-provided CA** (certificates still issued by the operator):
+
+```yaml
+server:
+  tls:
+    enabled: true
+    ca:
+      secretName: my-ca-secret  # must contain tls.crt and tls.key
+```
 
 ## Getting Started
 

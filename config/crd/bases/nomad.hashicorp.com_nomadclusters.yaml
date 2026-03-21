@@ -415,65 +415,43 @@ spec:
                   tls:
                     description: TLS configuration
                     properties:
-                      caCert:
+                      ca:
                         description: |-
-                          CACert is the CA certificate in PEM format.
-                          The operator will create and manage a secret from inline certificates.
-                          Must be provided together with ServerCert and ServerKey.
-                        type: string
+                          CA optionally specifies a user-provided Certificate Authority for
+                          certificate issuance. If not specified, the operator generates and
+                          manages a self-signed CA. Providing a CA allows certificates to chain
+                          to your organisation's trusted root.
+                        properties:
+                          secretKeys:
+                            description: SecretKeys allows overriding the key names
+                              within the CA secret.
+                            properties:
+                              certificate:
+                                default: tls.crt
+                                description: Certificate is the key name for the CA
+                                  certificate.
+                                type: string
+                              privateKey:
+                                default: tls.key
+                                description: PrivateKey is the key name for the CA
+                                  private key.
+                                type: string
+                            type: object
+                          secretName:
+                            description: |-
+                              SecretName is the name of the Secret containing the CA certificate
+                              and private key. Expected keys: tls.crt (certificate), tls.key (private key).
+                            type: string
+                        required:
+                        - secretName
+                        type: object
                       enabled:
                         default: false
-                        description: Enabled determines if TLS is enabled
+                        description: |-
+                          Enabled turns on TLS for all Nomad communications. The operator
+                          manages all certificate issuance, rotation, and distribution.
                         type: boolean
-                      secretKeys:
-                        description: |-
-                          SecretKeys allows overriding the expected key names within the TLS secret.
-                          Useful when the secret is produced by cert-manager or another provider
-                          that uses different key names (e.g., tls.crt instead of server.crt).
-                          Only used when SecretName is specified.
-                        properties:
-                          caCert:
-                            default: ca.crt
-                            description: CACert is the key name for the CA certificate
-                              in the TLS secret.
-                            type: string
-                          serverCert:
-                            default: server.crt
-                            description: ServerCert is the key name for the server
-                              certificate in the TLS secret.
-                            type: string
-                          serverKey:
-                            default: server.key
-                            description: ServerKey is the key name for the server
-                              private key in the TLS secret.
-                            type: string
-                        type: object
-                      secretName:
-                        description: |-
-                          SecretName containing TLS certificates.
-                          Mutually exclusive with inline certificates.
-                        type: string
-                      serverCert:
-                        description: |-
-                          ServerCert is the server certificate in PEM format.
-                          Must be provided together with CACert and ServerKey.
-                        type: string
-                      serverKey:
-                        description: |-
-                          ServerKey is the server private key in PEM format.
-                          Must be provided together with CACert and ServerCert.
-                        type: string
                     type: object
-                    x-kubernetes-validations:
-                    - message: when TLS is enabled, either secretName or all inline
-                        certificates (caCert, serverCert, serverKey) must be specified
-                      rule: '!self.enabled || (has(self.secretName) && size(self.secretName)
-                        > 0) || (has(self.caCert) && size(self.caCert) > 0 && has(self.serverCert)
-                        && size(self.serverCert) > 0 && has(self.serverKey) && size(self.serverKey)
-                        > 0)'
-                    - message: secretName and inline certificates are mutually exclusive
-                      rule: '!((has(self.secretName) && size(self.secretName) > 0)
-                        && (has(self.caCert) && size(self.caCert) > 0))'
                 type: object
               services:
                 description: Services configuration for Nomad endpoints
@@ -800,6 +778,25 @@ spec:
                 - failureTolerance
                 - healthy
                 - voters
+                type: object
+              certificateAuthority:
+                description: CertificateAuthority contains information about the CA
+                  in use.
+                properties:
+                  expiryTime:
+                    description: ExpiryTime is when the CA certificate expires.
+                    type: string
+                  source:
+                    description: |-
+                      Source indicates how the CA was provisioned.
+                      Valid values: "operator-generated", "user-provided"
+                    type: string
+                  subject:
+                    description: Subject is the CA certificate's subject distinguished
+                      name.
+                    type: string
+                required:
+                - source
                 type: object
               conditions:
                 description: Conditions represent the latest observations of the cluster
