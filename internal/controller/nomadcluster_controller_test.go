@@ -59,22 +59,6 @@ func createLicenseSecret(ctx context.Context, namespace string) {
 	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 }
 
-func createTLSSecret(ctx context.Context, namespace, name string) {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"ca.crt":     []byte("-----BEGIN CERTIFICATE-----\ntest-ca\n-----END CERTIFICATE-----"),
-			"server.crt": []byte("-----BEGIN CERTIFICATE-----\ntest-cert\n-----END CERTIFICATE-----"),
-			"server.key": []byte("-----BEGIN RSA PRIVATE KEY-----\ntest-key\n-----END RSA PRIVATE KEY-----"),
-		},
-	}
-	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-}
-
 func createGossipSecret(ctx context.Context, namespace, name, key string) *corev1.Secret {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -332,7 +316,7 @@ var _ = Describe("NomadCluster Controller", func() {
 		})
 	})
 
-	Context("TLS Enabled - Missing TLS Secret", func() {
+	Context("TLS Enabled - User CA Not Found", func() {
 		var (
 			ctx       context.Context
 			namespace string
@@ -344,7 +328,6 @@ var _ = Describe("NomadCluster Controller", func() {
 			namespace = fmt.Sprintf("test-missing-tls-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
 			createLicenseSecret(ctx, namespace)
-			// Intentionally NOT creating the TLS secret
 		})
 
 		AfterEach(func() {
@@ -356,11 +339,13 @@ var _ = Describe("NomadCluster Controller", func() {
 			_ = k8sClient.Delete(ctx, ns)
 		})
 
-		It("should fail when TLS enabled but secret missing", func() {
-			By("Creating a NomadCluster with TLS enabled but no TLS secret")
+		It("should fail when TLS enabled with non-existent user CA", func() {
+			By("Creating a NomadCluster with TLS enabled and non-existent CA secret")
 			cluster = newTestCluster(namespace, "test-cluster")
 			cluster.Spec.Server.TLS.Enabled = true
-			cluster.Spec.Server.TLS.SecretName = "nomad-tls"
+			cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
+				SecretName: "nonexistent-ca",
+			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			namespacedName := types.NamespacedName{Name: "test-cluster", Namespace: namespace}
@@ -377,22 +362,22 @@ var _ = Describe("NomadCluster Controller", func() {
 				return updatedCluster.Status.Phase
 			}, timeout, interval).Should(Equal(nomadv1alpha1.ClusterPhaseFailed))
 
-			By("Verifying error message mentions TLS")
+			By("Verifying error message mentions CA")
 			Expect(updatedCluster.Status.Conditions).NotTo(BeEmpty())
-			foundTLSError := false
+			foundCAError := false
 			for _, cond := range updatedCluster.Status.Conditions {
 				if cond.Type == nomadv1alpha1.ConditionTypeReady && cond.Status == metav1.ConditionFalse {
-					if containsIgnoreCase(cond.Message, "TLS") || containsIgnoreCase(cond.Message, "tls") {
-						foundTLSError = true
+					if containsIgnoreCase(cond.Message, "CA") || containsIgnoreCase(cond.Message, "Certificate") {
+						foundCAError = true
 						break
 					}
 				}
 			}
-			Expect(foundTLSError).To(BeTrue(), "Expected TLS-related error in conditions")
+			Expect(foundCAError).To(BeTrue(), "Expected CA-related error in conditions")
 		})
 	})
 
-	Context("TLS Enabled - Valid TLS Secret", func() {
+	Context("TLS Enabled - Operator Managed", func() {
 		var (
 			ctx       context.Context
 			namespace string
@@ -404,7 +389,6 @@ var _ = Describe("NomadCluster Controller", func() {
 			namespace = fmt.Sprintf("test-valid-tls-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
 			createLicenseSecret(ctx, namespace)
-			createTLSSecret(ctx, namespace, "nomad-tls")
 		})
 
 		AfterEach(func() {
@@ -416,11 +400,10 @@ var _ = Describe("NomadCluster Controller", func() {
 			_ = k8sClient.Delete(ctx, ns)
 		})
 
-		It("should create resources with TLS configuration", func() {
-			By("Creating a NomadCluster with TLS enabled")
+		It("should create TLS resources automatically", func() {
+			By("Creating a NomadCluster with TLS enabled (no user CA)")
 			cluster = newTestCluster(namespace, "test-cluster")
 			cluster.Spec.Server.TLS.Enabled = true
-			cluster.Spec.Server.TLS.SecretName = "nomad-tls"
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			namespacedName := types.NamespacedName{Name: "test-cluster", Namespace: namespace}
@@ -448,6 +431,8 @@ var _ = Describe("NomadCluster Controller", func() {
 			Expect(cm.Data["server.hcl"]).To(ContainSubstring("http = true"))
 			Expect(cm.Data["server.hcl"]).To(ContainSubstring("rpc  = true"))
 			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`ca_file   = "/nomad/tls/ca.crt"`))
+			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`cert_file = "/nomad/tls/tls.crt"`))
+			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`key_file  = "/nomad/tls/tls.key"`))
 
 			By("Verifying StatefulSet has TLS volume mount")
 			sts := &appsv1.StatefulSet{}
@@ -458,13 +443,13 @@ var _ = Describe("NomadCluster Controller", func() {
 				}, sts)
 			}, timeout, interval).Should(Succeed())
 
-			// Check that TLS volume is present
+			// Check that TLS volume references the operator-managed secret
 			foundTLSVolume := false
 			for _, vol := range sts.Spec.Template.Spec.Volumes {
 				if vol.Name == "tls" {
 					foundTLSVolume = true
 					Expect(vol.Secret).NotTo(BeNil())
-					Expect(vol.Secret.SecretName).To(Equal("nomad-tls"))
+					Expect(vol.Secret.SecretName).To(Equal("test-cluster-tls"))
 					break
 				}
 			}

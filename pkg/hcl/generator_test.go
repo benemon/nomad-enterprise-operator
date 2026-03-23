@@ -182,8 +182,8 @@ func TestGenerator_Generate_TLSEnabled(t *testing.T) {
 		{"http enabled", "http = true"},
 		{"rpc enabled", "rpc  = true"},
 		{"ca_file", `ca_file   = "/nomad/tls/ca.crt"`},
-		{"cert_file", `cert_file = "/nomad/tls/server.crt"`},
-		{"key_file", `key_file  = "/nomad/tls/server.key"`},
+		{"cert_file", `cert_file = "/nomad/tls/tls.crt"`},
+		{"key_file", `key_file  = "/nomad/tls/tls.key"`},
 		{"verify_server_hostname", "verify_server_hostname = true"},
 		{"verify_https_client", "verify_https_client    = true"},
 	}
@@ -191,51 +191,6 @@ func TestGenerator_Generate_TLSEnabled(t *testing.T) {
 	for _, a := range assertions {
 		if !strings.Contains(hcl, a.contains) {
 			t.Errorf("Generate() missing TLS %s: expected to contain %q", a.name, a.contains)
-		}
-	}
-}
-
-func TestGenerator_Generate_TLSCustomSecretKeys(t *testing.T) {
-	cluster := &nomadv1alpha1.NomadCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster",
-			Namespace: "nomad",
-		},
-		Spec: nomadv1alpha1.NomadClusterSpec{
-			Replicas: 3,
-			Server: nomadv1alpha1.ServerSpec{
-				TLS: nomadv1alpha1.TLSSpec{
-					Enabled:    true,
-					SecretName: "cert-manager-tls",
-					SecretKeys: nomadv1alpha1.TLSSecretKeys{
-						CACert:     "ca.crt",
-						ServerCert: "tls.crt",
-						ServerKey:  "tls.key",
-					},
-				},
-			},
-		},
-	}
-
-	gen := NewGenerator(cluster, "10.0.0.100", "key")
-	hcl, err := gen.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error = %v", err)
-	}
-
-	// Verify custom file paths in TLS block
-	assertions := []struct {
-		name     string
-		contains string
-	}{
-		{"ca_file", `ca_file   = "/nomad/tls/ca.crt"`},
-		{"cert_file", `cert_file = "/nomad/tls/tls.crt"`},
-		{"key_file", `key_file  = "/nomad/tls/tls.key"`},
-	}
-
-	for _, a := range assertions {
-		if !strings.Contains(hcl, a.contains) {
-			t.Errorf("Generate() missing custom TLS %s: expected to contain %q", a.name, a.contains)
 		}
 	}
 }

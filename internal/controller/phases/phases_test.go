@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	tlspkg "github.com/hashicorp/nomad-enterprise-operator/pkg/tls"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,7 +33,6 @@ import (
 
 const (
 	testAnnotationTrue = "true"
-	testInlineCACert   = "inline-ca-cert"
 )
 
 func init() {
@@ -698,124 +698,79 @@ func TestSecretsPhase_CustomLicenseKey(t *testing.T) {
 	}
 }
 
-func TestSecretsPhase_TLSEnabled_SecretValid(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-	tlsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-tls",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"ca.crt":     []byte("ca-cert"),
-			"server.crt": []byte("server-cert"),
-			"server.key": []byte("server-key"),
-		},
-	}
+// =============================================================================
+// CertificatePhase Tests
+// =============================================================================
 
-	ctx := newTestPhaseContext(licenseSecret, tlsSecret)
-	phase := NewSecretsPhase(ctx)
+func TestCertificatePhase_Disabled(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.SecretName = "nomad-tls"
+	cluster.Spec.Server.TLS.Enabled = false
 
 	result := phase.Execute(context.Background(), cluster)
 
 	if result.Error != nil {
 		t.Fatalf("Execute() error = %v", result.Error)
 	}
+	if result.Requeue {
+		t.Error("Execute() should not requeue when TLS disabled")
+	}
 }
 
-func TestSecretsPhase_TLSEnabled_NoSecretName(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-
-	ctx := newTestPhaseContext(licenseSecret)
-	phase := NewSecretsPhase(ctx)
+func TestCertificatePhase_GeneratesCA(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.TLS.Enabled = true
-	// No SecretName specified
 
 	result := phase.Execute(context.Background(), cluster)
 
-	if result.Error == nil {
-		t.Error("Execute() should return error when TLS enabled but no secret name")
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	// Verify CA secret was created
+	caSecret := &corev1.Secret{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-ca",
+		Namespace: "test-ns",
+	}, caSecret)
+	if err != nil {
+		t.Fatalf("Failed to get CA secret: %v", err)
+	}
+	if _, ok := caSecret.Data["tls.crt"]; !ok {
+		t.Error("CA secret missing tls.crt")
+	}
+	if _, ok := caSecret.Data["tls.key"]; !ok {
+		t.Error("CA secret missing tls.key")
 	}
 }
 
-func TestSecretsPhase_TLSEnabled_SecretNotFound(t *testing.T) {
-	licenseSecret := &corev1.Secret{
+func TestCertificatePhase_UsesUserCA(t *testing.T) {
+	// Generate a real CA for the test
+	tlspkg := mustGenerateTestCA(t)
+
+	caSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
+			Name:      "user-ca",
 			Namespace: "test-ns",
 		},
 		Data: map[string][]byte{
-			"license": []byte("license-content"),
+			"tls.crt": tlspkg.CACertPEM,
+			"tls.key": tlspkg.CAKeyPEM,
 		},
 	}
 
-	ctx := newTestPhaseContext(licenseSecret)
-	phase := NewSecretsPhase(ctx)
+	ctx := newTestPhaseContext(caSecret)
+	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.SecretName = "missing-tls"
-
-	result := phase.Execute(context.Background(), cluster)
-
-	if result.Error == nil {
-		t.Error("Execute() should return error when TLS secret not found")
-	}
-}
-
-func TestSecretsPhase_TLSEnabled_CustomSecretKeys(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-	tlsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cert-manager-tls",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"ca.crt":  []byte("ca-cert"),
-			"tls.crt": []byte("server-cert"),
-			"tls.key": []byte("server-key"),
-		},
-	}
-
-	ctx := newTestPhaseContext(licenseSecret, tlsSecret)
-	phase := NewSecretsPhase(ctx)
-
-	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.SecretName = "cert-manager-tls"
-	cluster.Spec.Server.TLS.SecretKeys = nomadv1alpha1.TLSSecretKeys{
-		CACert:     "ca.crt",
-		ServerCert: "tls.crt",
-		ServerKey:  "tls.key",
+	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
+		SecretName: "user-ca",
 	}
 
 	result := phase.Execute(context.Background(), cluster)
@@ -823,82 +778,90 @@ func TestSecretsPhase_TLSEnabled_CustomSecretKeys(t *testing.T) {
 	if result.Error != nil {
 		t.Fatalf("Execute() error = %v", result.Error)
 	}
+
+	// Verify operator-generated CA was NOT created
+	operatorCA := &corev1.Secret{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-ca",
+		Namespace: "test-ns",
+	}, operatorCA)
+	if err == nil {
+		t.Error("Operator-generated CA secret should NOT be created when user CA is provided")
+	}
 }
 
-func TestSecretsPhase_TLSEnabled_CustomSecretKeys_MissingKey(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-	tlsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cert-manager-tls",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"ca.crt":  []byte("ca-cert"),
-			"tls.crt": []byte("server-cert"),
-			// Missing tls.key
-		},
-	}
-
-	ctx := newTestPhaseContext(licenseSecret, tlsSecret)
-	phase := NewSecretsPhase(ctx)
+func TestCertificatePhase_UserCANotFound(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.SecretName = "cert-manager-tls"
-	cluster.Spec.Server.TLS.SecretKeys = nomadv1alpha1.TLSSecretKeys{
-		CACert:     "ca.crt",
-		ServerCert: "tls.crt",
-		ServerKey:  "tls.key",
+	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
+		SecretName: "nonexistent-ca",
 	}
 
 	result := phase.Execute(context.Background(), cluster)
 
 	if result.Error == nil {
-		t.Error("Execute() should return error when custom TLS key is missing")
+		t.Error("Execute() should return error when user CA secret not found")
 	}
 }
 
-func TestSecretsPhase_TLSEnabled_MissingKeys(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-	tlsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-tls",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"ca.crt": []byte("ca-cert"),
-			// Missing server.crt and server.key
-		},
-	}
-
-	ctx := newTestPhaseContext(licenseSecret, tlsSecret)
-	phase := NewSecretsPhase(ctx)
+func TestCertificatePhase_PopulatesPhaseContext(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.SecretName = "nomad-tls"
 
 	result := phase.Execute(context.Background(), cluster)
 
-	if result.Error == nil {
-		t.Error("Execute() should return error when TLS secret missing keys")
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
 	}
+	if len(ctx.CACert) == 0 {
+		t.Error("PhaseContext.CACert should be populated after CertificatePhase")
+	}
+	if ctx.OperatorClientCertName != "test-cluster-operator-client" {
+		t.Errorf("OperatorClientCertName = %q, want %q", ctx.OperatorClientCertName, "test-cluster-operator-client")
+	}
+}
+
+func TestCertificatePhase_CreatesCABundle(t *testing.T) {
+	ctx := newTestPhaseContext()
+	phase := NewCertificatePhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.Server.TLS.Enabled = true
+
+	result := phase.Execute(context.Background(), cluster)
+
+	if result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	// Verify CA bundle ConfigMap was created
+	cm := &corev1.ConfigMap{}
+	err := ctx.Client.Get(context.Background(), types.NamespacedName{
+		Name:      "test-cluster-ca-bundle",
+		Namespace: "test-ns",
+	}, cm)
+	if err != nil {
+		t.Fatalf("Failed to get CA bundle ConfigMap: %v", err)
+	}
+	if _, ok := cm.Data["ca.crt"]; !ok {
+		t.Error("CA bundle ConfigMap missing ca.crt key")
+	}
+}
+
+// mustGenerateTestCA generates a CA for testing purposes.
+func mustGenerateTestCA(t *testing.T) *tlspkg.CABundle {
+	t.Helper()
+	ca, err := tlspkg.GenerateCA("Test CA")
+	if err != nil {
+		t.Fatalf("Failed to generate test CA: %v", err)
+	}
+	return ca
 }
 
 // =============================================================================
@@ -994,85 +957,6 @@ func TestSecretsPhase_NoLicenseConfigured(t *testing.T) {
 }
 
 // =============================================================================
-// Inline TLS Tests
-// =============================================================================
-
-func TestSecretsPhase_InlineTLS(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-
-	ctx := newTestPhaseContext(licenseSecret)
-	phase := NewSecretsPhase(ctx)
-
-	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.CACert = testInlineCACert
-	cluster.Spec.Server.TLS.ServerCert = "inline-server-cert"
-	cluster.Spec.Server.TLS.ServerKey = "inline-server-key"
-
-	result := phase.Execute(context.Background(), cluster)
-
-	if result.Error != nil {
-		t.Fatalf("Execute() error = %v", result.Error)
-	}
-
-	// Verify managed TLS secret was created
-	createdSecret := &corev1.Secret{}
-	err := ctx.Client.Get(context.Background(), types.NamespacedName{
-		Name:      "test-cluster-tls",
-		Namespace: "test-ns",
-	}, createdSecret)
-	if err != nil {
-		t.Fatalf("Failed to get created TLS secret: %v", err)
-	}
-	if string(createdSecret.Data["ca.crt"]) != testInlineCACert {
-		t.Errorf("ca.crt = %q, want %q", string(createdSecret.Data["ca.crt"]), testInlineCACert)
-	}
-	if string(createdSecret.Data["server.crt"]) != "inline-server-cert" {
-		t.Errorf("server.crt = %q, want %q", string(createdSecret.Data["server.crt"]), "inline-server-cert")
-	}
-	if string(createdSecret.Data["server.key"]) != "inline-server-key" {
-		t.Errorf("server.key = %q, want %q", string(createdSecret.Data["server.key"]), "inline-server-key")
-	}
-	if createdSecret.Annotations["nomad.hashicorp.com/managed"] != testAnnotationTrue {
-		t.Error("Created TLS secret should have managed annotation")
-	}
-}
-
-func TestSecretsPhase_InlineTLS_PartialInline(t *testing.T) {
-	licenseSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nomad-license",
-			Namespace: "test-ns",
-		},
-		Data: map[string][]byte{
-			"license": []byte("license-content"),
-		},
-	}
-
-	ctx := newTestPhaseContext(licenseSecret)
-	phase := NewSecretsPhase(ctx)
-
-	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
-	cluster.Spec.Server.TLS.CACert = testInlineCACert
-	// Missing serverCert and serverKey - should fail
-
-	result := phase.Execute(context.Background(), cluster)
-
-	if result.Error == nil {
-		t.Error("Execute() should return error when TLS inline is partial (missing certs)")
-	}
-}
-
-// =============================================================================
 // Helper Function Tests
 // =============================================================================
 
@@ -1113,56 +997,6 @@ func TestGetLicenseSecretName(t *testing.T) {
 			got := getLicenseSecretName(tt.cluster)
 			if got != tt.expected {
 				t.Errorf("getLicenseSecretName() = %q, want %q", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestGetTLSSecretName(t *testing.T) {
-	tests := []struct {
-		name     string
-		cluster  *nomadv1alpha1.NomadCluster
-		expected string
-	}{
-		{
-			name: "inline certs",
-			cluster: &nomadv1alpha1.NomadCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
-				Spec: nomadv1alpha1.NomadClusterSpec{
-					Server: nomadv1alpha1.ServerSpec{
-						TLS: nomadv1alpha1.TLSSpec{
-							Enabled:    true,
-							CACert:     "ca-cert",
-							ServerCert: "server-cert",
-							ServerKey:  "server-key",
-						},
-					},
-				},
-			},
-			expected: "my-cluster-tls",
-		},
-		{
-			name: "external secret",
-			cluster: &nomadv1alpha1.NomadCluster{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-cluster"},
-				Spec: nomadv1alpha1.NomadClusterSpec{
-					Server: nomadv1alpha1.ServerSpec{
-						TLS: nomadv1alpha1.TLSSpec{
-							Enabled:    true,
-							SecretName: "external-tls",
-						},
-					},
-				},
-			},
-			expected: "external-tls",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := getTLSSecretName(tt.cluster)
-			if got != tt.expected {
-				t.Errorf("getTLSSecretName() = %q, want %q", got, tt.expected)
 			}
 		})
 	}

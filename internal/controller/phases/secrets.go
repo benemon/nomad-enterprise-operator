@@ -50,13 +50,6 @@ func (p *SecretsPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		return result
 	}
 
-	// Handle TLS secret if TLS is enabled (inline or external)
-	if cluster.Spec.Server.TLS.Enabled {
-		if result := p.handleTLSSecret(ctx, cluster); result.Error != nil || result.Requeue {
-			return result
-		}
-	}
-
 	return OK()
 }
 
@@ -103,56 +96,6 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 	}
 
 	p.Log.V(1).Info("License secret validated", "secretName", cluster.Spec.License.SecretName)
-	return OK()
-}
-
-// handleTLSSecret creates or validates the TLS secret.
-func (p *SecretsPhase) handleTLSSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	tls := cluster.Spec.Server.TLS
-
-	// Inline TLS - create/update managed secret with fixed key names
-	if tls.CACert != "" && tls.ServerCert != "" && tls.ServerKey != "" {
-		return p.ensureManagedSecret(ctx, cluster, managedSecretConfig{
-			name:   cluster.Name + "-tls",
-			labels: GetLabels(cluster),
-			data: map[string]string{
-				"ca.crt":     tls.CACert,
-				"server.crt": tls.ServerCert,
-				"server.key": tls.ServerKey,
-			},
-		})
-	}
-
-	// External TLS - validate it exists
-	if tls.SecretName == "" {
-		return Error(fmt.Errorf("TLS is enabled but no certificates specified"),
-			"When TLS is enabled, either secretName or inline certificates (caCert, serverCert, serverKey) must be provided")
-	}
-
-	secret := &corev1.Secret{}
-	err := p.Client.Get(ctx, types.NamespacedName{
-		Name:      tls.SecretName,
-		Namespace: cluster.Namespace,
-	}, secret)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return Error(fmt.Errorf("TLS secret %q not found", tls.SecretName),
-				"TLS secret not found - create it with the required certificate keys")
-		}
-		return Error(err, "Failed to get TLS secret")
-	}
-
-	// Validate required keys using configurable key names
-	keys := tls.ResolvedTLSKeys()
-	requiredKeys := []string{keys.CACert, keys.ServerCert, keys.ServerKey}
-	for _, key := range requiredKeys {
-		if _, ok := secret.Data[key]; !ok {
-			return Error(fmt.Errorf("key %q not found in TLS secret", key),
-				"TLS secret missing required key: "+key)
-		}
-	}
-
-	p.Log.V(1).Info("TLS secret validated", "secretName", tls.SecretName)
 	return OK()
 }
 
@@ -233,12 +176,4 @@ func getLicenseSecretName(cluster *nomadv1alpha1.NomadCluster) string {
 		return cluster.Name + "-license"
 	}
 	return cluster.Spec.License.SecretName
-}
-
-// getTLSSecretName returns the effective TLS secret name.
-func getTLSSecretName(cluster *nomadv1alpha1.NomadCluster) string {
-	if cluster.Spec.Server.TLS.CACert != "" {
-		return cluster.Name + "-tls"
-	}
-	return cluster.Spec.Server.TLS.SecretName
 }

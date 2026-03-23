@@ -2,10 +2,10 @@
 #
 # This CR exercises the full feature set available on OpenShift:
 #   - 3-replica HA cluster with pod anti-affinity
-#   - TLS via cert-manager with custom secret key names
+#   - Operator-managed TLS with auto-generated CA and certificates
 #   - ACL with auto-bootstrap
 #   - Audit logging with persistent storage
-#   - OpenShift Route with edge TLS termination
+#   - OpenShift Route with reencrypt TLS termination (auto-configured when TLS enabled)
 #   - ServiceMonitor and PrometheusRule for observability
 #   - Custom resource limits for production workloads
 #
@@ -40,12 +40,10 @@ spec:
       enabled: true
     tls:
       enabled: true
-      # Vault Secrets Operator PKI Secrets resource should target this secret name
-      secretName: nomad-tls
-      secretKeys:
-        caCert: ca.crt
-        serverCert: tls.crt
-        serverKey: tls.key
+      # Operator automatically generates CA and all certificates.
+      # To use your own CA (e.g. from Vault PKI), uncomment:
+      # ca:
+      #   secretName: nomad-ca  # Secret with tls.crt and tls.key
     autopilot:
       cleanupDeadServers: true
       lastContactThreshold: "200ms"
