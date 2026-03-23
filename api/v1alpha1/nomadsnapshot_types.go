@@ -164,6 +164,11 @@ type NomadSnapshotStatus struct {
 	// +optional
 	TokenAccessorID string `json:"tokenAccessorID,omitempty"`
 
+	// PolicyName is the Nomad ACL policy created for the snapshot agent.
+	// Stored here so it can be cleaned up when the NomadSnapshot is deleted.
+	// +optional
+	PolicyName string `json:"policyName,omitempty"`
+
 	// LastSnapshot contains information about the most recent snapshot
 	// +optional
 	LastSnapshot *SnapshotInfo `json:"lastSnapshot,omitempty"`
