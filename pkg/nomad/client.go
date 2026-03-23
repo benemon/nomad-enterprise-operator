@@ -489,7 +489,6 @@ type AutopilotServer struct {
 	LastContact string
 }
 
-
 // SnapshotAgentPolicyRules defines the minimal permissions required by the
 // Nomad snapshot agent. The snapshot agent requires operator:snapshot-save
 // and operator:license-read capabilities per the Nomad documentation.

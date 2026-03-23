@@ -272,21 +272,15 @@ func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Cont
 	// so we replicate the TLS secret lookup here.
 	var caCert []byte
 	if tlsEnabled {
-		tlsSecretName := cluster.Spec.Server.TLS.SecretName
-		if cluster.Spec.Server.TLS.CACert != "" {
-			tlsSecretName = cluster.Name + "-tls"
-		}
-		if tlsSecretName != "" {
-			tlsSecret := &corev1.Secret{}
-			if err := r.Get(ctx, types.NamespacedName{
-				Name:      tlsSecretName,
-				Namespace: cluster.Namespace,
-			}, tlsSecret); err != nil {
-				log.Error(err, "Failed to get TLS secret for cleanup client, Nomad ACL resources may be leaked")
-			} else {
-				caKey := cluster.Spec.Server.TLS.ResolvedTLSKeys().CACert
-				caCert = tlsSecret.Data[caKey]
-			}
+		tlsSecret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      cluster.Name + "-tls",
+			Namespace: cluster.Namespace,
+		}, tlsSecret); err != nil {
+			log.Error(err, "Failed to get TLS secret for cleanup client, Nomad ACL resources may be leaked")
+			// Non-fatal: proceed with best-effort cleanup
+		} else {
+			caCert = tlsSecret.Data["ca.crt"]
 		}
 	}
 

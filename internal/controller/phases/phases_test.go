@@ -751,7 +751,7 @@ func TestCertificatePhase_GeneratesCA(t *testing.T) {
 
 func TestCertificatePhase_UsesUserCA(t *testing.T) {
 	// Generate a real CA for the test
-	tlspkg := mustGenerateTestCA(t)
+	testCA := mustGenerateTestCA(t)
 
 	caSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -759,8 +759,8 @@ func TestCertificatePhase_UsesUserCA(t *testing.T) {
 			Namespace: "test-ns",
 		},
 		Data: map[string][]byte{
-			"tls.crt": tlspkg.CACertPEM,
-			"tls.key": tlspkg.CAKeyPEM,
+			"tls.crt": testCA.CACertPEM,
+			"tls.key": testCA.CAKeyPEM,
 		},
 	}
 

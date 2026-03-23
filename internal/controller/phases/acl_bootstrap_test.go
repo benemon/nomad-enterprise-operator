@@ -33,6 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
+const testOperatorStatusName = "test-cluster-operator-status"
+
 func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	// Start a test HTTP server on port 4646 to stub Nomad API calls.
 	// LoadBalancerAddress hardcodes :4646, so the server must listen there.
@@ -50,7 +52,7 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 		resp := map[string]interface{}{
 			"AccessorID": "test-accessor-id",
 			"SecretID":   "test-secret-id",
-			"Name":       "test-cluster-operator-status",
+			"Name":       testOperatorStatusName,
 			"Type":       "client",
 			"CreateTime": "2025-01-01T00:00:00Z",
 		}
@@ -59,7 +61,7 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	})
 
 	ts := httptest.NewUnstartedServer(mux)
-	ts.Listener.Close()
+	_ = ts.Listener.Close()
 	ts.Listener = listener
 	ts.Start()
 	defer ts.Close()
@@ -98,7 +100,7 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	// 2. Secret exists
 	secret := &corev1.Secret{}
 	if err := fakeClient.Get(context.Background(), types.NamespacedName{
-		Name:      "test-cluster-operator-status",
+		Name:      testOperatorStatusName,
 		Namespace: "test-ns",
 	}, secret); err != nil {
 		t.Fatalf("Failed to get operator status secret: %v", err)
@@ -133,15 +135,15 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	}, updatedCluster); err != nil {
 		t.Fatalf("Failed to re-fetch cluster: %v", err)
 	}
-	if updatedCluster.Status.OperatorStatusSecretName != "test-cluster-operator-status" {
+	if updatedCluster.Status.OperatorStatusSecretName != testOperatorStatusName {
 		t.Errorf("OperatorStatusSecretName = %q, want %q",
-			updatedCluster.Status.OperatorStatusSecretName, "test-cluster-operator-status")
+			updatedCluster.Status.OperatorStatusSecretName, testOperatorStatusName)
 	}
 
 	// 6. Status field: OperatorStatusPolicyName
-	if updatedCluster.Status.OperatorStatusPolicyName != "test-cluster-operator-status" {
+	if updatedCluster.Status.OperatorStatusPolicyName != testOperatorStatusName {
 		t.Errorf("OperatorStatusPolicyName = %q, want %q",
-			updatedCluster.Status.OperatorStatusPolicyName, "test-cluster-operator-status")
+			updatedCluster.Status.OperatorStatusPolicyName, testOperatorStatusName)
 	}
 
 	// Verify owner reference is set
@@ -165,7 +167,7 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 	// Pre-existing operator status secret
 	opSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster-operator-status",
+			Name:      testOperatorStatusName,
 			Namespace: "test-ns",
 		},
 		Data: map[string][]byte{
@@ -176,8 +178,8 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.ACL.Enabled = true
-	cluster.Status.OperatorStatusSecretName = "test-cluster-operator-status"
-	cluster.Status.OperatorStatusPolicyName = "test-cluster-operator-status"
+	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
+	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
 
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme.Scheme).
@@ -202,7 +204,7 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 	// Verify the existing secret was not modified
 	secret := &corev1.Secret{}
 	err := fakeClient.Get(context.Background(), types.NamespacedName{
-		Name:      "test-cluster-operator-status",
+		Name:      testOperatorStatusName,
 		Namespace: "test-ns",
 	}, secret)
 	if err != nil {

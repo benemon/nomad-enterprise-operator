@@ -1134,16 +1134,6 @@ spec:
 
 		BeforeAll(func() {
 			By("generating a CA for the user-provided CA test")
-			caCert, _, _ := generateSelfSignedCert()
-			// Re-generate to get CA key - generateSelfSignedCert returns CA cert, server cert, server key
-			// We need the CA key. Regenerate using the raw CA generation approach.
-			caKey, serverCert, serverKey := generateSelfSignedCert()
-			_, _, _ = serverCert, serverKey, caKey
-
-			// Use generateSelfSignedCert to get a CA cert and key for the user CA secret
-			// The function returns (caCertPEM, serverCertPEM, serverKeyPEM)
-			// For the user CA, we need the CA cert and CA key. Since generateSelfSignedCert
-			// doesn't return the CA key directly, generate a fresh CA inline.
 			caKeyECDSA, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -1162,8 +1152,6 @@ spec:
 			caKeyDER, err := x509.MarshalECPrivateKey(caKeyECDSA)
 			Expect(err).NotTo(HaveOccurred())
 			caKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: caKeyDER})
-
-			_ = caCert // suppress unused warning from earlier assignment
 
 			By("creating the user CA secret")
 			secretYAML := fmt.Sprintf(`apiVersion: v1
@@ -1277,64 +1265,6 @@ spec:
 		})
 	})
 })
-
-// indent prepends each line of s with n spaces.
-func indent(s string, n int) string {
-	prefix := strings.Repeat(" ", n)
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	for i, line := range lines {
-		lines[i] = prefix + line
-	}
-	return strings.Join(lines, "\n")
-}
-
-// generateSelfSignedCert creates a self-signed CA and server certificate for TLS testing.
-// Returns caCertPEM, serverCertPEM, serverKeyPEM.
-func generateSelfSignedCert() (string, string, string) {
-	// Generate CA key and certificate
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	Expect(err).NotTo(HaveOccurred())
-
-	caTemplate := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Test CA"},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-	}
-
-	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	Expect(err).NotTo(HaveOccurred())
-
-	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER})
-
-	// Generate server key and certificate signed by CA
-	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	Expect(err).NotTo(HaveOccurred())
-
-	serverTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: "server.global.nomad"},
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		DNSNames:     []string{"server.global.nomad", "localhost"},
-	}
-
-	serverCertDER, err := x509.CreateCertificate(rand.Reader, serverTemplate, caTemplate, &serverKey.PublicKey, caKey)
-	Expect(err).NotTo(HaveOccurred())
-
-	serverCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER})
-
-	serverKeyDER, err := x509.MarshalECPrivateKey(serverKey)
-	Expect(err).NotTo(HaveOccurred())
-	serverKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: serverKeyDER})
-
-	return string(caCertPEM), string(serverCertPEM), string(serverKeyPEM)
-}
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
 // It uses the Kubernetes TokenRequest API to generate a token by directly sending a request
