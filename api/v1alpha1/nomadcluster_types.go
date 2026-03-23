@@ -268,74 +268,45 @@ type ACLSpec struct {
 	BootstrapSecretName string `json:"bootstrapSecretName,omitempty"`
 }
 
-// TLSSpec defines TLS configuration.
-// When Enabled is true, either SecretName or inline certificates (CACert, ServerCert, ServerKey) must be provided.
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.secretName) && size(self.secretName) > 0) || (has(self.caCert) && size(self.caCert) > 0 && has(self.serverCert) && size(self.serverCert) > 0 && has(self.serverKey) && size(self.serverKey) > 0)",message="when TLS is enabled, either secretName or all inline certificates (caCert, serverCert, serverKey) must be specified"
-// +kubebuilder:validation:XValidation:rule="!((has(self.secretName) && size(self.secretName) > 0) && (has(self.caCert) && size(self.caCert) > 0))",message="secretName and inline certificates are mutually exclusive"
+// TLSSpec defines TLS configuration for the Nomad cluster.
+// When Enabled is true, the operator generates and manages all certificates
+// automatically. A single self-signed CA is generated unless CA.SecretName
+// is provided, in which case certificates are issued from the user-supplied CA.
 type TLSSpec struct {
-	// Enabled determines if TLS is enabled
+	// Enabled turns on TLS for all Nomad communications. The operator
+	// manages all certificate issuance, rotation, and distribution.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// SecretName containing TLS certificates.
-	// Mutually exclusive with inline certificates.
+	// CA optionally specifies a user-provided Certificate Authority for
+	// certificate issuance. If not specified, the operator generates and
+	// manages a self-signed CA. Providing a CA allows certificates to chain
+	// to your organisation's trusted root.
 	// +optional
-	SecretName string `json:"secretName,omitempty"`
-
-	// SecretKeys allows overriding the expected key names within the TLS secret.
-	// Useful when the secret is produced by cert-manager or another provider
-	// that uses different key names (e.g., tls.crt instead of server.crt).
-	// Only used when SecretName is specified.
-	// +optional
-	SecretKeys TLSSecretKeys `json:"secretKeys,omitempty"`
-
-	// CACert is the CA certificate in PEM format.
-	// The operator will create and manage a secret from inline certificates.
-	// Must be provided together with ServerCert and ServerKey.
-	// +optional
-	CACert string `json:"caCert,omitempty"`
-
-	// ServerCert is the server certificate in PEM format.
-	// Must be provided together with CACert and ServerKey.
-	// +optional
-	ServerCert string `json:"serverCert,omitempty"`
-
-	// ServerKey is the server private key in PEM format.
-	// Must be provided together with CACert and ServerCert.
-	// +optional
-	ServerKey string `json:"serverKey,omitempty"`
+	CA *CASpec `json:"ca,omitempty"`
 }
 
-// TLSSecretKeys defines the key names within a TLS secret.
-// Defaults match the operator's managed secret layout (ca.crt, server.crt, server.key).
-type TLSSecretKeys struct {
-	// CACert is the key name for the CA certificate in the TLS secret.
-	// +kubebuilder:default="ca.crt"
-	CACert string `json:"caCert,omitempty"`
+// CASpec references a Secret containing a CA certificate and private key
+// from which the operator will issue all Nomad certificates.
+type CASpec struct {
+	// SecretName is the name of the Secret containing the CA certificate
+	// and private key. Expected keys: tls.crt (certificate), tls.key (private key).
+	SecretName string `json:"secretName"`
 
-	// ServerCert is the key name for the server certificate in the TLS secret.
-	// +kubebuilder:default="server.crt"
-	ServerCert string `json:"serverCert,omitempty"`
-
-	// ServerKey is the key name for the server private key in the TLS secret.
-	// +kubebuilder:default="server.key"
-	ServerKey string `json:"serverKey,omitempty"`
+	// SecretKeys allows overriding the key names within the CA secret.
+	// +optional
+	SecretKeys CASecretKeys `json:"secretKeys,omitempty"`
 }
 
-// ResolvedTLSKeys returns the effective secret key names, applying defaults
-// for any empty values.
-func (t TLSSpec) ResolvedTLSKeys() TLSSecretKeys {
-	keys := t.SecretKeys
-	if keys.CACert == "" {
-		keys.CACert = "ca.crt"
-	}
-	if keys.ServerCert == "" {
-		keys.ServerCert = "server.crt"
-	}
-	if keys.ServerKey == "" {
-		keys.ServerKey = "server.key"
-	}
-	return keys
+// CASecretKeys defines the key names within a CA Secret.
+type CASecretKeys struct {
+	// Certificate is the key name for the CA certificate.
+	// +kubebuilder:default="tls.crt"
+	Certificate string `json:"certificate,omitempty"`
+
+	// PrivateKey is the key name for the CA private key.
+	// +kubebuilder:default="tls.key"
+	PrivateKey string `json:"privateKey,omitempty"`
 }
 
 // AutopilotSpec defines Autopilot configuration
@@ -515,6 +486,22 @@ type AutopilotStatus struct {
 	Servers []ServerStatus `json:"servers,omitempty"`
 }
 
+// CertificateAuthorityStatus contains information about the CA used for
+// issuing Nomad certificates.
+type CertificateAuthorityStatus struct {
+	// Source indicates how the CA was provisioned.
+	// Valid values: "operator-generated", "user-provided"
+	Source string `json:"source"`
+
+	// ExpiryTime is when the CA certificate expires.
+	// +optional
+	ExpiryTime string `json:"expiryTime,omitempty"`
+
+	// Subject is the CA certificate's subject distinguished name.
+	// +optional
+	Subject string `json:"subject,omitempty"`
+}
+
 // ServerStatus represents the status of a single Nomad server in the cluster
 type ServerStatus struct {
 	// Name is the server name (typically the pod name)
@@ -602,6 +589,10 @@ type NomadClusterStatus struct {
 	// Autopilot contains Raft autopilot health information
 	// +optional
 	Autopilot *AutopilotStatus `json:"autopilot,omitempty"`
+
+	// CertificateAuthority contains information about the CA in use.
+	// +optional
+	CertificateAuthority *CertificateAuthorityStatus `json:"certificateAuthority,omitempty"`
 
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

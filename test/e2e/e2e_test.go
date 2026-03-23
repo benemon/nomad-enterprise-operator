@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -1003,14 +1004,10 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
-	Context("NomadCluster with inline TLS", Ordered, func() {
-		const inlineTLSClusterName = "tls-inline-cluster"
+	Context("NomadCluster with operator-managed TLS", Ordered, func() {
+		const opTLSClusterName = "tls-operator-cluster"
 
 		BeforeAll(func() {
-			By("generating self-signed certificates for inline TLS test")
-			caCert, serverCert, serverKey := generateSelfSignedCert()
-
-			// Build the CR with inline TLS certs embedded
 			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
 metadata:
@@ -1032,156 +1029,161 @@ spec:
       enabled: false
     tls:
       enabled: true
-      caCert: |
-%s
-      serverCert: |
-%s
-      serverKey: |
-%s
     audit:
       enabled: false
-`, inlineTLSClusterName, namespace,
-				indent(caCert, 8),
-				indent(serverCert, 8),
-				indent(serverKey, 8))
+`, opTLSClusterName, namespace)
 
-			By("applying the inline TLS NomadCluster CR")
+			By("applying the operator-managed TLS NomadCluster CR")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(cr)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to apply inline TLS NomadCluster CR")
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply operator-managed TLS NomadCluster CR")
 		})
 
 		AfterAll(func() {
-			By("deleting the inline TLS NomadCluster CR")
-			cmd := exec.Command("kubectl", "delete", "nomadcluster", inlineTLSClusterName, "-n", namespace, "--ignore-not-found")
+			By("deleting the operator-managed TLS NomadCluster CR")
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", opTLSClusterName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "sts", inlineTLSClusterName, "-n", namespace)
+				cmd := exec.Command("kubectl", "get", "sts", opTLSClusterName, "-n", namespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "StatefulSet should be deleted")
 			}, 2*time.Minute).Should(Succeed())
+		})
 
-			By("verifying managed TLS secret is cleaned up with CR")
+		It("should create operator-generated CA secret", func() {
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", inlineTLSClusterName+"-tls", "-n", namespace)
+				cmd := exec.Command("kubectl", "get", "secret", opTLSClusterName+"-ca", "-n", namespace)
 				_, err := utils.Run(cmd)
-				g.Expect(err).To(HaveOccurred(), "Managed TLS secret should be deleted with CR")
+				g.Expect(err).NotTo(HaveOccurred(), "CA secret not yet created")
 			}).Should(Succeed())
 		})
 
-		It("should create a managed TLS secret from inline certificates", func() {
+		It("should create server TLS secret", func() {
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", inlineTLSClusterName+"-tls", "-n", namespace)
+				cmd := exec.Command("kubectl", "get", "secret", opTLSClusterName+"-tls", "-n", namespace)
 				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Managed TLS secret not yet created")
+				g.Expect(err).NotTo(HaveOccurred(), "Server TLS secret not yet created")
 			}).Should(Succeed())
-
-			By("verifying the managed secret has expected keys")
-			cmd := exec.Command("kubectl", "get", "secret", inlineTLSClusterName+"-tls", "-n", namespace,
-				"-o", "jsonpath={.data}")
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("ca.crt"))
-			Expect(output).To(ContainSubstring("server.crt"))
-			Expect(output).To(ContainSubstring("server.key"))
 		})
 
-		It("should annotate managed TLS secret as operator-managed", func() {
-			cmd := exec.Command("kubectl", "get", "secret", inlineTLSClusterName+"-tls", "-n", namespace,
-				`-o`, `jsonpath={.metadata.annotations.nomad\.hashicorp\.com/managed}`)
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("true"), "managed annotation should be set")
-
-			By("verifying the managed secret has an owner reference to the NomadCluster")
-			cmd = exec.Command("kubectl", "get", "secret", inlineTLSClusterName+"-tls", "-n", namespace,
-				`-o`, `jsonpath={.metadata.ownerReferences[0].kind}`)
-			output, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("NomadCluster"), "owner reference should point to NomadCluster")
-		})
-
-		It("should mount TLS volume and generate TLS HCL config", func() {
+		It("should create operator client certificate secret", func() {
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "sts", inlineTLSClusterName, "-n", namespace)
+				cmd := exec.Command("kubectl", "get", "secret", opTLSClusterName+"-operator-client", "-n", namespace)
 				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Operator client cert secret not yet created")
+			}).Should(Succeed())
+		})
+
+		It("should create CA bundle ConfigMap", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", opTLSClusterName+"-ca-bundle", "-n", namespace,
+					"-o", "jsonpath={.data}")
+				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("ca.crt"), "CA bundle ConfigMap missing ca.crt key")
+			}).Should(Succeed())
+		})
+
+		It("should set certificateAuthority status to operator-generated", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", opTLSClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.certificateAuthority.source}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("operator-generated"))
 			}).Should(Succeed())
 
-			By("verifying TLS volume mount exists on the StatefulSet")
-			cmd := exec.Command("kubectl", "get", "sts", inlineTLSClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].volumeMounts}`)
+			cmd := exec.Command("kubectl", "get", "nomadcluster", opTLSClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.certificateAuthority.expiryTime}")
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("/nomad/tls"), "TLS volume mount missing")
+			Expect(output).NotTo(BeEmpty(), "expiryTime should be set")
+		})
 
-			By("verifying TLS block in generated HCL")
-			cmd = exec.Command("kubectl", "get", "configmap", inlineTLSClusterName+"-config", "-n", namespace,
-				`-o`, `jsonpath={.data.server\.hcl}`)
-			output, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("tls {"), "missing tls block")
-			Expect(output).To(ContainSubstring(`ca_file   = "/nomad/tls/ca.crt"`), "wrong ca_file path")
-			Expect(output).To(ContainSubstring(`cert_file = "/nomad/tls/server.crt"`), "wrong cert_file path")
-			Expect(output).To(ContainSubstring(`key_file  = "/nomad/tls/server.key"`), "wrong key_file path")
+		It("should reference operator-managed TLS secret in StatefulSet volume", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sts", opTLSClusterName, "-n", namespace,
+					"-o", `jsonpath={.spec.template.spec.volumes}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(opTLSClusterName+"-tls"),
+					"StatefulSet TLS volume should reference operator-managed secret")
+			}).Should(Succeed())
+		})
+
+		It("should generate HCL with operator-managed TLS paths", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", opTLSClusterName+"-config", "-n", namespace,
+					`-o`, `jsonpath={.data.server\.hcl}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("tls {"), "missing tls block")
+				g.Expect(output).To(ContainSubstring(`cert_file = "/nomad/tls/tls.crt"`), "wrong cert_file path")
+				g.Expect(output).To(ContainSubstring(`key_file  = "/nomad/tls/tls.key"`), "wrong key_file path")
+				g.Expect(output).To(ContainSubstring("verify_server_hostname = true"), "missing verify_server_hostname")
+				g.Expect(output).To(ContainSubstring("verify_https_client    = true"), "missing verify_https_client")
+			}).Should(Succeed())
 		})
 	})
 
-	Context("NomadCluster with cert-manager TLS", Ordered, func() {
-		const certManagerClusterName = "tls-certmanager-cluster"
-		const certManagerIssuerName = "selfsigned-issuer"
-		const certManagerCertName = "nomad-certmanager-tls"
-
-		// cert-manager self-signed issuer and certificate
-		certManagerResources := fmt.Sprintf(`apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  selfSigned: {}
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  secretName: %s
-  issuerRef:
-    name: %s
-    kind: Issuer
-  commonName: server.global.nomad
-  dnsNames:
-    - server.global.nomad
-    - localhost
-  duration: 24h
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-`, certManagerIssuerName, namespace,
-			certManagerCertName, namespace,
-			certManagerCertName, certManagerIssuerName)
+	Context("NomadCluster with user-provided CA", Ordered, func() {
+		const userCAClusterName = "tls-user-ca-cluster"
+		const userCASecretName = "nomad-user-ca"
 
 		BeforeAll(func() {
-			By("creating cert-manager Issuer and Certificate")
+			By("generating a CA for the user-provided CA test")
+			caCert, _, _ := generateSelfSignedCert()
+			// Re-generate to get CA key - generateSelfSignedCert returns CA cert, server cert, server key
+			// We need the CA key. Regenerate using the raw CA generation approach.
+			caKey, serverCert, serverKey := generateSelfSignedCert()
+			_, _, _ = serverCert, serverKey, caKey
+
+			// Use generateSelfSignedCert to get a CA cert and key for the user CA secret
+			// The function returns (caCertPEM, serverCertPEM, serverKeyPEM)
+			// For the user CA, we need the CA cert and CA key. Since generateSelfSignedCert
+			// doesn't return the CA key directly, generate a fresh CA inline.
+			caKeyECDSA, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+
+			caTemplate := &x509.Certificate{
+				SerialNumber:          big.NewInt(1),
+				Subject:               pkix.Name{CommonName: "User Test CA"},
+				NotBefore:             time.Now(),
+				NotAfter:              time.Now().Add(24 * time.Hour),
+				IsCA:                  true,
+				BasicConstraintsValid: true,
+				KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			}
+			caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKeyECDSA.PublicKey, caKeyECDSA)
+			Expect(err).NotTo(HaveOccurred())
+			caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER})
+			caKeyDER, err := x509.MarshalECPrivateKey(caKeyECDSA)
+			Expect(err).NotTo(HaveOccurred())
+			caKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: caKeyDER})
+
+			_ = caCert // suppress unused warning from earlier assignment
+
+			By("creating the user CA secret")
+			secretYAML := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: %s
+type: Opaque
+data:
+  tls.crt: %s
+  tls.key: %s
+`, userCASecretName, namespace,
+				base64Encode(caCertPEM),
+				base64Encode(caKeyPEM))
+
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(certManagerResources)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create cert-manager resources")
+			cmd.Stdin = strings.NewReader(secretYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create user CA secret")
 
-			By("waiting for cert-manager to populate the TLS secret")
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", certManagerCertName, "-n", namespace,
-					"-o", "jsonpath={.data.tls\\.crt}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).NotTo(BeEmpty(), "cert-manager secret not yet populated")
-			}, 2*time.Minute).Should(Succeed())
-
-			// Build CR with cert-manager secret and custom secretKeys
 			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
 metadata:
@@ -1203,74 +1205,75 @@ spec:
       enabled: false
     tls:
       enabled: true
-      secretName: %s
-      secretKeys:
-        caCert: ca.crt
-        serverCert: tls.crt
-        serverKey: tls.key
+      ca:
+        secretName: %s
     audit:
       enabled: false
-`, certManagerClusterName, namespace, certManagerCertName)
+`, userCAClusterName, namespace, userCASecretName)
 
-			By("applying the cert-manager TLS NomadCluster CR")
+			By("applying the user-provided CA NomadCluster CR")
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(cr)
 			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to apply cert-manager TLS NomadCluster CR")
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply user-provided CA NomadCluster CR")
 		})
 
 		AfterAll(func() {
-			By("deleting the cert-manager TLS NomadCluster CR")
-			cmd := exec.Command("kubectl", "delete", "nomadcluster",
-				certManagerClusterName, "-n", namespace, "--ignore-not-found")
+			By("deleting the user-provided CA NomadCluster CR")
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", userCAClusterName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "sts", certManagerClusterName, "-n", namespace)
+				cmd := exec.Command("kubectl", "get", "sts", userCAClusterName, "-n", namespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).To(HaveOccurred(), "StatefulSet should be deleted")
 			}, 2*time.Minute).Should(Succeed())
 
-			By("verifying cert-manager TLS secret still exists (not owned by CR)")
-			cmd = exec.Command("kubectl", "get", "secret", certManagerCertName, "-n", namespace)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "cert-manager secret should survive CR deletion")
-
-			By("deleting cert-manager resources")
-			cmd = exec.Command("kubectl", "delete", "certificate", certManagerCertName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "issuer", certManagerIssuerName, "-n", namespace, "--ignore-not-found")
-			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "secret", certManagerCertName, "-n", namespace, "--ignore-not-found")
+			By("deleting the user CA secret")
+			cmd = exec.Command("kubectl", "delete", "secret", userCASecretName, "-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
 		})
 
-		It("should accept the cert-manager secret with custom key names", func() {
-			By("waiting for the StatefulSet to be created")
+		It("should create server TLS secret issued from user CA", func() {
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "sts", certManagerClusterName, "-n", namespace)
+				cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-tls", "-n", namespace)
 				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "StatefulSet not yet created")
+				g.Expect(err).NotTo(HaveOccurred(), "Server TLS secret not yet created")
 			}).Should(Succeed())
 		})
 
-		It("should generate HCL with cert-manager key paths", func() {
-			cmd := exec.Command("kubectl", "get", "configmap", certManagerClusterName+"-config", "-n", namespace,
-				`-o`, `jsonpath={.data.server\.hcl}`)
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring("tls {"), "missing tls block")
-			Expect(output).To(ContainSubstring(`ca_file   = "/nomad/tls/ca.crt"`), "wrong ca_file path")
-			Expect(output).To(ContainSubstring(`cert_file = "/nomad/tls/tls.crt"`), "wrong cert_file path")
-			Expect(output).To(ContainSubstring(`key_file  = "/nomad/tls/tls.key"`), "wrong key_file path")
+		It("should create operator client certificate secret", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-operator-client", "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Operator client cert secret not yet created")
+			}).Should(Succeed())
 		})
 
-		It("should mount the cert-manager secret as TLS volume", func() {
-			cmd := exec.Command("kubectl", "get", "sts", certManagerClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.volumes}`)
-			output, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(ContainSubstring(certManagerCertName), "TLS volume should reference cert-manager secret")
+		It("should NOT create an operator-generated CA secret", func() {
+			cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-ca", "-n", namespace)
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "Operator-generated CA secret should NOT exist when user CA is provided")
+		})
+
+		It("should create CA bundle ConfigMap", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", userCAClusterName+"-ca-bundle", "-n", namespace,
+					"-o", "jsonpath={.data}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("ca.crt"))
+			}).Should(Succeed())
+		})
+
+		It("should set certificateAuthority status to user-provided", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", userCAClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.certificateAuthority.source}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("user-provided"))
+			}).Should(Succeed())
 		})
 	})
 })
@@ -1382,6 +1385,11 @@ func getMetricsOutput() string {
 	Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 	Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
 	return metricsOutput
+}
+
+// base64Encode returns the base64-encoded string of the given bytes.
+func base64Encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
 }
 
 // tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,

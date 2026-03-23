@@ -106,6 +106,14 @@ type PhaseContext struct {
 	Autopilot *nomadv1alpha1.AutopilotStatus
 	// AutopilotError contains any error from fetching autopilot info.
 	AutopilotError error
+
+	// CACert is the PEM-encoded CA certificate, populated by CertificatePhase.
+	// Used by RoutePhase for destinationCACertificate and by BuildClientConfig.
+	CACert []byte
+
+	// OperatorClientCertName is the Secret name containing the operator's client
+	// certificate for mTLS, populated by CertificatePhase.
+	OperatorClientCertName string
 }
 
 // NewPhaseContext creates a new phase context.
@@ -139,30 +147,25 @@ func GetSelectorLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
 }
 
 // BuildClientConfig assembles a nomad.ClientConfig for the given cluster,
-// reading the TLS CA certificate from the cluster's TLS secret if TLS is enabled.
+// using the CA cert and operator client certificate from PhaseContext when TLS is enabled.
 func (pc *PhaseContext) BuildClientConfig(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string) (nomad.ClientConfig, error) {
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
 	cfg := nomad.ClientConfig{
 		Token:      token,
-		TLSEnabled: tlsEnabled,
+		TLSEnabled: cluster.Spec.Server.TLS.Enabled,
 		Timeout:    timeout,
+		CACert:     pc.CACert,
 	}
 
-	if tlsEnabled {
-		tlsSecretName := getTLSSecretName(cluster)
-		if tlsSecretName != "" {
-			tlsSecret := &corev1.Secret{}
-			err := pc.Client.Get(ctx, types.NamespacedName{
-				Name:      tlsSecretName,
-				Namespace: cluster.Namespace,
-			}, tlsSecret)
-			if err != nil {
-				return cfg, fmt.Errorf("failed to get TLS secret: %w", err)
-			}
-			keys := cluster.Spec.Server.TLS.ResolvedTLSKeys()
-			cfg.CACert = tlsSecret.Data[keys.CACert]
+	if cluster.Spec.Server.TLS.Enabled && pc.OperatorClientCertName != "" {
+		secret := &corev1.Secret{}
+		if err := pc.Client.Get(ctx, types.NamespacedName{
+			Name:      pc.OperatorClientCertName,
+			Namespace: cluster.Namespace,
+		}, secret); err != nil {
+			return cfg, fmt.Errorf("failed to get operator client certificate: %w", err)
 		}
+		cfg.ClientCert = secret.Data["tls.crt"]
+		cfg.ClientKey = secret.Data["tls.key"]
 	}
 
 	return cfg, nil

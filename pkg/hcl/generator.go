@@ -81,6 +81,8 @@ type templateData struct {
 	TLSCAFile              string
 	TLSCertFile            string
 	TLSKeyFile             string
+	VerifyServerHostname   bool
+	VerifyHTTPSClient      bool
 	AuditEnabled           bool
 	AuditDeliveryGuarantee string
 	AuditFormat            string
@@ -152,9 +154,6 @@ func (g *Generator) buildTemplateData() templateData {
 		auditRotateMax = 15
 	}
 
-	// Resolve TLS key names for file paths in the volume mount
-	tlsKeys := cluster.Spec.Server.TLS.ResolvedTLSKeys()
-
 	return templateData{
 		Region:                 region,
 		Datacenter:             datacenter,
@@ -166,9 +165,11 @@ func (g *Generator) buildTemplateData() templateData {
 		GossipKey:              g.gossipKey,
 		ACLEnabled:             cluster.Spec.Server.ACL.Enabled,
 		TLSEnabled:             cluster.Spec.Server.TLS.Enabled,
-		TLSCAFile:              "/nomad/tls/" + tlsKeys.CACert,
-		TLSCertFile:            "/nomad/tls/" + tlsKeys.ServerCert,
-		TLSKeyFile:             "/nomad/tls/" + tlsKeys.ServerKey,
+		TLSCAFile:              "/nomad/tls/ca.crt",
+		TLSCertFile:            "/nomad/tls/tls.crt",
+		TLSKeyFile:             "/nomad/tls/tls.key",
+		VerifyServerHostname:   cluster.Spec.Server.TLS.Enabled,
+		VerifyHTTPSClient:      cluster.Spec.Server.TLS.Enabled,
 		AuditEnabled:           cluster.Spec.Server.Audit.Enabled,
 		AuditDeliveryGuarantee: auditDeliveryGuarantee,
 		AuditFormat:            auditFormat,
@@ -255,8 +256,8 @@ tls {
   cert_file = "{{ .TLSCertFile }}"
   key_file  = "{{ .TLSKeyFile }}"
 
-  verify_server_hostname = true
-  verify_https_client    = true
+  verify_server_hostname = {{ .VerifyServerHostname }}
+  verify_https_client    = {{ .VerifyHTTPSClient }}
 }
 {{ end }}
 

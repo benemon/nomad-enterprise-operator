@@ -88,11 +88,15 @@ func (p *RoutePhase) buildRoute(cluster *nomadv1alpha1.NomadCluster) *routev1.Ro
 
 	// Determine TLS termination type
 	termination := routev1.TLSTerminationEdge
-	switch routeSpec.TLS.Termination {
-	case "passthrough":
-		termination = routev1.TLSTerminationPassthrough
-	case "reencrypt":
+	if cluster.Spec.Server.TLS.Enabled {
 		termination = routev1.TLSTerminationReencrypt
+	} else {
+		switch routeSpec.TLS.Termination {
+		case "passthrough":
+			termination = routev1.TLSTerminationPassthrough
+		case "reencrypt":
+			termination = routev1.TLSTerminationReencrypt
+		}
 	}
 
 	// Determine insecure edge termination policy
@@ -102,6 +106,15 @@ func (p *RoutePhase) buildRoute(cluster *nomadv1alpha1.NomadCluster) *routev1.Ro
 		insecurePolicy = routev1.InsecureEdgeTerminationPolicyAllow
 	case "None":
 		insecurePolicy = routev1.InsecureEdgeTerminationPolicyNone
+	}
+
+	tlsConfig := &routev1.TLSConfig{
+		Termination:                   termination,
+		InsecureEdgeTerminationPolicy: insecurePolicy,
+	}
+
+	if termination == routev1.TLSTerminationReencrypt && len(p.CACert) > 0 {
+		tlsConfig.DestinationCACertificate = string(p.CACert)
 	}
 
 	route := &routev1.Route{
@@ -119,10 +132,7 @@ func (p *RoutePhase) buildRoute(cluster *nomadv1alpha1.NomadCluster) *routev1.Ro
 			Port: &routev1.RoutePort{
 				TargetPort: intstr.FromString("http"),
 			},
-			TLS: &routev1.TLSConfig{
-				Termination:                   termination,
-				InsecureEdgeTerminationPolicy: insecurePolicy,
-			},
+			TLS: tlsConfig,
 		},
 	}
 
@@ -143,6 +153,9 @@ func (p *RoutePhase) routeNeedsUpdate(existing, desired *routev1.Route) bool {
 			return true
 		}
 		if existing.Spec.TLS.InsecureEdgeTerminationPolicy != desired.Spec.TLS.InsecureEdgeTerminationPolicy {
+			return true
+		}
+		if existing.Spec.TLS.DestinationCACertificate != desired.Spec.TLS.DestinationCACertificate {
 			return true
 		}
 	}

@@ -165,7 +165,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, tlsEnabled)
 	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, tlsEnabled)
 
-	// Create or get management token for snapshot agent
+	// Create or get least-privilege token for snapshot agent
 	snapshotToken, _, err := r.ensureSnapshotToken(ctx, snapshot, internalAddr, loadBalancerAddr, bootstrapToken)
 	if err != nil {
 		log.Error(err, "Failed to ensure snapshot agent token")
@@ -261,6 +261,14 @@ func (r *NomadSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *
 			}
 		}
 
+		// Clean up Nomad ACL policy if we have a policy name
+		if snapshot.Status.PolicyName != "" {
+			if err := r.deleteSnapshotPolicy(ctx, snapshot); err != nil {
+				log.Error(err, "Failed to delete snapshot agent policy, continuing with deletion")
+				// Continue with deletion even if policy cleanup fails
+			}
+		}
+
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(snapshot, snapshotFinalizer)
 		if err := r.Update(ctx, snapshot); err != nil {
@@ -271,7 +279,7 @@ func (r *NomadSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *
 	return ctrl.Result{}, nil
 }
 
-// ensureSnapshotToken creates or retrieves the management token for the snapshot agent.
+// ensureSnapshotToken creates or retrieves the least-privilege token for the snapshot agent.
 // It tries the internal service address first, falling back to LoadBalancer if needed.
 // Returns the token, the address that worked, and any error.
 func (r *NomadSnapshotReconciler) ensureSnapshotToken(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, internalAddr, loadBalancerAddr, bootstrapToken string) (string, string, error) {
@@ -335,17 +343,24 @@ func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *
 		log.Info("Existing token not found, creating new one", "accessor", snapshot.Status.TokenAccessorID)
 	}
 
-	// Create new management token
-	tokenName := fmt.Sprintf("snapshot-agent-%s-%s", snapshot.Namespace, snapshot.Name)
-	newToken, err := nomadClient.CreateACLToken(bootstrapToken, tokenName, "management")
-	if err != nil {
-		return "", fmt.Errorf("failed to create management token: %w", err)
+	// Ensure the least-privilege ACL policy exists for the snapshot agent
+	policyName := fmt.Sprintf("snapshot-agent-%s-%s", snapshot.Namespace, snapshot.Name)
+	if err := nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Snapshot agent policy for "+snapshot.Name, nomad.SnapshotAgentPolicyRules); err != nil {
+		return "", fmt.Errorf("failed to create snapshot agent policy: %w", err)
 	}
 
-	log.Info("Created snapshot agent management token", "name", tokenName, "accessor", newToken.AccessorID)
+	// Create a client token bound to the policy
+	tokenName := policyName
+	newToken, err := nomadClient.CreateACLTokenWithPolicies(bootstrapToken, tokenName, []string{policyName})
+	if err != nil {
+		return "", fmt.Errorf("failed to create snapshot agent token: %w", err)
+	}
 
-	// Update status with accessor ID
+	log.Info("Created snapshot agent token with least-privilege policy", "name", tokenName, "accessor", newToken.AccessorID, "policy", policyName)
+
+	// Update status with accessor ID and policy name
 	snapshot.Status.TokenAccessorID = newToken.AccessorID
+	snapshot.Status.PolicyName = policyName
 	if err := r.Status().Update(ctx, snapshot); err != nil {
 		return "", fmt.Errorf("failed to update status with token accessor: %w", err)
 	}
@@ -353,7 +368,7 @@ func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *
 	return newToken.SecretID, nil
 }
 
-// deleteSnapshotToken revokes the snapshot agent's management token
+// deleteSnapshotToken revokes the snapshot agent's ACL token
 func (r *NomadSnapshotReconciler) deleteSnapshotToken(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot) error {
 	log := logf.FromContext(ctx)
 
@@ -417,6 +432,89 @@ func (r *NomadSnapshotReconciler) deleteSnapshotToken(ctx context.Context, snaps
 	}
 
 	log.Info("Deleted snapshot agent token via LoadBalancer", "accessor", snapshot.Status.TokenAccessorID)
+	return nil
+}
+
+// deleteSnapshotPolicy revokes the snapshot agent's ACL policy
+func (r *NomadSnapshotReconciler) deleteSnapshotPolicy(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot) error {
+	log := logf.FromContext(ctx)
+
+	// Resolve cluster reference
+	clusterNamespace := snapshot.Namespace
+	if snapshot.Spec.ClusterRef.Namespace != "" {
+		clusterNamespace = snapshot.Spec.ClusterRef.Namespace
+	}
+
+	// Get cluster
+	cluster := &nomadv1alpha1.NomadCluster{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      snapshot.Spec.ClusterRef.Name,
+		Namespace: clusterNamespace,
+	}, cluster); err != nil {
+		return fmt.Errorf("failed to get cluster: %w", err)
+	}
+
+	// Get bootstrap token
+	bootstrapSecretName := cluster.Status.ACLBootstrapSecretName
+	if bootstrapSecretName == "" {
+		bootstrapSecretName = cluster.Name + "-acl-bootstrap"
+	}
+
+	bootstrapSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      bootstrapSecretName,
+		Namespace: clusterNamespace,
+	}, bootstrapSecret); err != nil {
+		return fmt.Errorf("failed to get bootstrap secret: %w", err)
+	}
+
+	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
+
+	// Build addresses (internal first, LoadBalancer as fallback)
+	tlsEnabled := cluster.Spec.Server.TLS.Enabled
+	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, tlsEnabled)
+	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, tlsEnabled)
+
+	// Try internal address first
+	err := r.tryDeletePolicy(snapshot.Status.PolicyName, internalAddr, bootstrapToken)
+	if err == nil {
+		log.Info("Deleted snapshot agent policy via internal service", "policy", snapshot.Status.PolicyName)
+		return nil
+	}
+
+	// Check if it's a network error
+	if !nomad.IsNetworkError(err) {
+		return err
+	}
+
+	// Fall back to LoadBalancer
+	if loadBalancerAddr == "" {
+		return fmt.Errorf("internal service not reachable (%v) and no LoadBalancer address available", err)
+	}
+
+	log.Info("Internal service not reachable, falling back to LoadBalancer for policy deletion")
+	err = r.tryDeletePolicy(snapshot.Status.PolicyName, loadBalancerAddr, bootstrapToken)
+	if err != nil {
+		return err
+	}
+
+	log.Info("Deleted snapshot agent policy via LoadBalancer", "policy", snapshot.Status.PolicyName)
+	return nil
+}
+
+// tryDeletePolicy attempts to delete a policy using a specific address
+func (r *NomadSnapshotReconciler) tryDeletePolicy(policyName, nomadAddr, bootstrapToken string) error {
+	nomadClient, err := nomad.NewClient(nomad.ClientConfig{
+		Address: nomadAddr,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create Nomad client: %w", err)
+	}
+
+	if err := nomadClient.DeleteACLPolicy(bootstrapToken, policyName); err != nil {
+		return fmt.Errorf("failed to delete policy: %w", err)
+	}
+
 	return nil
 }
 

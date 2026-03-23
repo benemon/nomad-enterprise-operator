@@ -201,7 +201,7 @@ func (c *Client) CreateACLToken(authToken, name, tokenType string) (*ACLTokenRes
 	}, nil
 }
 
-// CreateACLTokenWithPolicies creates a new client ACL token bound to the given policies.
+// CreateACLTokenWithPolicies creates a new client ACL token bound to the named policies.
 // Requires a management token for authentication.
 func (c *Client) CreateACLTokenWithPolicies(authToken, name string, policies []string) (*ACLTokenResult, error) {
 	token := &nomadapi.ACLToken{
@@ -488,6 +488,17 @@ type AutopilotServer struct {
 	StableSince string
 	LastContact string
 }
+
+
+// SnapshotAgentPolicyRules defines the minimal permissions required by the
+// Nomad snapshot agent. The snapshot agent requires operator:snapshot-save
+// and operator:license-read capabilities per the Nomad documentation.
+// https://developer.hashicorp.com/nomad/commands/operator/snapshot/agent
+const SnapshotAgentPolicyRules = `
+operator {
+  capabilities = ["snapshot-save", "license-read"]
+}
+`
 
 // OperatorStatusPolicyRules defines the minimal permissions required by the
 // operator for day-2 status API calls (autopilot health, license, leader).
