@@ -566,6 +566,18 @@ type NomadClusterStatus struct {
 	// +optional
 	ACLBootstrapSecretName string `json:"aclBootstrapSecretName,omitempty"`
 
+	// OperatorStatusSecretName is the name of the Secret containing the
+	// narrow-scope ACL token used by the operator for day-2 status API calls.
+	// This token has operator:read only. The bootstrap token is not used after
+	// initial ACL bootstrap completes.
+	// +optional
+	OperatorStatusSecretName string `json:"operatorStatusSecretName,omitempty"`
+
+	// OperatorStatusPolicyName is the Nomad ACL policy name created for the
+	// operator status token. Stored for cleanup if the cluster is deleted.
+	// +optional
+	OperatorStatusPolicyName string `json:"operatorStatusPolicyName,omitempty"`
+
 	// RouteHost is the assigned Route hostname
 	// +optional
 	RouteHost string `json:"routeHost,omitempty"`

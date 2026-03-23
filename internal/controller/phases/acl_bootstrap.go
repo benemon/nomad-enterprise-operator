@@ -62,8 +62,17 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 		Namespace: cluster.Namespace,
 	}, existingSecret)
 	if err == nil {
-		// Already bootstrapped
-		p.Log.V(1).Info("ACL bootstrap secret exists, skipping bootstrap")
+		// Already bootstrapped — still ensure the operator status token exists.
+		// This handles clusters bootstrapped before the operator status token
+		// feature was deployed. ensureOperatorStatusToken is idempotent.
+		bootstrapToken := string(existingSecret.Data["secret-id"])
+		if bootstrapToken != "" {
+			if phaseResult := p.ensureOperatorStatusToken(ctx, cluster, bootstrapToken); phaseResult.Error != nil {
+				p.Log.Error(phaseResult.Error, "Failed to create operator status token, continuing")
+			}
+		} else {
+			p.Log.V(1).Info("ACL bootstrap secret exists but has no secret-id, skipping operator status token")
+		}
 		return OK()
 	}
 	if !k8serrors.IsNotFound(err) {
@@ -103,6 +112,12 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 	// Store token in secret
 	if phaseResult := p.storeBootstrapToken(ctx, cluster, bootstrapSecretName, result); phaseResult.Error != nil {
 		return phaseResult
+	}
+
+	// Create narrow-scope operator status token for day-2 API calls
+	if phaseResult := p.ensureOperatorStatusToken(ctx, cluster, result.SecretID); phaseResult.Error != nil {
+		p.Log.Error(phaseResult.Error, "Failed to create operator status token, continuing with bootstrap")
+		// Don't fail bootstrap if operator status token creation fails
 	}
 
 	p.Log.Info("ACL bootstrap completed successfully", "secretName", bootstrapSecretName)
@@ -251,6 +266,122 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *
 	}
 
 	return err
+}
+
+func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
+	ctx context.Context,
+	cluster *nomadv1alpha1.NomadCluster,
+	bootstrapToken string,
+) PhaseResult {
+	// Idempotent: if already set and the Secret exists, nothing to do
+	if cluster.Status.OperatorStatusSecretName != "" {
+		existing := &corev1.Secret{}
+		err := p.Client.Get(ctx, types.NamespacedName{
+			Name:      cluster.Status.OperatorStatusSecretName,
+			Namespace: cluster.Namespace,
+		}, existing)
+		if err == nil {
+			p.Log.V(1).Info("Operator status token already exists, skipping creation")
+			return OK()
+		}
+	}
+
+	policyName := cluster.Name + "-operator-status"
+	tokenName := cluster.Name + "-operator-status"
+	secretName := cluster.Name + "-operator-status"
+
+	tlsEnabled := cluster.Spec.Server.TLS.Enabled
+
+	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, bootstrapToken)
+	if err != nil {
+		return Error(err, "Failed to build client config for operator status token")
+	}
+
+	// Try internal service first, fall back to LoadBalancer
+	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+
+	nomadClient, err := nomad.NewClient(cfg)
+	if err != nil {
+		return Error(err, "Failed to create Nomad client for operator status token")
+	}
+
+	// Create the policy (upsert, idempotent)
+	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read)", nomad.OperatorStatusPolicyRules)
+	if err != nil && nomad.IsNetworkError(err) {
+		loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+		if loadBalancerAddress != "" {
+			cfg.Address = loadBalancerAddress
+			nomadClient, err = nomad.NewClient(cfg)
+			if err != nil {
+				return Error(err, "Failed to create Nomad client for LoadBalancer")
+			}
+			err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read)", nomad.OperatorStatusPolicyRules)
+		}
+	}
+	if err != nil {
+		return Error(err, "Failed to create operator status ACL policy")
+	}
+
+	// Secondary idempotency guard: Secret exists by deterministic name but
+	// status was never persisted (e.g. status update failed on a prior run).
+	// If the Secret already exists, skip token creation and only retry the
+	// status update to avoid leaking a new Nomad token on every reconcile.
+	existingOpSecret := &corev1.Secret{}
+	if err := p.Client.Get(ctx, types.NamespacedName{
+		Name:      secretName,
+		Namespace: cluster.Namespace,
+	}, existingOpSecret); err == nil {
+		p.Log.V(1).Info("Operator status secret exists but status not persisted, retrying status update",
+			"secret", secretName)
+		cluster.Status.OperatorStatusSecretName = secretName
+		cluster.Status.OperatorStatusPolicyName = policyName
+		if updateErr := p.Client.Status().Update(ctx, cluster); updateErr != nil {
+			return Error(updateErr, "Failed to persist operator status token fields")
+		}
+		return OK()
+	} else if !k8serrors.IsNotFound(err) {
+		return Error(err, "Failed to check for existing operator status secret")
+	}
+	// Secret does not exist — proceed with token creation below
+
+	// Create client token bound to the policy
+	newToken, err := nomadClient.CreateACLTokenWithPolicies(bootstrapToken, tokenName, []string{policyName})
+	if err != nil {
+		return Error(err, "Failed to create operator status ACL token")
+	}
+
+	// Store in a Secret
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: cluster.Namespace,
+			Labels:    GetLabels(cluster),
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"accessor-id": newToken.AccessorID,
+			"secret-id":   newToken.SecretID,
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
+		return Error(err, "Failed to set owner reference on operator status secret")
+	}
+
+	p.Log.Info("Creating operator status token secret", "name", secretName)
+	if err := p.Client.Create(ctx, secret); err != nil {
+		return Error(err, "Failed to create operator status secret")
+	}
+
+	// Update cluster status with the secret and policy names
+	cluster.Status.OperatorStatusSecretName = secretName
+	cluster.Status.OperatorStatusPolicyName = policyName
+	if err := p.Client.Status().Update(ctx, cluster); err != nil {
+		return Error(err, "Failed to update cluster status with operator status token info")
+	}
+
+	p.Log.Info("Operator status token created successfully", "secret", secretName, "policy", policyName)
+	return OK()
 }
 
 func (p *ACLBootstrapPhase) createMarkerSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretName string) PhaseResult {

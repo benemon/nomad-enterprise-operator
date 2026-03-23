@@ -214,7 +214,7 @@ func (c *Client) CreateACLTokenWithPolicies(authToken, name string, policies []s
 		AuthToken: authToken,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ACL token: %w", err)
+		return nil, fmt.Errorf("failed to create ACL token with policies: %w", err)
 	}
 
 	return &ACLTokenResult{
@@ -489,6 +489,7 @@ type AutopilotServer struct {
 	LastContact string
 }
 
+
 // SnapshotAgentPolicyRules defines the minimal permissions required by the
 // Nomad snapshot agent. The snapshot agent requires operator:snapshot-save
 // and operator:license-read capabilities per the Nomad documentation.
@@ -496,6 +497,18 @@ type AutopilotServer struct {
 const SnapshotAgentPolicyRules = `
 operator {
   capabilities = ["snapshot-save", "license-read"]
+}
+`
+
+// OperatorStatusPolicyRules defines the minimal permissions required by the
+// operator for day-2 status API calls (autopilot health, license, leader).
+// operator:read covers all three endpoints used by ClusterStatusPhase.
+// /v1/status/leader requires no token at all; the others require operator:read.
+// No agent rule is needed. The bootstrap token is not used after initial ACL
+// bootstrap completes.
+const OperatorStatusPolicyRules = `
+operator {
+  policy = "read"
 }
 `
 

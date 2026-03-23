@@ -900,6 +900,18 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              operatorStatusPolicyName:
+                description: |-
+                  OperatorStatusPolicyName is the Nomad ACL policy name created for the
+                  operator status token. Stored for cleanup if the cluster is deleted.
+                type: string
+              operatorStatusSecretName:
+                description: |-
+                  OperatorStatusSecretName is the name of the Secret containing the
+                  narrow-scope ACL token used by the operator for day-2 status API calls.
+                  This token has operator:read only. The bootstrap token is not used after
+                  initial ACL bootstrap completes.
+                type: string
               phase:
                 description: Phase represents the current phase of the cluster
                 enum:

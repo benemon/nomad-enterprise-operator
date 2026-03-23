@@ -141,7 +141,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 	// If ACL is enabled and bootstrapped, use the token
 	var aclToken string
 	if cluster.Spec.Server.ACL.Enabled {
-		token, err := p.getACLToken(ctx, cluster)
+		token, err := p.getOperatorStatusToken(ctx, cluster)
 		if err == nil && token != "" {
 			aclToken = token
 		}
@@ -184,18 +184,36 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 	return nomadClient, aclToken, nil
 }
 
-func (p *ClusterStatusPhase) getACLToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (string, error) {
+func (p *ClusterStatusPhase) getOperatorStatusToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (string, error) {
+	// Prefer the dedicated operator status token
+	if cluster.Status.OperatorStatusSecretName != "" {
+		secret := &corev1.Secret{}
+		err := p.Client.Get(ctx, types.NamespacedName{
+			Name:      cluster.Status.OperatorStatusSecretName,
+			Namespace: cluster.Namespace,
+		}, secret)
+		if err == nil {
+			token := string(secret.Data["secret-id"])
+			if token != "" {
+				return token, nil
+			}
+		}
+		// Secret missing or empty — fall through to bootstrap token as fallback
+		p.Log.V(1).Info("Operator status token not available, falling back to bootstrap token",
+			"secret", cluster.Status.OperatorStatusSecretName)
+	}
+
+	// Fallback: bootstrap token (used only until operator status token is created)
 	secretName := cluster.Name + "-acl-bootstrap"
 	if cluster.Spec.Server.ACL.BootstrapSecretName != "" {
 		secretName = cluster.Spec.Server.ACL.BootstrapSecretName
 	}
 
 	secret := &corev1.Secret{}
-	err := p.Client.Get(ctx, types.NamespacedName{
+	if err := p.Client.Get(ctx, types.NamespacedName{
 		Name:      secretName,
 		Namespace: cluster.Namespace,
-	}, secret)
-	if err != nil {
+	}, secret); err != nil {
 		return "", err
 	}
 
