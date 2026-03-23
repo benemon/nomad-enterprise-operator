@@ -201,6 +201,32 @@ func (c *Client) CreateACLToken(authToken, name, tokenType string) (*ACLTokenRes
 	}, nil
 }
 
+// CreateACLTokenWithPolicies creates a new client ACL token bound to the given policies.
+// Requires a management token for authentication.
+func (c *Client) CreateACLTokenWithPolicies(authToken, name string, policies []string) (*ACLTokenResult, error) {
+	token := &nomadapi.ACLToken{
+		Name:     name,
+		Type:     "client",
+		Policies: policies,
+	}
+
+	result, _, err := c.api.ACLTokens().Create(token, &nomadapi.WriteOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ACL token with policies: %w", err)
+	}
+
+	return &ACLTokenResult{
+		AccessorID:     result.AccessorID,
+		SecretID:       result.SecretID,
+		Name:           result.Name,
+		Type:           result.Type,
+		CreateTime:     result.CreateTime,
+		ExpirationTime: result.ExpirationTime,
+	}, nil
+}
+
 // GetACLToken retrieves an ACL token by accessor ID.
 // Requires a management token for authentication.
 func (c *Client) GetACLToken(authToken, accessorID string) (*ACLTokenResult, error) {
@@ -233,6 +259,19 @@ func (c *Client) DeleteACLToken(authToken, accessorID string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete ACL token: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteACLPolicy deletes an ACL policy by name.
+// Requires a management token for authentication.
+func (c *Client) DeleteACLPolicy(authToken, name string) error {
+	_, err := c.api.ACLPolicies().Delete(name, &nomadapi.WriteOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete ACL policy: %w", err)
 	}
 
 	return nil
@@ -449,6 +488,18 @@ type AutopilotServer struct {
 	StableSince string
 	LastContact string
 }
+
+// OperatorStatusPolicyRules defines the minimal permissions required by the
+// operator for day-2 status API calls (autopilot health, license, leader).
+// operator:read covers all three endpoints used by ClusterStatusPhase.
+// /v1/status/leader requires no token at all; the others require operator:read.
+// No agent rule is needed. The bootstrap token is not used after initial ACL
+// bootstrap completes.
+const OperatorStatusPolicyRules = `
+operator {
+  policy = "read"
+}
+`
 
 // AnonymousPolicyRules is the recommended anonymous policy for basic cluster visibility.
 // This provides read-only access to common resources for unauthenticated requests.

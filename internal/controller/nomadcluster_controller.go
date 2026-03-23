@@ -40,6 +40,7 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 
 	routev1 "github.com/openshift/api/route/v1"
 )
@@ -189,6 +190,14 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 	if controllerutil.ContainsFinalizer(cluster, nomadClusterFinalizer) {
 		log.Info("Handling NomadCluster deletion")
 
+		// Attempt to clean up Nomad-side ACL resources
+		// Non-fatal — Kubernetes-owned resources are cleaned up via owner references
+		if cluster.Status.OperatorStatusPolicyName != "" {
+			if err := r.cleanupOperatorStatusResources(ctx, cluster); err != nil {
+				log.Error(err, "Failed to clean up operator status ACL resources, continuing")
+			}
+		}
+
 		// Clean up PVCs created by StatefulSet volumeClaimTemplates
 		// These are not owned by the NomadCluster so won't be garbage collected automatically
 		if err := r.cleanupPVCs(ctx, cluster); err != nil {
@@ -226,6 +235,97 @@ func (r *NomadClusterReconciler) cleanupPVCs(ctx context.Context, cluster *nomad
 			return err
 		}
 	}
+
+	return nil
+}
+
+// cleanupOperatorStatusResources attempts to delete the Nomad-side ACL token
+// and policy created for the operator status token. Failures are non-fatal.
+func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) error {
+	log := logf.FromContext(ctx)
+
+	// Retrieve bootstrap token for authentication
+	bootstrapSecretName := cluster.Name + "-acl-bootstrap"
+	if cluster.Spec.Server.ACL.BootstrapSecretName != "" {
+		bootstrapSecretName = cluster.Spec.Server.ACL.BootstrapSecretName
+	}
+
+	bootstrapSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      bootstrapSecretName,
+		Namespace: cluster.Namespace,
+	}, bootstrapSecret); err != nil {
+		return fmt.Errorf("failed to get bootstrap secret for cleanup: %w", err)
+	}
+	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
+	if bootstrapToken == "" {
+		return fmt.Errorf("bootstrap secret has empty secret-id")
+	}
+
+	// Create Nomad client targeting the internal service address
+	tlsEnabled := cluster.Spec.Server.TLS.Enabled
+	address := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+
+	// Load TLS CA cert if TLS is enabled, matching BuildClientConfig's behaviour.
+	// cleanupOperatorStatusResources is on NomadClusterReconciler (not PhaseContext)
+	// so we replicate the TLS secret lookup here.
+	var caCert []byte
+	if tlsEnabled {
+		tlsSecretName := cluster.Spec.Server.TLS.SecretName
+		if cluster.Spec.Server.TLS.CACert != "" {
+			tlsSecretName = cluster.Name + "-tls"
+		}
+		if tlsSecretName != "" {
+			tlsSecret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      tlsSecretName,
+				Namespace: cluster.Namespace,
+			}, tlsSecret); err != nil {
+				log.Error(err, "Failed to get TLS secret for cleanup client, Nomad ACL resources may be leaked")
+			} else {
+				caKey := cluster.Spec.Server.TLS.ResolvedTLSKeys().CACert
+				caCert = tlsSecret.Data[caKey]
+			}
+		}
+	}
+
+	cfg := nomad.ClientConfig{
+		Address:    address,
+		Token:      bootstrapToken,
+		TLSEnabled: tlsEnabled,
+		CACert:     caCert,
+		Timeout:    10 * time.Second,
+	}
+
+	nomadClient, err := nomad.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create Nomad client for cleanup: %w", err)
+	}
+
+	// Revoke the operator status token if we can read its accessor ID
+	if cluster.Status.OperatorStatusSecretName != "" {
+		opSecret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      cluster.Status.OperatorStatusSecretName,
+			Namespace: cluster.Namespace,
+		}, opSecret); err == nil {
+			accessorID := string(opSecret.Data["accessor-id"])
+			if accessorID != "" {
+				if err := nomadClient.DeleteACLToken(bootstrapToken, accessorID); err != nil {
+					log.Error(err, "Failed to delete operator status ACL token", "accessorID", accessorID)
+				} else {
+					log.Info("Deleted operator status ACL token", "accessorID", accessorID)
+				}
+			}
+		}
+	}
+
+	// Delete the operator status policy
+	if err := nomadClient.DeleteACLPolicy(bootstrapToken, cluster.Status.OperatorStatusPolicyName); err != nil {
+		log.Error(err, "Failed to delete operator status ACL policy", "policy", cluster.Status.OperatorStatusPolicyName)
+		return err
+	}
+	log.Info("Deleted operator status ACL policy", "policy", cluster.Status.OperatorStatusPolicyName)
 
 	return nil
 }

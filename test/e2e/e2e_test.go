@@ -709,6 +709,31 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(ContainSubstring("accessor-id"))
 			Expect(output).To(ContainSubstring("secret-id"))
+
+			By("verifying operatorStatusSecretName is set in cluster status")
+			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.operatorStatusSecretName}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "operatorStatusSecretName should be set after ACL bootstrap")
+			Expect(output).To(Equal(testClusterName+"-operator-status"),
+				"operatorStatusSecretName should follow expected naming convention")
+
+			By("verifying operatorStatusPolicyName is set in cluster status")
+			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.operatorStatusPolicyName}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "operatorStatusPolicyName should be set after ACL bootstrap")
+			Expect(output).To(Equal(testClusterName+"-operator-status"),
+				"operatorStatusPolicyName should follow expected naming convention")
+
+			By("verifying the operator status secret contains expected keys")
+			cmd = exec.Command("kubectl", "get", "secret", testClusterName+"-operator-status", "-n", namespace,
+				"-o", "jsonpath={.data.secret-id}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "operator status secret should contain a non-empty secret-id")
 		})
 
 		It("should enrich status with Nomad API data", func() {
@@ -962,6 +987,14 @@ var _ = Describe("Manager", Ordered, func() {
 					g.Expect(err).To(HaveOccurred(), "%s %s should be deleted", r.kind, r.name)
 				}).Should(Succeed())
 			}
+
+			By("verifying operator status secret is cleaned up after cluster deletion")
+			Eventually(func() error {
+				cmd = exec.Command("kubectl", "get", "secret", testClusterName+"-operator-status", "-n", namespace)
+				_, err = utils.Run(cmd)
+				return err
+			}, time.Minute, time.Second*5).Should(HaveOccurred(),
+				"operator status secret should be deleted with the cluster")
 
 			By("verifying license secret still exists (not owned by CR)")
 			cmd = exec.Command("kubectl", "get", "secret", "nomad-license", "-n", namespace)
