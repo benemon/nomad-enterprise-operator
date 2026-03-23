@@ -137,10 +137,8 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 		return nil, err
 	}
 
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
 	// Try internal service first (operator typically runs in-cluster)
-	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 	cfg.Address = internalAddress
 
 	p.Log.Info("Attempting ACL bootstrap via internal service", "address", internalAddress)
@@ -167,7 +165,7 @@ func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomad
 		"loadBalancerAddress", p.AdvertiseAddress)
 
 	// Fall back to LoadBalancer address
-	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 	if loadBalancerAddress == "" {
 		return nil, fmt.Errorf("ACL bootstrap failed: internal service not reachable (%v) and no LoadBalancer address available. "+
 			"Ensure the operator is running in-cluster, or that the LoadBalancer service has an external IP assigned", err)
@@ -239,10 +237,8 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *
 		return err
 	}
 
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
 	// Try internal service first, fall back to LoadBalancer
-	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
 	nomadClient, err := nomad.NewClient(cfg)
 	if err != nil {
@@ -255,7 +251,7 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *
 	}
 
 	// If internal service failed with network error, try LoadBalancer
-	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 	if err != nil && loadBalancerAddress != "" {
 		cfg.Address = loadBalancerAddress
 		nomadClient, err = nomad.NewClient(cfg)
@@ -290,15 +286,13 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	tokenName := cluster.Name + "-operator-status"
 	secretName := cluster.Name + "-operator-status"
 
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
 	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, bootstrapToken)
 	if err != nil {
 		return Error(err, "Failed to build client config for operator status token")
 	}
 
 	// Try internal service first, fall back to LoadBalancer
-	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
 	nomadClient, err := nomad.NewClient(cfg)
 	if err != nil {
@@ -308,7 +302,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	// Create the policy (upsert, idempotent)
 	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read)", nomad.OperatorStatusPolicyRules)
 	if err != nil && nomad.IsNetworkError(err) {
-		loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+		loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 		if loadBalancerAddress != "" {
 			cfg.Address = loadBalancerAddress
 			nomadClient, err = nomad.NewClient(cfg)

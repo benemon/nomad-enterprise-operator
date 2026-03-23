@@ -152,10 +152,8 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 		return nil, "", err
 	}
 
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-
 	// Try internal service first (operator typically runs in-cluster)
-	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 	cfg.Address = internalAddress
 
 	nomadClient, err := nomad.NewClient(cfg)
@@ -170,7 +168,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 	}
 
 	// If internal service failed with network error, try LoadBalancer
-	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, tlsEnabled)
+	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 	if nomad.IsNetworkError(err) && loadBalancerAddress != "" {
 		cfg.Address = loadBalancerAddress
 		p.Log.V(1).Info("Internal service not reachable, using LoadBalancer for status",

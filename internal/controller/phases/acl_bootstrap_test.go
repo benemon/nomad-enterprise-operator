@@ -19,6 +19,7 @@ package phases
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -63,8 +64,12 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	ts := httptest.NewUnstartedServer(mux)
 	_ = ts.Listener.Close()
 	ts.Listener = listener
-	ts.Start()
+	ts.StartTLS()
 	defer ts.Close()
+
+	// Extract the test server's CA cert so the Nomad client trusts it
+	serverCACert := ts.TLS.Certificates[0].Certificate[0]
+	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCACert})
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.ACL.Enabled = true
@@ -83,6 +88,7 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 		Scheme:           scheme.Scheme,
 		Log:              zap.New(zap.UseDevMode(true)),
 		AdvertiseAddress: "127.0.0.1",
+		CACert:           caCertPEM,
 	}
 
 	phase := NewACLBootstrapPhase(phaseCtx)

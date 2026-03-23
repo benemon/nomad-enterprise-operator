@@ -21,6 +21,7 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	routev1 "github.com/openshift/api/route/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,6 +46,7 @@ func (p *RoutePhase) Name() string {
 }
 
 // Execute creates or updates the OpenShift Route for Nomad UI access.
+// The Route always uses reencrypt termination since mTLS is always enabled.
 func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	// Skip if OpenShift or Route is disabled
 	if !cluster.Spec.OpenShift.Enabled || !cluster.Spec.OpenShift.Route.Enabled {
@@ -52,15 +54,17 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 		return OK()
 	}
 
-	route := p.buildRoute(cluster)
+	route, err := p.buildRoute(ctx, cluster)
+	if err != nil {
+		return Error(err, "Failed to build Route")
+	}
 
 	if err := controllerutil.SetControllerReference(cluster, route, p.Scheme); err != nil {
 		return Error(err, "Failed to set owner reference on Route")
 	}
 
 	existing := &routev1.Route{}
-	err := p.Client.Get(ctx, types.NamespacedName{Name: route.Name, Namespace: route.Namespace}, existing)
-	if err != nil {
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: route.Name, Namespace: route.Namespace}, existing); err != nil {
 		if errors.IsNotFound(err) {
 			p.Log.Info("Creating Route", "name", route.Name)
 			if err := p.Client.Create(ctx, route); err != nil {
@@ -71,7 +75,8 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 		return Error(err, "Failed to get Route")
 	}
 
-	// Update if TLS config changed
+	// Always overwrite spec on every reconcile so that certificate renewals,
+	// CA rotations, and CertificateSecretName changes are picked up.
 	if p.routeNeedsUpdate(existing, route) {
 		existing.Spec = route.Spec
 		p.Log.Info("Updating Route", "name", route.Name)
@@ -83,38 +88,31 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 	return OK()
 }
 
-func (p *RoutePhase) buildRoute(cluster *nomadv1alpha1.NomadCluster) *routev1.Route {
+func (p *RoutePhase) buildRoute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*routev1.Route, error) {
 	routeSpec := cluster.Spec.OpenShift.Route
 
-	// Determine TLS termination type
-	termination := routev1.TLSTerminationEdge
-	if cluster.Spec.Server.TLS.Enabled {
-		termination = routev1.TLSTerminationReencrypt
-	} else {
-		switch routeSpec.TLS.Termination {
-		case "passthrough":
-			termination = routev1.TLSTerminationPassthrough
-		case "reencrypt":
-			termination = routev1.TLSTerminationReencrypt
-		}
-	}
-
-	// Determine insecure edge termination policy
-	insecurePolicy := routev1.InsecureEdgeTerminationPolicyRedirect
-	switch routeSpec.TLS.InsecureEdgeTerminationPolicy {
-	case "Allow":
-		insecurePolicy = routev1.InsecureEdgeTerminationPolicyAllow
-	case "None":
-		insecurePolicy = routev1.InsecureEdgeTerminationPolicyNone
-	}
-
+	// mTLS is always enabled — Route is always reencrypt with HTTP→HTTPS redirect
 	tlsConfig := &routev1.TLSConfig{
-		Termination:                   termination,
-		InsecureEdgeTerminationPolicy: insecurePolicy,
+		Termination:                   routev1.TLSTerminationReencrypt,
+		InsecureEdgeTerminationPolicy: routev1.InsecureEdgeTerminationPolicyRedirect,
 	}
 
-	if termination == routev1.TLSTerminationReencrypt && len(p.CACert) > 0 {
+	// Set DestinationCACertificate from the Nomad CA so the router can verify the backend
+	if len(p.CACert) > 0 {
 		tlsConfig.DestinationCACertificate = string(p.CACert)
+	}
+
+	// Load custom external-facing certificate if specified
+	if routeSpec.TLS.CertificateSecretName != "" {
+		certSecret := &corev1.Secret{}
+		if err := p.Client.Get(ctx, types.NamespacedName{
+			Name:      routeSpec.TLS.CertificateSecretName,
+			Namespace: cluster.Namespace,
+		}, certSecret); err != nil {
+			return nil, err
+		}
+		tlsConfig.Certificate = string(certSecret.Data["tls.crt"])
+		tlsConfig.Key = string(certSecret.Data["tls.key"])
 	}
 
 	route := &routev1.Route{
@@ -141,7 +139,7 @@ func (p *RoutePhase) buildRoute(cluster *nomadv1alpha1.NomadCluster) *routev1.Ro
 		route.Spec.Host = routeSpec.Host
 	}
 
-	return route
+	return route, nil
 }
 
 func (p *RoutePhase) routeNeedsUpdate(existing, desired *routev1.Route) bool {
@@ -152,10 +150,13 @@ func (p *RoutePhase) routeNeedsUpdate(existing, desired *routev1.Route) bool {
 		if existing.Spec.TLS.Termination != desired.Spec.TLS.Termination {
 			return true
 		}
-		if existing.Spec.TLS.InsecureEdgeTerminationPolicy != desired.Spec.TLS.InsecureEdgeTerminationPolicy {
+		if existing.Spec.TLS.DestinationCACertificate != desired.Spec.TLS.DestinationCACertificate {
 			return true
 		}
-		if existing.Spec.TLS.DestinationCACertificate != desired.Spec.TLS.DestinationCACertificate {
+		if existing.Spec.TLS.Certificate != desired.Spec.TLS.Certificate {
+			return true
+		}
+		if existing.Spec.TLS.Key != desired.Spec.TLS.Key {
 			return true
 		}
 	}

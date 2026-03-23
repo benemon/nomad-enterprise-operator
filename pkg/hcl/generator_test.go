@@ -69,12 +69,16 @@ func TestGenerator_Generate_BasicConfiguration(t *testing.T) {
 		}
 	}
 
-	// Verify optional blocks are NOT present
-	optionalBlocks := []string{"acl {", "tls {", "audit {"}
+	// Verify optional blocks are NOT present (TLS is always on, so tls { should be present)
+	optionalBlocks := []string{"acl {", "audit {"}
 	for _, block := range optionalBlocks {
 		if strings.Contains(hcl, block) {
 			t.Errorf("Generate() should not contain %q when not enabled", block)
 		}
+	}
+	// TLS block should always be present since mTLS is always enabled
+	if !strings.Contains(hcl, "tls {") {
+		t.Error("Generate() should always contain tls block")
 	}
 }
 
@@ -158,11 +162,6 @@ func TestGenerator_Generate_TLSEnabled(t *testing.T) {
 		},
 		Spec: nomadv1alpha1.NomadClusterSpec{
 			Replicas: 3,
-			Server: nomadv1alpha1.ServerSpec{
-				TLS: nomadv1alpha1.TLSSpec{
-					Enabled: true,
-				},
-			},
 		},
 	}
 
@@ -296,9 +295,6 @@ func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 			},
 			Server: nomadv1alpha1.ServerSpec{
 				ACL: nomadv1alpha1.ACLSpec{
-					Enabled: true,
-				},
-				TLS: nomadv1alpha1.TLSSpec{
 					Enabled: true,
 				},
 				Audit: nomadv1alpha1.AuditSpec{

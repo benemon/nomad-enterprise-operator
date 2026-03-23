@@ -296,10 +296,9 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			}
 		})
 
-		It("should use HTTPS when cluster has TLS enabled", func() {
-			By("Creating a TLS-enabled NomadCluster")
+		It("should use HTTPS since mTLS is always enabled", func() {
+			By("Creating a NomadCluster")
 			cluster = newTestCluster(namespace, "nomad")
-			cluster.Spec.Server.TLS.Enabled = true
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			// Simulate ACL bootstrap
@@ -313,15 +312,6 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("Creating a NomadSnapshot")
 			snapshot = newTestSnapshot(namespace, "tls-backup", "nomad")
 			Expect(k8sClient.Create(ctx, snapshot)).To(Succeed())
-
-			By("Verifying TLS is detected from cluster spec")
-			// Fetch the cluster to verify TLS setting
-			fetchedCluster := &nomadv1alpha1.NomadCluster{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name:      "nomad",
-				Namespace: namespace,
-			}, fetchedCluster)).To(Succeed())
-			Expect(fetchedCluster.Spec.Server.TLS.Enabled).To(BeTrue())
 		})
 	})
 

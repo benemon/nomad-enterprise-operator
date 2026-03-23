@@ -151,9 +151,10 @@ make undeploy
 
 ### TLS (`spec.server.tls`)
 
+mTLS is always enabled. The operator generates and manages all certificates automatically. The only user-facing decision is which CA to use.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `server.tls.enabled` | `bool` | `false` | Enable TLS for all Nomad communications |
 | `server.tls.ca.secretName` | `string` | | Secret containing a user-provided CA (`tls.crt` and `tls.key`). If omitted, the operator generates a self-signed CA |
 | `server.tls.ca.secretKeys.certificate` | `string` | `tls.crt` | Key name for the CA certificate in the CA secret |
 | `server.tls.ca.secretKeys.privateKey` | `string` | `tls.key` | Key name for the CA private key in the CA secret |
@@ -210,10 +211,9 @@ See [ACL Configuration](#acl-configuration) for details.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `openshift.enabled` | `bool` | `false` | Enable OpenShift-specific resources (Routes, ServiceMonitors) |
-| `openshift.route.enabled` | `bool` | `false` | Create an OpenShift Route |
+| `openshift.route.enabled` | `bool` | `false` | Create an OpenShift Route. Always uses `reencrypt` termination with `Redirect` |
 | `openshift.route.host` | `string` | | Custom hostname. Auto-generated if empty |
-| `openshift.route.tls.termination` | `string` | `edge` | TLS termination (`edge`, `passthrough`, `reencrypt`). Automatically set to `reencrypt` when `server.tls.enabled: true` |
-| `openshift.route.tls.insecureEdgeTerminationPolicy` | `string` | `Redirect` | Insecure traffic policy (`Redirect`, `Allow`, `None`) |
+| `openshift.route.tls.certificateSecretName` | `string` | | Secret containing a custom external-facing certificate (`tls.crt`, `tls.key`). If omitted, the platform wildcard certificate is used |
 | `openshift.monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
 | `openshift.monitoring.scrapeInterval` | `string` | `30s` | Prometheus scrape interval |
 | `openshift.monitoring.scrapeTimeout` | `string` | `10s` | Prometheus scrape timeout |
@@ -231,7 +231,7 @@ See [ACL Configuration](#acl-configuration) for details.
 
 ## TLS Configuration
 
-Setting `server.tls.enabled: true` is the only input required for full mTLS. The operator automatically:
+mTLS is always enabled — no configuration is required. The operator automatically:
 
 - Generates a self-signed ECDSA P-256 CA (or uses a user-provided CA)
 - Issues server certificates with correct Nomad SANs (`server.<region>.nomad`, pod FQDNs, service FQDNs)
@@ -239,11 +239,11 @@ Setting `server.tls.enabled: true` is the only input required for full mTLS. The
 - Distributes a CA bundle ConfigMap for external consumers
 - Rotates certificates approaching expiry (30-day warning window)
 - Configures `verify_server_hostname = true` and `verify_https_client = true` in the Nomad HCL
-- Switches OpenShift Routes to `reencrypt` termination with the CA as `destinationCACertificate`
+- Sets OpenShift Routes to `reencrypt` termination with the CA as `destinationCACertificate`
 
 ### Generated Secrets
 
-When TLS is enabled, the operator creates the following resources in the cluster namespace:
+The operator creates the following resources in the cluster namespace:
 
 | Resource | Kind | Description |
 |----------|------|-------------|
@@ -252,7 +252,9 @@ When TLS is enabled, the operator creates the following resources in the cluster
 | `<cluster>-operator-client` | Secret | Operator client certificate for mTLS API calls (`tls.crt`, `tls.key`, `ca.crt`) |
 | `<cluster>-ca-bundle` | ConfigMap | CA certificate for external consumers |
 
-### Operator-managed TLS (default)
+### Operator-managed CA (default)
+
+A minimal CR gets full mTLS with zero TLS configuration:
 
 ```yaml
 apiVersion: nomad.hashicorp.com/v1alpha1
@@ -262,9 +264,6 @@ metadata:
 spec:
   license:
     secretName: nomad-license
-  server:
-    tls:
-      enabled: true
 ```
 
 ### User-provided CA
@@ -281,7 +280,6 @@ spec:
     secretName: nomad-license
   server:
     tls:
-      enabled: true
       ca:
         secretName: my-ca-secret  # must contain tls.crt and tls.key
 ```
@@ -391,8 +389,6 @@ spec:
     secretName: nomad-license
   server:
     acl:
-      enabled: true
-    tls:
       enabled: true
     autopilot:
       cleanupDeadServers: true

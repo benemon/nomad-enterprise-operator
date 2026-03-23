@@ -342,7 +342,7 @@ var _ = Describe("NomadCluster Controller", func() {
 		It("should fail when TLS enabled with non-existent user CA", func() {
 			By("Creating a NomadCluster with TLS enabled and non-existent CA secret")
 			cluster = newTestCluster(namespace, "test-cluster")
-			cluster.Spec.Server.TLS.Enabled = true
+
 			cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
 				SecretName: "nonexistent-ca",
 			}
@@ -403,7 +403,7 @@ var _ = Describe("NomadCluster Controller", func() {
 		It("should create TLS resources automatically", func() {
 			By("Creating a NomadCluster with TLS enabled (no user CA)")
 			cluster = newTestCluster(namespace, "test-cluster")
-			cluster.Spec.Server.TLS.Enabled = true
+
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			namespacedName := types.NamespacedName{Name: "test-cluster", Namespace: namespace}

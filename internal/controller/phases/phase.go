@@ -151,12 +151,12 @@ func GetSelectorLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
 func (pc *PhaseContext) BuildClientConfig(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string) (nomad.ClientConfig, error) {
 	cfg := nomad.ClientConfig{
 		Token:      token,
-		TLSEnabled: cluster.Spec.Server.TLS.Enabled,
+		TLSEnabled: true,
 		Timeout:    timeout,
 		CACert:     pc.CACert,
 	}
 
-	if cluster.Spec.Server.TLS.Enabled && pc.OperatorClientCertName != "" {
+	if pc.OperatorClientCertName != "" {
 		secret := &corev1.Secret{}
 		if err := pc.Client.Get(ctx, types.NamespacedName{
 			Name:      pc.OperatorClientCertName,

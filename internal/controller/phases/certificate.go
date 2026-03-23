@@ -55,10 +55,6 @@ func (p *CertificatePhase) Name() string {
 
 // Execute ensures all TLS certificates are present and valid.
 func (p *CertificatePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	if !cluster.Spec.Server.TLS.Enabled {
-		return OK()
-	}
-
 	var caBundle *tlspkg.CABundle
 
 	if cluster.Spec.Server.TLS.CA != nil && cluster.Spec.Server.TLS.CA.SecretName != "" {

@@ -27,9 +27,10 @@ spec:
     enabled: true
     route:
       enabled: true
-      tls:
-        termination: edge
-        insecureEdgeTerminationPolicy: Redirect
+      # Route always uses reencrypt termination with HTTP→HTTPS redirect.
+      # To use a custom external certificate:
+      # tls:
+      #   certificateSecretName: my-route-cert
     monitoring:
       enabled: true
       scrapeInterval: 30s
@@ -38,16 +39,15 @@ spec:
   server:
     acl:
       enabled: true  # Auto-bootstrapped by operator
-    tls:
-      enabled: false
-      # When enabled, the operator automatically generates and manages all
-      # certificates (CA, server, operator client). No additional config needed.
-      # To use your own CA instead of an operator-generated one:
-      # ca:
-      #   secretName: my-ca-secret  # Secret with tls.crt and tls.key
-      #   secretKeys:               # Override key names if needed
-      #     certificate: tls.crt    # default: tls.crt
-      #     privateKey: tls.key     # default: tls.key
+    # mTLS is always enabled. The operator automatically generates and manages
+    # all certificates (CA, server, operator client). No additional config needed.
+    # To use your own CA instead of the operator-generated one:
+    # tls:
+    #   ca:
+    #     secretName: my-ca-secret  # Secret with tls.crt and tls.key
+    #     secretKeys:               # Override key names if needed
+    #       certificate: tls.crt    # default: tls.crt
+    #       privateKey: tls.key     # default: tls.key
     autopilot:
       cleanupDeadServers: true
       lastContactThreshold: "200ms"

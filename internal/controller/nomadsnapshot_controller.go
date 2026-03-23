@@ -161,12 +161,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Build Nomad addresses (internal service first, LoadBalancer as fallback)
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, tlsEnabled)
-	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, tlsEnabled)
+	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
+	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true)
+
+	// Build base TLS client config for Nomad API calls
+	baseCfg := r.buildSnapshotClientConfig(ctx, cluster, clusterNamespace)
 
 	// Create or get least-privilege token for snapshot agent
-	snapshotToken, _, err := r.ensureSnapshotToken(ctx, snapshot, internalAddr, loadBalancerAddr, bootstrapToken)
+	snapshotToken, _, err := r.ensureSnapshotToken(ctx, snapshot, internalAddr, loadBalancerAddr, bootstrapToken, baseCfg)
 	if err != nil {
 		log.Error(err, "Failed to ensure snapshot agent token")
 		r.setCondition(snapshot, metav1.Condition{
@@ -279,15 +281,53 @@ func (r *NomadSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *
 	return ctrl.Result{}, nil
 }
 
+// buildSnapshotClientConfig loads TLS certificates from the cluster's secrets and
+// returns a base ClientConfig. The Address field is left empty — callers set it
+// to the internal or LoadBalancer address before creating a client.
+func (r *NomadSnapshotReconciler) buildSnapshotClientConfig(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace string) nomad.ClientConfig {
+	log := logf.FromContext(ctx)
+	cfg := nomad.ClientConfig{TLSEnabled: true}
+
+	tlsSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cluster.Name + "-tls",
+		Namespace: clusterNamespace,
+	}, tlsSecret); err != nil {
+		log.Error(err, "Failed to get TLS secret for snapshot client")
+		return cfg
+	}
+	cfg.CACert = tlsSecret.Data["ca.crt"]
+
+	clientSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cluster.Name + "-operator-client",
+		Namespace: clusterNamespace,
+	}, clientSecret); err != nil {
+		log.Error(err, "Failed to get operator client cert for snapshot client")
+		return cfg
+	}
+	cfg.ClientCert = clientSecret.Data["tls.crt"]
+	cfg.ClientKey = clientSecret.Data["tls.key"]
+
+	return cfg
+}
+
+// newNomadClient creates a Nomad client from a base config, overriding the address.
+func newNomadClient(baseCfg nomad.ClientConfig, address string) (*nomad.Client, error) {
+	cfg := baseCfg
+	cfg.Address = address
+	return nomad.NewClient(cfg)
+}
+
 // ensureSnapshotToken creates or retrieves the least-privilege token for the snapshot agent.
 // It tries the internal service address first, falling back to LoadBalancer if needed.
 // Returns the token, the address that worked, and any error.
-func (r *NomadSnapshotReconciler) ensureSnapshotToken(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, internalAddr, loadBalancerAddr, bootstrapToken string) (string, string, error) {
+func (r *NomadSnapshotReconciler) ensureSnapshotToken(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, internalAddr, loadBalancerAddr, bootstrapToken string, baseCfg nomad.ClientConfig) (string, string, error) {
 	log := logf.FromContext(ctx)
 
 	// Try internal address first
 	log.Info("Attempting to connect to Nomad via internal service", "address", internalAddr)
-	token, err := r.tryEnsureToken(ctx, snapshot, internalAddr, bootstrapToken)
+	token, err := r.tryEnsureToken(ctx, snapshot, internalAddr, bootstrapToken, baseCfg)
 	if err == nil {
 		log.Info("Connected to Nomad via internal service")
 		return token, internalAddr, nil
@@ -308,7 +348,7 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(ctx context.Context, snaps
 		return "", "", fmt.Errorf("internal service not reachable (%v) and no LoadBalancer address available", err)
 	}
 
-	token, err = r.tryEnsureToken(ctx, snapshot, loadBalancerAddr, bootstrapToken)
+	token, err = r.tryEnsureToken(ctx, snapshot, loadBalancerAddr, bootstrapToken, baseCfg)
 	if err != nil {
 		if nomad.IsNetworkError(err) {
 			return "", "", fmt.Errorf("neither internal service nor LoadBalancer address reachable: %v", err)
@@ -321,13 +361,10 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(ctx context.Context, snaps
 }
 
 // tryEnsureToken attempts to ensure the snapshot token using a specific address
-func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, nomadAddr, bootstrapToken string) (string, error) {
+func (r *NomadSnapshotReconciler) tryEnsureToken(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, nomadAddr, bootstrapToken string, baseCfg nomad.ClientConfig) (string, error) {
 	log := logf.FromContext(ctx)
 
-	// Create nomad client
-	nomadClient, err := nomad.NewClient(nomad.ClientConfig{
-		Address: nomadAddr,
-	})
+	nomadClient, err := newNomadClient(baseCfg, nomadAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to create Nomad client: %w", err)
 	}
@@ -403,13 +440,13 @@ func (r *NomadSnapshotReconciler) deleteSnapshotToken(ctx context.Context, snaps
 
 	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
 
-	// Build addresses (internal first, LoadBalancer as fallback)
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, tlsEnabled)
-	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, tlsEnabled)
+	// Build addresses and TLS config
+	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
+	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true)
+	baseCfg := r.buildSnapshotClientConfig(ctx, cluster, clusterNamespace)
 
 	// Try internal address first
-	err := r.tryDeleteToken(snapshot.Status.TokenAccessorID, internalAddr, bootstrapToken)
+	err := r.tryDeleteToken(snapshot.Status.TokenAccessorID, internalAddr, bootstrapToken, baseCfg)
 	if err == nil {
 		log.Info("Deleted snapshot agent token via internal service", "accessor", snapshot.Status.TokenAccessorID)
 		return nil
@@ -426,7 +463,7 @@ func (r *NomadSnapshotReconciler) deleteSnapshotToken(ctx context.Context, snaps
 	}
 
 	log.Info("Internal service not reachable, falling back to LoadBalancer for token deletion")
-	err = r.tryDeleteToken(snapshot.Status.TokenAccessorID, loadBalancerAddr, bootstrapToken)
+	err = r.tryDeleteToken(snapshot.Status.TokenAccessorID, loadBalancerAddr, bootstrapToken, baseCfg)
 	if err != nil {
 		return err
 	}
@@ -470,13 +507,13 @@ func (r *NomadSnapshotReconciler) deleteSnapshotPolicy(ctx context.Context, snap
 
 	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
 
-	// Build addresses (internal first, LoadBalancer as fallback)
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, tlsEnabled)
-	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, tlsEnabled)
+	// Build addresses and TLS config
+	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
+	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true)
+	baseCfg := r.buildSnapshotClientConfig(ctx, cluster, clusterNamespace)
 
 	// Try internal address first
-	err := r.tryDeletePolicy(snapshot.Status.PolicyName, internalAddr, bootstrapToken)
+	err := r.tryDeletePolicy(snapshot.Status.PolicyName, internalAddr, bootstrapToken, baseCfg)
 	if err == nil {
 		log.Info("Deleted snapshot agent policy via internal service", "policy", snapshot.Status.PolicyName)
 		return nil
@@ -493,7 +530,7 @@ func (r *NomadSnapshotReconciler) deleteSnapshotPolicy(ctx context.Context, snap
 	}
 
 	log.Info("Internal service not reachable, falling back to LoadBalancer for policy deletion")
-	err = r.tryDeletePolicy(snapshot.Status.PolicyName, loadBalancerAddr, bootstrapToken)
+	err = r.tryDeletePolicy(snapshot.Status.PolicyName, loadBalancerAddr, bootstrapToken, baseCfg)
 	if err != nil {
 		return err
 	}
@@ -503,10 +540,8 @@ func (r *NomadSnapshotReconciler) deleteSnapshotPolicy(ctx context.Context, snap
 }
 
 // tryDeletePolicy attempts to delete a policy using a specific address
-func (r *NomadSnapshotReconciler) tryDeletePolicy(policyName, nomadAddr, bootstrapToken string) error {
-	nomadClient, err := nomad.NewClient(nomad.ClientConfig{
-		Address: nomadAddr,
-	})
+func (r *NomadSnapshotReconciler) tryDeletePolicy(policyName, nomadAddr, bootstrapToken string, baseCfg nomad.ClientConfig) error {
+	nomadClient, err := newNomadClient(baseCfg, nomadAddr)
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client: %w", err)
 	}
@@ -519,10 +554,8 @@ func (r *NomadSnapshotReconciler) tryDeletePolicy(policyName, nomadAddr, bootstr
 }
 
 // tryDeleteToken attempts to delete a token using a specific address
-func (r *NomadSnapshotReconciler) tryDeleteToken(accessorID, nomadAddr, bootstrapToken string) error {
-	nomadClient, err := nomad.NewClient(nomad.ClientConfig{
-		Address: nomadAddr,
-	})
+func (r *NomadSnapshotReconciler) tryDeleteToken(accessorID, nomadAddr, bootstrapToken string, baseCfg nomad.ClientConfig) error {
+	nomadClient, err := newNomadClient(baseCfg, nomadAddr)
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client: %w", err)
 	}

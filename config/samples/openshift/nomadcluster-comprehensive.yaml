@@ -27,9 +27,10 @@ spec:
     enabled: true
     route:
       enabled: true
-      tls:
-        termination: edge
-        insecureEdgeTerminationPolicy: Redirect
+      # Route always uses reencrypt termination with HTTP→HTTPS redirect.
+      # To use a custom external certificate instead of the platform wildcard:
+      # tls:
+      #   certificateSecretName: my-route-cert  # Secret with tls.crt and tls.key
     monitoring:
       enabled: true
       scrapeInterval: 30s
@@ -38,12 +39,11 @@ spec:
   server:
     acl:
       enabled: true
-    tls:
-      enabled: true
-      # Operator automatically generates CA and all certificates.
-      # To use your own CA (e.g. from Vault PKI), uncomment:
-      # ca:
-      #   secretName: nomad-ca  # Secret with tls.crt and tls.key
+    # mTLS is always enabled. The operator generates CA and all certificates.
+    # To use your own CA (e.g. from Vault PKI):
+    # tls:
+    #   ca:
+    #     secretName: nomad-ca  # Secret with tls.crt and tls.key
     autopilot:
       cleanupDeadServers: true
       lastContactThreshold: "200ms"

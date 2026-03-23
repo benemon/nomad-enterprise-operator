@@ -198,17 +198,18 @@ type RouteSpec struct {
 	TLS RouteTLSSpec `json:"tls,omitempty"`
 }
 
-// RouteTLSSpec defines TLS configuration for Route
+// RouteTLSSpec defines TLS configuration for the OpenShift Route.
+// The Route always uses reencrypt termination with HTTP→HTTPS redirect.
+// The operator automatically populates DestinationCACertificate from the
+// Nomad CA. Optionally, a custom external-facing certificate can be
+// provided instead of using the platform wildcard certificate.
 type RouteTLSSpec struct {
-	// Termination type: edge, passthrough, or reencrypt
-	// +kubebuilder:validation:Enum=edge;passthrough;reencrypt
-	// +kubebuilder:default="edge"
-	Termination string `json:"termination,omitempty"`
-
-	// InsecureEdgeTerminationPolicy: Redirect, Allow, or None
-	// +kubebuilder:validation:Enum=Redirect;Allow;None
-	// +kubebuilder:default="Redirect"
-	InsecureEdgeTerminationPolicy string `json:"insecureEdgeTerminationPolicy,omitempty"`
+	// CertificateSecretName is the name of a Secret containing a custom
+	// TLS certificate for the external-facing side of the Route. The Secret
+	// must contain tls.crt (certificate) and tls.key (private key).
+	// If omitted, the platform wildcard certificate is used.
+	// +optional
+	CertificateSecretName string `json:"certificateSecretName,omitempty"`
 }
 
 // MonitoringSpec defines Prometheus monitoring configuration
@@ -269,15 +270,10 @@ type ACLSpec struct {
 }
 
 // TLSSpec defines TLS configuration for the Nomad cluster.
-// When Enabled is true, the operator generates and manages all certificates
-// automatically. A single self-signed CA is generated unless CA.SecretName
-// is provided, in which case certificates are issued from the user-supplied CA.
+// mTLS is always enabled. The operator generates and manages all certificates
+// automatically using a self-signed CA unless CA.SecretName is provided,
+// in which case certificates are issued from the user-supplied CA.
 type TLSSpec struct {
-	// Enabled turns on TLS for all Nomad communications. The operator
-	// manages all certificate issuance, rotation, and distribution.
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-
 	// CA optionally specifies a user-provided Certificate Authority for
 	// certificate issuance. If not specified, the operator generates and
 	// manages a self-signed CA. Providing a CA allows certificates to chain

@@ -97,11 +97,8 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	imageFull := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
 	pullPolicy := cluster.Spec.Image.PullPolicy
 
-	// Determine probe scheme
-	probeScheme := corev1.URISchemeHTTP
-	if cluster.Spec.Server.TLS.Enabled {
-		probeScheme = corev1.URISchemeHTTPS
-	}
+	// mTLS is always enabled — probes must use HTTPS
+	probeScheme := corev1.URISchemeHTTPS
 
 	// Build environment variables
 	env := p.buildEnvVars(cluster)
@@ -186,7 +183,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		"advertise":     p.AdvertiseAddress,
 		"gossip":        p.GossipKey,
 		"acl":           strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
-		"tls":           strconv.FormatBool(cluster.Spec.Server.TLS.Enabled),
+		"tls":           "true",
 		"audit":         strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
 		"auditDelivery": cluster.Spec.Server.Audit.DeliveryGuarantee,
 		"replicas":      strconv.Itoa(int(replicas)),
@@ -305,14 +302,12 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 		})
 	}
 
-	// Add TLS volume mount
-	if cluster.Spec.Server.TLS.Enabled {
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      "tls",
-			MountPath: "/nomad/tls",
-			ReadOnly:  true,
-		})
-	}
+	// TLS volume mount — mTLS is always enabled
+	mounts = append(mounts, corev1.VolumeMount{
+		Name:      "tls",
+		MountPath: "/nomad/tls",
+		ReadOnly:  true,
+	})
 
 	return mounts
 }
@@ -331,17 +326,15 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 		},
 	}
 
-	// Add TLS volume from the operator-managed server certificate secret
-	if cluster.Spec.Server.TLS.Enabled {
-		volumes = append(volumes, corev1.Volume{
-			Name: "tls",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: cluster.Name + "-tls",
-				},
+	// TLS volume from the operator-managed server certificate secret — mTLS is always enabled
+	volumes = append(volumes, corev1.Volume{
+		Name: "tls",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: cluster.Name + "-tls",
 			},
-		})
-	}
+		},
+	})
 
 	// Add emptyDir for data if persistence is disabled (size is empty)
 	if !isPersistenceEnabled(cluster) {
@@ -549,10 +542,8 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 		secretNames = append(secretNames, gossipSecret)
 	}
 
-	// TLS secret
-	if cluster.Spec.Server.TLS.Enabled {
-		secretNames = append(secretNames, cluster.Name+"-tls")
-	}
+	// TLS secret — mTLS is always enabled
+	secretNames = append(secretNames, cluster.Name+"-tls")
 
 	// Sort for deterministic ordering
 	sort.Strings(secretNames)

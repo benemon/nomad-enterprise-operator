@@ -5,6 +5,7 @@
 #   region: global
 #   datacenter: <namespace>
 #   gossip key: auto-generated
+#   tls: always on (operator-generated CA)
 #   acl: enabled (auto-bootstrapped, token stored in <name>-acl-bootstrap secret)
 #   persistence: 10Gi
 #   audit: enabled (5Gi volume, json format, 24h rotation)

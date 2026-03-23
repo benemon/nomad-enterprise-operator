@@ -224,23 +224,12 @@ spec:
                       tls:
                         description: TLS configuration
                         properties:
-                          insecureEdgeTerminationPolicy:
-                            default: Redirect
-                            description: 'InsecureEdgeTerminationPolicy: Redirect,
-                              Allow, or None'
-                            enum:
-                            - Redirect
-                            - Allow
-                            - None
-                            type: string
-                          termination:
-                            default: edge
-                            description: 'Termination type: edge, passthrough, or
-                              reencrypt'
-                            enum:
-                            - edge
-                            - passthrough
-                            - reencrypt
+                          certificateSecretName:
+                            description: |-
+                              CertificateSecretName is the name of a Secret containing a custom
+                              TLS certificate for the external-facing side of the Route. The Secret
+                              must contain tls.crt (certificate) and tls.key (private key).
+                              If omitted, the platform wildcard certificate is used.
                             type: string
                         type: object
                     type: object
@@ -445,12 +434,6 @@ spec:
                         required:
                         - secretName
                         type: object
-                      enabled:
-                        default: false
-                        description: |-
-                          Enabled turns on TLS for all Nomad communications. The operator
-                          manages all certificate issuance, rotation, and distribution.
-                        type: boolean
                     type: object
                 type: object
               services:

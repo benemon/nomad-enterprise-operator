@@ -98,8 +98,6 @@ spec:
   server:
     acl:
       enabled: true
-    tls:
-      enabled: false
     audit:
       enabled: true
       format: json
@@ -1027,8 +1025,6 @@ spec:
   server:
     acl:
       enabled: false
-    tls:
-      enabled: true
     audit:
       enabled: false
 `, opTLSClusterName, namespace)
@@ -1192,7 +1188,6 @@ spec:
     acl:
       enabled: false
     tls:
-      enabled: true
       ca:
         secretName: %s
     audit:

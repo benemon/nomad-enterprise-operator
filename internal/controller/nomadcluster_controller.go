@@ -264,30 +264,27 @@ func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Cont
 	}
 
 	// Create Nomad client targeting the internal service address
-	tlsEnabled := cluster.Spec.Server.TLS.Enabled
-	address := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, tlsEnabled)
+	address := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
-	// Load TLS CA cert if TLS is enabled, matching BuildClientConfig's behaviour.
-	// cleanupOperatorStatusResources is on NomadClusterReconciler (not PhaseContext)
-	// so we replicate the TLS secret lookup here.
+	// Load TLS CA cert for the cleanup client. mTLS is always enabled so we
+	// replicate the TLS secret lookup here (cleanupOperatorStatusResources is
+	// on NomadClusterReconciler, not PhaseContext).
 	var caCert []byte
-	if tlsEnabled {
-		tlsSecret := &corev1.Secret{}
-		if err := r.Get(ctx, types.NamespacedName{
-			Name:      cluster.Name + "-tls",
-			Namespace: cluster.Namespace,
-		}, tlsSecret); err != nil {
-			log.Error(err, "Failed to get TLS secret for cleanup client, Nomad ACL resources may be leaked")
-			// Non-fatal: proceed with best-effort cleanup
-		} else {
-			caCert = tlsSecret.Data["ca.crt"]
-		}
+	tlsSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cluster.Name + "-tls",
+		Namespace: cluster.Namespace,
+	}, tlsSecret); err != nil {
+		log.Error(err, "Failed to get TLS secret for cleanup client, Nomad ACL resources may be leaked")
+		// Non-fatal: proceed with best-effort cleanup
+	} else {
+		caCert = tlsSecret.Data["ca.crt"]
 	}
 
 	cfg := nomad.ClientConfig{
 		Address:    address,
 		Token:      bootstrapToken,
-		TLSEnabled: tlsEnabled,
+		TLSEnabled: true,
 		CACert:     caCert,
 		Timeout:    10 * time.Second,
 	}
@@ -735,7 +732,7 @@ func (r *NomadClusterReconciler) clusterReferencesSecret(cluster *nomadv1alpha1.
 	}
 
 	// Check user-provided CA secret
-	if cluster.Spec.Server.TLS.Enabled && cluster.Spec.Server.TLS.CA != nil && cluster.Spec.Server.TLS.CA.SecretName == secretName {
+	if cluster.Spec.Server.TLS.CA != nil && cluster.Spec.Server.TLS.CA.SecretName == secretName {
 		return true
 	}
 

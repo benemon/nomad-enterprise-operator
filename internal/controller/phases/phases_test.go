@@ -702,29 +702,11 @@ func TestSecretsPhase_CustomLicenseKey(t *testing.T) {
 // CertificatePhase Tests
 // =============================================================================
 
-func TestCertificatePhase_Disabled(t *testing.T) {
-	ctx := newTestPhaseContext()
-	phase := NewCertificatePhase(ctx)
-
-	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = false
-
-	result := phase.Execute(context.Background(), cluster)
-
-	if result.Error != nil {
-		t.Fatalf("Execute() error = %v", result.Error)
-	}
-	if result.Requeue {
-		t.Error("Execute() should not requeue when TLS disabled")
-	}
-}
-
 func TestCertificatePhase_GeneratesCA(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -768,7 +750,7 @@ func TestCertificatePhase_UsesUserCA(t *testing.T) {
 	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
+
 	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
 		SecretName: "user-ca",
 	}
@@ -795,7 +777,7 @@ func TestCertificatePhase_UserCANotFound(t *testing.T) {
 	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
+
 	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
 		SecretName: "nonexistent-ca",
 	}
@@ -812,7 +794,6 @@ func TestCertificatePhase_PopulatesPhaseContext(t *testing.T) {
 	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -832,7 +813,6 @@ func TestCertificatePhase_CreatesCABundle(t *testing.T) {
 	phase := NewCertificatePhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.Server.TLS.Enabled = true
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -1080,6 +1060,91 @@ func TestRoutePhase_OpenShiftEnabledRouteDisabled(t *testing.T) {
 
 	if result.Error != nil {
 		t.Fatalf("Execute() error = %v", result.Error)
+	}
+}
+
+func TestRoutePhase_AlwaysReencrypt(t *testing.T) {
+	ctx := newTestPhaseContext()
+	ctx.CACert = []byte("test-ca-cert")
+	phase := NewRoutePhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.OpenShift.Enabled = true
+	cluster.Spec.OpenShift.Route.Enabled = true
+
+	route, err := phase.buildRoute(context.Background(), cluster)
+	if err != nil {
+		t.Fatalf("buildRoute() error = %v", err)
+	}
+
+	if route.Spec.TLS.Termination != "reencrypt" {
+		t.Errorf("TLS termination = %q, want %q", route.Spec.TLS.Termination, "reencrypt")
+	}
+	if route.Spec.TLS.DestinationCACertificate != "test-ca-cert" {
+		t.Errorf("DestinationCACertificate = %q, want %q", route.Spec.TLS.DestinationCACertificate, "test-ca-cert")
+	}
+	if route.Spec.TLS.InsecureEdgeTerminationPolicy != "Redirect" {
+		t.Errorf("InsecureEdgeTerminationPolicy = %q, want %q", route.Spec.TLS.InsecureEdgeTerminationPolicy, "Redirect")
+	}
+}
+
+func TestRoutePhase_CustomCertificate(t *testing.T) {
+	certSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "custom-cert",
+			Namespace: "test-ns",
+		},
+		Data: map[string][]byte{
+			"tls.crt": []byte("custom-cert-pem"),
+			"tls.key": []byte("custom-key-pem"),
+		},
+	}
+
+	ctx := newTestPhaseContext(certSecret)
+	ctx.CACert = []byte("test-ca-cert")
+	phase := NewRoutePhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.OpenShift.Enabled = true
+	cluster.Spec.OpenShift.Route.Enabled = true
+	cluster.Spec.OpenShift.Route.TLS.CertificateSecretName = "custom-cert"
+
+	route, err := phase.buildRoute(context.Background(), cluster)
+	if err != nil {
+		t.Fatalf("buildRoute() error = %v", err)
+	}
+
+	if route.Spec.TLS.Certificate != "custom-cert-pem" {
+		t.Errorf("Certificate = %q, want %q", route.Spec.TLS.Certificate, "custom-cert-pem")
+	}
+	if route.Spec.TLS.Key != "custom-key-pem" {
+		t.Errorf("Key = %q, want %q", route.Spec.TLS.Key, "custom-key-pem")
+	}
+	if route.Spec.TLS.DestinationCACertificate != "test-ca-cert" {
+		t.Errorf("DestinationCACertificate = %q, want %q", route.Spec.TLS.DestinationCACertificate, "test-ca-cert")
+	}
+}
+
+func TestRoutePhase_NoCertificateClearsRouteFields(t *testing.T) {
+	ctx := newTestPhaseContext()
+	ctx.CACert = []byte("test-ca-cert")
+	phase := NewRoutePhase(ctx)
+
+	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster.Spec.OpenShift.Enabled = true
+	cluster.Spec.OpenShift.Route.Enabled = true
+	// CertificateSecretName is empty — Route should have no Certificate/Key
+
+	route, err := phase.buildRoute(context.Background(), cluster)
+	if err != nil {
+		t.Fatalf("buildRoute() error = %v", err)
+	}
+
+	if route.Spec.TLS.Certificate != "" {
+		t.Errorf("Certificate should be empty, got %q", route.Spec.TLS.Certificate)
+	}
+	if route.Spec.TLS.Key != "" {
+		t.Errorf("Key should be empty, got %q", route.Spec.TLS.Key)
 	}
 }
 
