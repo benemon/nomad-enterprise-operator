@@ -495,7 +495,8 @@ type AutopilotServer struct {
 // https://developer.hashicorp.com/nomad/commands/operator/snapshot/agent
 const SnapshotAgentPolicyRules = `
 operator {
-  capabilities = ["snapshot-save", "license-read"]
+  policy       = "read"
+  capabilities = ["snapshot-save"]
 }
 `
 
