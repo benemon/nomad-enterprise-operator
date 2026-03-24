@@ -451,19 +451,19 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(ContainSubstring("4647"), "rpc port missing")
 			Expect(output).To(ContainSubstring("4648"), "serf port missing")
 
-			By("verifying liveness probe")
+			By("verifying liveness probe uses exec with mTLS")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.httpGet.path}`)
+				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.exec.command[0]}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("/v1/agent/health?type=server"), "wrong liveness probe path")
+			Expect(output).To(Equal("nomad"), "liveness probe should use nomad CLI")
 
-			By("verifying readiness probe")
+			By("verifying readiness probe uses exec with mTLS")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].readinessProbe.httpGet.path}`)
+				"-o", `jsonpath={.spec.template.spec.containers[0].readinessProbe.exec.command[0]}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("/v1/agent/health?type=server"), "wrong readiness probe path")
+			Expect(output).To(Equal("nomad"), "readiness probe should use nomad CLI")
 
 			By("verifying NOMAD_LICENSE env var references the license secret")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
