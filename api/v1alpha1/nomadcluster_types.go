@@ -205,11 +205,25 @@ type RouteSpec struct {
 // provided instead of using the platform wildcard certificate.
 type RouteTLSSpec struct {
 	// CertificateSecretName is the name of a Secret containing a custom
-	// TLS certificate for the external-facing side of the Route. The Secret
-	// must contain tls.crt (certificate) and tls.key (private key).
+	// TLS certificate for the external-facing side of the Route.
 	// If omitted, the platform wildcard certificate is used.
 	// +optional
 	CertificateSecretName string `json:"certificateSecretName,omitempty"`
+
+	// SecretKeys allows overriding the key names within the certificate Secret.
+	// +optional
+	SecretKeys CertificateSecretKeys `json:"secretKeys,omitempty"`
+}
+
+// CertificateSecretKeys defines the key names within a TLS certificate Secret.
+type CertificateSecretKeys struct {
+	// Certificate is the key name for the TLS certificate.
+	// +kubebuilder:default="tls.crt"
+	Certificate string `json:"certificate,omitempty"`
+
+	// PrivateKey is the key name for the TLS private key.
+	// +kubebuilder:default="tls.key"
+	PrivateKey string `json:"privateKey,omitempty"`
 }
 
 // MonitoringSpec defines Prometheus monitoring configuration

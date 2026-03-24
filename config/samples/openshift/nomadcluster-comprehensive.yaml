@@ -31,6 +31,9 @@ spec:
       # To use a custom external certificate instead of the platform wildcard:
       # tls:
       #   certificateSecretName: my-route-cert  # Secret with tls.crt and tls.key
+      #   secretKeys:                           # Override key names if needed
+      #     certificate: tls.crt                # default: tls.crt
+      #     privateKey: tls.key                 # default: tls.key
     monitoring:
       enabled: true
       scrapeInterval: 30s

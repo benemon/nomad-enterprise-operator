@@ -111,8 +111,16 @@ func (p *RoutePhase) buildRoute(ctx context.Context, cluster *nomadv1alpha1.Noma
 		}, certSecret); err != nil {
 			return nil, err
 		}
-		tlsConfig.Certificate = string(certSecret.Data["tls.crt"])
-		tlsConfig.Key = string(certSecret.Data["tls.key"])
+		certKey := routeSpec.TLS.SecretKeys.Certificate
+		if certKey == "" {
+			certKey = "tls.crt"
+		}
+		keyKey := routeSpec.TLS.SecretKeys.PrivateKey
+		if keyKey == "" {
+			keyKey = "tls.key"
+		}
+		tlsConfig.Certificate = string(certSecret.Data[certKey])
+		tlsConfig.Key = string(certSecret.Data[keyKey])
 	}
 
 	route := &routev1.Route{

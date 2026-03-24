@@ -227,10 +227,24 @@ spec:
                           certificateSecretName:
                             description: |-
                               CertificateSecretName is the name of a Secret containing a custom
-                              TLS certificate for the external-facing side of the Route. The Secret
-                              must contain tls.crt (certificate) and tls.key (private key).
+                              TLS certificate for the external-facing side of the Route.
                               If omitted, the platform wildcard certificate is used.
                             type: string
+                          secretKeys:
+                            description: SecretKeys allows overriding the key names
+                              within the certificate Secret.
+                            properties:
+                              certificate:
+                                default: tls.crt
+                                description: Certificate is the key name for the TLS
+                                  certificate.
+                                type: string
+                              privateKey:
+                                default: tls.key
+                                description: PrivateKey is the key name for the TLS
+                                  private key.
+                                type: string
+                            type: object
                         type: object
                     type: object
                 type: object

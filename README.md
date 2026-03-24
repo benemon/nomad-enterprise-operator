@@ -213,7 +213,9 @@ See [ACL Configuration](#acl-configuration) for details.
 | `openshift.enabled` | `bool` | `false` | Enable OpenShift-specific resources (Routes, ServiceMonitors) |
 | `openshift.route.enabled` | `bool` | `false` | Create an OpenShift Route. Always uses `reencrypt` termination with `Redirect` |
 | `openshift.route.host` | `string` | | Custom hostname. Auto-generated if empty |
-| `openshift.route.tls.certificateSecretName` | `string` | | Secret containing a custom external-facing certificate (`tls.crt`, `tls.key`). If omitted, the platform wildcard certificate is used |
+| `openshift.route.tls.certificateSecretName` | `string` | | Secret containing a custom external-facing certificate. If omitted, the platform wildcard certificate is used |
+| `openshift.route.tls.secretKeys.certificate` | `string` | `tls.crt` | Key name for the certificate in the Route certificate Secret |
+| `openshift.route.tls.secretKeys.privateKey` | `string` | `tls.key` | Key name for the private key in the Route certificate Secret |
 | `openshift.monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
 | `openshift.monitoring.scrapeInterval` | `string` | `30s` | Prometheus scrape interval |
 | `openshift.monitoring.scrapeTimeout` | `string` | `10s` | Prometheus scrape timeout |
