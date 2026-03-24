@@ -184,7 +184,7 @@ func TestGenerator_Generate_TLSEnabled(t *testing.T) {
 		{"cert_file", `cert_file = "/nomad/tls/tls.crt"`},
 		{"key_file", `key_file  = "/nomad/tls/tls.key"`},
 		{"verify_server_hostname", "verify_server_hostname = true"},
-		{"verify_https_client", "verify_https_client    = true"},
+		{"verify_https_client", "verify_https_client    = false"},
 	}
 
 	for _, a := range assertions {

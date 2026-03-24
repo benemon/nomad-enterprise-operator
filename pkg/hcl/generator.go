@@ -169,7 +169,7 @@ func (g *Generator) buildTemplateData() templateData {
 		TLSCertFile:            "/nomad/tls/tls.crt",
 		TLSKeyFile:             "/nomad/tls/tls.key",
 		VerifyServerHostname:   true,
-		VerifyHTTPSClient:      true,
+		VerifyHTTPSClient:      false,
 		AuditEnabled:           cluster.Spec.Server.Audit.Enabled,
 		AuditDeliveryGuarantee: auditDeliveryGuarantee,
 		AuditFormat:            auditFormat,

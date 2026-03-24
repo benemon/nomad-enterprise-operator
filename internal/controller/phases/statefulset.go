@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -128,17 +129,12 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 					{Name: "rpc", ContainerPort: 4647, Protocol: corev1.ProtocolTCP},
 					{Name: "serf", ContainerPort: 4648, Protocol: corev1.ProtocolTCP},
 				},
-				// mTLS is always enabled — kubelet HTTP probes cannot present a
-				// client certificate, so we use exec probes that call the
-				// ACL-exempt health endpoint via the Nomad CLI. The NOMAD_ADDR
-				// and NOMAD_*CERT env vars provide the mTLS config.
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"nomad", "operator", "api",
-								"/v1/agent/health",
-							},
+						HTTPGet: &corev1.HTTPGetAction{
+							Path:   "/v1/agent/health",
+							Port:   intstr.FromInt(4646),
+							Scheme: corev1.URISchemeHTTPS,
 						},
 					},
 					InitialDelaySeconds: 30,
@@ -148,11 +144,10 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 				},
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"nomad", "operator", "api",
-								"/v1/agent/health",
-							},
+						HTTPGet: &corev1.HTTPGetAction{
+							Path:   "/v1/agent/health",
+							Port:   intstr.FromInt(4646),
+							Scheme: corev1.URISchemeHTTPS,
 						},
 					},
 					InitialDelaySeconds: 10,
@@ -278,9 +273,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 				},
 			},
 		},
-		// mTLS environment variables — used by the Nomad CLI in exec probes
-		// and available to any in-container tooling that needs to talk to the
-		// local Nomad API.
+		// TLS environment variables for in-container Nomad CLI usage (e.g. kubectl exec debugging).
+		// Client cert env vars are not needed since verify_https_client is off.
 		{
 			Name:  "NOMAD_ADDR",
 			Value: "https://127.0.0.1:4646",
@@ -288,14 +282,6 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 		{
 			Name:  "NOMAD_CACERT",
 			Value: "/nomad/tls/ca.crt",
-		},
-		{
-			Name:  "NOMAD_CLIENT_CERT",
-			Value: "/nomad/tls/tls.crt",
-		},
-		{
-			Name:  "NOMAD_CLIENT_KEY",
-			Value: "/nomad/tls/tls.key",
 		},
 	}
 

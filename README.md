@@ -240,7 +240,8 @@ mTLS is always enabled — no configuration is required. The operator automatica
 - Issues an operator client certificate for mTLS when querying the Nomad API
 - Distributes a CA bundle ConfigMap for external consumers
 - Rotates certificates approaching expiry (30-day warning window)
-- Configures `verify_server_hostname = true` and `verify_https_client = true` in the Nomad HCL
+- Configures `verify_server_hostname = true` in the Nomad HCL for RPC mTLS
+- Sets `verify_https_client = false` — the HTTP API is TLS-encrypted but does not require client certificates, allowing the UI, CLI, and OpenShift Routes to connect without distributing client certs. ACLs handle authorization
 - Sets OpenShift Routes to `reencrypt` termination with the CA as `destinationCACertificate`
 
 ### Generated Secrets

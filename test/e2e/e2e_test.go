@@ -451,19 +451,19 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(ContainSubstring("4647"), "rpc port missing")
 			Expect(output).To(ContainSubstring("4648"), "serf port missing")
 
-			By("verifying liveness probe uses exec with mTLS")
+			By("verifying liveness probe")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.exec.command[0]}`)
+				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.httpGet.path}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("nomad"), "liveness probe should use nomad CLI")
+			Expect(output).To(Equal("/v1/agent/health"), "wrong liveness probe path")
 
-			By("verifying readiness probe uses exec with mTLS")
+			By("verifying readiness probe")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].readinessProbe.exec.command[0]}`)
+				"-o", `jsonpath={.spec.template.spec.containers[0].readinessProbe.httpGet.path}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("nomad"), "readiness probe should use nomad CLI")
+			Expect(output).To(Equal("/v1/agent/health"), "wrong readiness probe path")
 
 			By("verifying NOMAD_LICENSE env var references the license secret")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
@@ -1119,7 +1119,7 @@ spec:
 				g.Expect(output).To(ContainSubstring(`cert_file = "/nomad/tls/tls.crt"`), "wrong cert_file path")
 				g.Expect(output).To(ContainSubstring(`key_file  = "/nomad/tls/tls.key"`), "wrong key_file path")
 				g.Expect(output).To(ContainSubstring("verify_server_hostname = true"), "missing verify_server_hostname")
-				g.Expect(output).To(ContainSubstring("verify_https_client    = true"), "missing verify_https_client")
+				g.Expect(output).To(ContainSubstring("verify_https_client    = false"), "verify_https_client should be false")
 			}).Should(Succeed())
 		})
 	})
