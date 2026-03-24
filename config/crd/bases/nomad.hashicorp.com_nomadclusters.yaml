@@ -103,8 +103,12 @@ spec:
                 description: Image configuration for the Nomad container
                 properties:
                   pullPolicy:
-                    default: IfNotPresent
-                    description: PullPolicy defines when to pull the image
+                    default: Always
+                    description: |-
+                      PullPolicy defines when to pull the image. Defaults to Always because
+                      the default tag (1.11-ent) is a floating tag that resolves to the latest
+                      patch release. Set to IfNotPresent when pinning to a specific version
+                      (e.g. 1.11.3-ent).
                     enum:
                     - Always
                     - IfNotPresent

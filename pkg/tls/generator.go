@@ -178,8 +178,11 @@ func ParseCertificate(certPEM []byte) (*x509.Certificate, error) {
 // - Is not expired
 // - Is not expiring within the given warning window
 // - Contains all of the required DNS SANs
+// - Contains all of the required IP SANs
 // Returns an error describing any validation failure.
-func ValidateCertificate(certPEM []byte, requiredDNSSANs []string, warningWindow time.Duration) error {
+func ValidateCertificate(
+	certPEM []byte, requiredDNSSANs []string, requiredIPSANs []net.IP, warningWindow time.Duration,
+) error {
 	cert, err := ParseCertificate(certPEM)
 	if err != nil {
 		return fmt.Errorf("failed to parse certificate: %w", err)
@@ -194,7 +197,7 @@ func ValidateCertificate(certPEM []byte, requiredDNSSANs []string, warningWindow
 		return fmt.Errorf("certificate expiring within warning window at %s", cert.NotAfter.Format(time.RFC3339))
 	}
 
-	// Check required SANs
+	// Check required DNS SANs
 	certDNS := make(map[string]bool, len(cert.DNSNames))
 	for _, dns := range cert.DNSNames {
 		certDNS[dns] = true
@@ -202,6 +205,17 @@ func ValidateCertificate(certPEM []byte, requiredDNSSANs []string, warningWindow
 	for _, required := range requiredDNSSANs {
 		if !certDNS[required] {
 			return fmt.Errorf("certificate missing required DNS SAN: %s", required)
+		}
+	}
+
+	// Check required IP SANs
+	certIPs := make(map[string]bool, len(cert.IPAddresses))
+	for _, ip := range cert.IPAddresses {
+		certIPs[ip.String()] = true
+	}
+	for _, required := range requiredIPSANs {
+		if !certIPs[required.String()] {
+			return fmt.Errorf("certificate missing required IP SAN: %s", required)
 		}
 	}
 

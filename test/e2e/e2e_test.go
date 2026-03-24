@@ -1064,14 +1064,6 @@ spec:
 			}).Should(Succeed())
 		})
 
-		It("should create operator client certificate secret", func() {
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", opTLSClusterName+"-operator-client", "-n", namespace)
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Operator client cert secret not yet created")
-			}).Should(Succeed())
-		})
-
 		It("should create CA bundle ConfigMap", func() {
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "configmap", opTLSClusterName+"-ca-bundle", "-n", namespace,
@@ -1222,14 +1214,6 @@ spec:
 				cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-tls", "-n", namespace)
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Server TLS secret not yet created")
-			}).Should(Succeed())
-		})
-
-		It("should create operator client certificate secret", func() {
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-operator-client", "-n", namespace)
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred(), "Operator client cert secret not yet created")
 			}).Should(Succeed())
 		})
 

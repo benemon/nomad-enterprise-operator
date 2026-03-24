@@ -173,9 +173,9 @@ func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.
 		phases.NewServiceAccountPhase(ctx),
 		phases.NewRBACPhase(ctx),
 		phases.NewGossipPhase(ctx),
-		phases.NewCertificatePhase(ctx),
 		phases.NewServicesPhase(ctx),
 		phases.NewAdvertisePhase(ctx),
+		phases.NewCertificatePhase(ctx), // After Advertise so LoadBalancer IP is in cert SANs
 		phases.NewSecretsPhase(ctx),
 		phases.NewConfigMapPhase(ctx),
 		phases.NewStatefulSetPhase(ctx),

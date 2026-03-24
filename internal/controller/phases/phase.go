@@ -19,7 +19,6 @@ package phases
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -27,7 +26,6 @@ import (
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -110,10 +108,6 @@ type PhaseContext struct {
 	// CACert is the PEM-encoded CA certificate, populated by CertificatePhase.
 	// Used by RoutePhase for destinationCACertificate and by BuildClientConfig.
 	CACert []byte
-
-	// OperatorClientCertName is the Secret name containing the operator's client
-	// certificate for mTLS, populated by CertificatePhase.
-	OperatorClientCertName string
 }
 
 // NewPhaseContext creates a new phase context.
@@ -146,29 +140,15 @@ func GetSelectorLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
 	}
 }
 
-// BuildClientConfig assembles a nomad.ClientConfig for the given cluster,
-// using the CA cert and operator client certificate from PhaseContext when TLS is enabled.
-func (pc *PhaseContext) BuildClientConfig(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string) (nomad.ClientConfig, error) {
-	cfg := nomad.ClientConfig{
+// BuildClientConfig assembles a nomad.ClientConfig for the given cluster.
+// Since verify_https_client is off, only the CA cert is needed for TLS verification.
+func (pc *PhaseContext) BuildClientConfig(cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string) nomad.ClientConfig {
+	return nomad.ClientConfig{
 		Token:      token,
 		TLSEnabled: true,
 		Timeout:    timeout,
 		CACert:     pc.CACert,
 	}
-
-	if pc.OperatorClientCertName != "" {
-		secret := &corev1.Secret{}
-		if err := pc.Client.Get(ctx, types.NamespacedName{
-			Name:      pc.OperatorClientCertName,
-			Namespace: cluster.Namespace,
-		}, secret); err != nil {
-			return cfg, fmt.Errorf("failed to get operator client certificate: %w", err)
-		}
-		cfg.ClientCert = secret.Data["tls.crt"]
-		cfg.ClientKey = secret.Data["tls.key"]
-	}
-
-	return cfg, nil
 }
 
 // CheckPodsReady returns true if at least one pod matching the cluster's selector labels is ready.

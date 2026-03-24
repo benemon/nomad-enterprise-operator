@@ -34,7 +34,6 @@ import (
 const (
 	certWarningWindow = 30 * 24 * time.Hour
 	serverCertTTL     = 365 * 24 * time.Hour
-	clientCertTTL     = 365 * 24 * time.Hour
 )
 
 // CertificatePhase ensures all TLS certificates exist, are valid, and are not
@@ -77,16 +76,11 @@ func (p *CertificatePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		return result
 	}
 
-	if result := p.ensureOperatorClientCertificate(ctx, cluster, caBundle); result.Error != nil || result.Requeue {
-		return result
-	}
-
 	if result := p.ensureCABundleConfigMap(ctx, cluster, caBundle.CACertPEM); result.Error != nil || result.Requeue {
 		return result
 	}
 
 	p.CACert = caBundle.CACertPEM
-	p.OperatorClientCertName = cluster.Name + "-operator-client"
 
 	return OK()
 }
@@ -206,7 +200,16 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 	secretName := cluster.Name + "-tls"
 	requiredDNS := p.serverDNSSANs(cluster)
 
-	// Check if existing cert is valid
+	// Build required IP SANs — 127.0.0.1 always, plus LoadBalancer IP if known
+	requiredIPs := []net.IP{net.ParseIP("127.0.0.1")}
+	if p.AdvertiseAddress != "" {
+		if ip := net.ParseIP(p.AdvertiseAddress); ip != nil {
+			requiredIPs = append(requiredIPs, ip)
+		}
+	}
+
+	// Check if existing cert is valid (including IP SANs — ensures the cert
+	// is reissued when the LoadBalancer IP becomes known after initial creation)
 	existing := &corev1.Secret{}
 	err := p.Client.Get(ctx, types.NamespacedName{
 		Name:      secretName,
@@ -214,22 +217,16 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 	}, existing)
 	if err == nil {
 		if certPEM, ok := existing.Data["tls.crt"]; ok {
-			if validateErr := tlspkg.ValidateCertificate(certPEM, requiredDNS, certWarningWindow); validateErr == nil {
+			if validateErr := tlspkg.ValidateCertificate(certPEM, requiredDNS, requiredIPs, certWarningWindow); validateErr == nil {
 				return OK()
 			}
-			p.Log.Info("Server certificate needs renewal", "name", secretName)
+			p.Log.Info("Server certificate needs renewal", "name", secretName, "reason", "SANs or expiry changed")
 		}
 	} else if !errors.IsNotFound(err) {
 		return Error(err, "Failed to check server TLS secret")
 	}
 
 	// Issue new server certificate
-	ipAddrs := []net.IP{net.ParseIP("127.0.0.1")}
-	if p.AdvertiseAddress != "" {
-		if ip := net.ParseIP(p.AdvertiseAddress); ip != nil {
-			ipAddrs = append(ipAddrs, ip)
-		}
-	}
 
 	region := cluster.Spec.Topology.Region
 	if region == "" {
@@ -239,51 +236,12 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 	issued, err := tlspkg.IssueCertificate(ca, tlspkg.CertificateRequest{
 		CommonName:  fmt.Sprintf("server.%s.nomad", region),
 		DNSNames:    requiredDNS,
-		IPAddresses: ipAddrs,
+		IPAddresses: requiredIPs,
 		TTL:         serverCertTTL,
 		IsServer:    true,
 	})
 	if err != nil {
 		return Error(err, "Failed to issue server certificate")
-	}
-
-	return p.writeSecret(ctx, cluster, secretName, map[string][]byte{
-		"ca.crt":  issued.CACertPEM,
-		"tls.crt": issued.CertPEM,
-		"tls.key": issued.KeyPEM,
-	})
-}
-
-// ensureOperatorClientCertificate ensures the operator client certificate exists and is valid.
-func (p *CertificatePhase) ensureOperatorClientCertificate(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, ca *tlspkg.CABundle) PhaseResult {
-	secretName := cluster.Name + "-operator-client"
-	requiredDNS := []string{fmt.Sprintf("nomad-enterprise-operator.%s.svc", cluster.Namespace)}
-
-	// Check if existing cert is valid
-	existing := &corev1.Secret{}
-	err := p.Client.Get(ctx, types.NamespacedName{
-		Name:      secretName,
-		Namespace: cluster.Namespace,
-	}, existing)
-	if err == nil {
-		if certPEM, ok := existing.Data["tls.crt"]; ok {
-			if validateErr := tlspkg.ValidateCertificate(certPEM, requiredDNS, certWarningWindow); validateErr == nil {
-				return OK()
-			}
-			p.Log.Info("Operator client certificate needs renewal", "name", secretName)
-		}
-	} else if !errors.IsNotFound(err) {
-		return Error(err, "Failed to check operator client TLS secret")
-	}
-
-	issued, err := tlspkg.IssueCertificate(ca, tlspkg.CertificateRequest{
-		CommonName: "nomad-enterprise-operator",
-		DNSNames:   requiredDNS,
-		TTL:        clientCertTTL,
-		IsServer:   false,
-	})
-	if err != nil {
-		return Error(err, "Failed to issue operator client certificate")
 	}
 
 	return p.writeSecret(ctx, cluster, secretName, map[string][]byte{

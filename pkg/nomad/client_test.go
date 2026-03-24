@@ -74,16 +74,6 @@ func TestNewClient(t *testing.T) {
 			},
 			wantErr: true,
 		},
-		{
-			name: "TLS with invalid client cert pair",
-			cfg: ClientConfig{
-				Address:    "https://localhost:4646",
-				TLSEnabled: true,
-				ClientCert: []byte("invalid-cert"),
-				ClientKey:  []byte("invalid-key"),
-			},
-			wantErr: true,
-		},
 	}
 
 	for _, tt := range tests {

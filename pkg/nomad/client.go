@@ -48,12 +48,6 @@ type ClientConfig struct {
 	// CACert is the CA certificate for TLS verification.
 	CACert []byte
 
-	// ClientCert is the client certificate for mTLS.
-	ClientCert []byte
-
-	// ClientKey is the client key for mTLS.
-	ClientKey []byte
-
 	// Timeout is the timeout for API requests.
 	Timeout time.Duration
 }
@@ -97,15 +91,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 				return nil, fmt.Errorf("failed to parse CA certificate")
 			}
 			tlsConfig.RootCAs = caCertPool
-		}
-
-		// Add client cert for mTLS
-		if len(cfg.ClientCert) > 0 && len(cfg.ClientKey) > 0 {
-			cert, err := tls.X509KeyPair(cfg.ClientCert, cfg.ClientKey)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load client certificate: %w", err)
-			}
-			tlsConfig.Certificates = []tls.Certificate{cert}
 		}
 
 		nomadCfg.HttpClient.Transport = &http.Transport{
@@ -488,17 +473,6 @@ type AutopilotServer struct {
 	StableSince string
 	LastContact string
 }
-
-// SnapshotAgentPolicyRules defines the minimal permissions required by the
-// Nomad snapshot agent. The snapshot agent requires operator:snapshot-save
-// and operator:license-read capabilities per the Nomad documentation.
-// https://developer.hashicorp.com/nomad/commands/operator/snapshot/agent
-const SnapshotAgentPolicyRules = `
-operator {
-  policy       = "read"
-  capabilities = ["snapshot-save"]
-}
-`
 
 // OperatorStatusPolicyRules defines the minimal permissions required by the
 // operator for day-2 status API calls (autopilot health, license, leader).

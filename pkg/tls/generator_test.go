@@ -159,7 +159,7 @@ func TestValidateCertificate_Valid(t *testing.T) {
 		t.Fatalf("IssueCertificate() error = %v", err)
 	}
 
-	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad", "localhost"}, 30*24*time.Hour)
+	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad", "localhost"}, nil, 30*24*time.Hour)
 	if err != nil {
 		t.Errorf("ValidateCertificate() error = %v, want nil", err)
 	}
@@ -185,7 +185,7 @@ func TestValidateCertificate_Expired(t *testing.T) {
 	// Wait for cert to expire
 	time.Sleep(2 * time.Second)
 
-	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad"}, 0)
+	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad"}, nil, 0)
 	if err == nil {
 		t.Error("ValidateCertificate() should return error for expired cert")
 	}
@@ -207,7 +207,7 @@ func TestValidateCertificate_MissingSAN(t *testing.T) {
 		t.Fatalf("IssueCertificate() error = %v", err)
 	}
 
-	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad", "missing.example.com"}, 30*24*time.Hour)
+	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad", "missing.example.com"}, nil, 30*24*time.Hour)
 	if err == nil {
 		t.Error("ValidateCertificate() should return error for missing SAN")
 	}
@@ -230,7 +230,7 @@ func TestValidateCertificate_ExpiringWithinWindow(t *testing.T) {
 	}
 
 	// Warning window of 30 days should catch a 10-day cert
-	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad"}, 30*24*time.Hour)
+	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad"}, nil, 30*24*time.Hour)
 	if err == nil {
 		t.Error("ValidateCertificate() should return error for cert expiring within warning window")
 	}

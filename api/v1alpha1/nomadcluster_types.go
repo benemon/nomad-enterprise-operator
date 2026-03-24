@@ -93,9 +93,12 @@ type ImageSpec struct {
 	// +kubebuilder:default="1.11-ent"
 	Tag string `json:"tag,omitempty"`
 
-	// PullPolicy defines when to pull the image
+	// PullPolicy defines when to pull the image. Defaults to Always because
+	// the default tag (1.11-ent) is a floating tag that resolves to the latest
+	// patch release. Set to IfNotPresent when pinning to a specific version
+	// (e.g. 1.11.3-ent).
 	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
-	// +kubebuilder:default="IfNotPresent"
+	// +kubebuilder:default="Always"
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
 }
 

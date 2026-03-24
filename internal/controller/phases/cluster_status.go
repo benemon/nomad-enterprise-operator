@@ -147,10 +147,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 		}
 	}
 
-	cfg, err := p.BuildClientConfig(ctx, cluster, 10*time.Second, aclToken)
-	if err != nil {
-		return nil, "", err
-	}
+	cfg := p.BuildClientConfig(cluster, 10*time.Second, aclToken)
 
 	// Try internal service first (operator typically runs in-cluster)
 	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)

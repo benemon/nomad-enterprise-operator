@@ -90,7 +90,7 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 	}
 
 	// Create Nomad API client and perform bootstrap
-	result, err := p.executeBootstrap(ctx, cluster)
+	result, err := p.executeBootstrap(cluster)
 	if err != nil {
 		// Check if already bootstrapped
 		if errors.Is(err, nomad.ErrAlreadyBootstrapped) {
@@ -102,7 +102,7 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 	}
 
 	// Create anonymous policy for basic cluster visibility
-	if err := p.createAnonymousPolicy(ctx, cluster, result.SecretID); err != nil {
+	if err := p.createAnonymousPolicy(cluster, result.SecretID); err != nil {
 		p.Log.Error(err, "Failed to create anonymous policy, continuing with bootstrap")
 		// Don't fail bootstrap if anonymous policy creation fails
 	} else {
@@ -131,11 +131,8 @@ func (p *ACLBootstrapPhase) getBootstrapSecretName(cluster *nomadv1alpha1.NomadC
 	return cluster.Name + "-acl-bootstrap"
 }
 
-func (p *ACLBootstrapPhase) executeBootstrap(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*nomad.ACLBootstrapResult, error) {
-	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, "")
-	if err != nil {
-		return nil, err
-	}
+func (p *ACLBootstrapPhase) executeBootstrap(cluster *nomadv1alpha1.NomadCluster) (*nomad.ACLBootstrapResult, error) {
+	cfg := p.BuildClientConfig(cluster, 30*time.Second, "")
 
 	// Try internal service first (operator typically runs in-cluster)
 	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
@@ -231,11 +228,8 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 	return OK()
 }
 
-func (p *ACLBootstrapPhase) createAnonymousPolicy(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, token string) error {
-	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, token)
-	if err != nil {
-		return err
-	}
+func (p *ACLBootstrapPhase) createAnonymousPolicy(cluster *nomadv1alpha1.NomadCluster, token string) error {
+	cfg := p.BuildClientConfig(cluster, 30*time.Second, token)
 
 	// Try internal service first, fall back to LoadBalancer
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
@@ -286,10 +280,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	tokenName := cluster.Name + "-operator-status"
 	secretName := cluster.Name + "-operator-status"
 
-	cfg, err := p.BuildClientConfig(ctx, cluster, 30*time.Second, bootstrapToken)
-	if err != nil {
-		return Error(err, "Failed to build client config for operator status token")
-	}
+	cfg := p.BuildClientConfig(cluster, 30*time.Second, bootstrapToken)
 
 	// Try internal service first, fall back to LoadBalancer
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)

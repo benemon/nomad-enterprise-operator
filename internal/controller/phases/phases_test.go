@@ -803,9 +803,6 @@ func TestCertificatePhase_PopulatesPhaseContext(t *testing.T) {
 	if len(ctx.CACert) == 0 {
 		t.Error("PhaseContext.CACert should be populated after CertificatePhase")
 	}
-	if ctx.OperatorClientCertName != "test-cluster-operator-client" {
-		t.Errorf("OperatorClientCertName = %q, want %q", ctx.OperatorClientCertName, "test-cluster-operator-client")
-	}
 }
 
 func TestCertificatePhase_CreatesCABundle(t *testing.T) {
