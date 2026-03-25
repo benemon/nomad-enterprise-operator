@@ -244,9 +244,14 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 		return Error(err, "Failed to issue server certificate")
 	}
 
+	// tls.crt contains the full chain: leaf cert followed by the CA chain.
+	// This allows TLS clients to verify the chain back to a trusted root
+	// without needing the intermediate CA pre-installed.
+	fullChain := append(issued.CertPEM, issued.CACertPEM...)
+
 	return p.writeSecret(ctx, cluster, secretName, map[string][]byte{
 		"ca.crt":  issued.CACertPEM,
-		"tls.crt": issued.CertPEM,
+		"tls.crt": fullChain,
 		"tls.key": issued.KeyPEM,
 	})
 }
