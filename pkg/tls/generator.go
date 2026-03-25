@@ -17,9 +17,11 @@ limitations under the License.
 package tls
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -108,13 +110,14 @@ func IssueCertificate(ca *CABundle, req CertificateRequest) (*IssuedCertificate,
 	if caKeyBlock == nil {
 		return nil, fmt.Errorf("failed to decode CA private key PEM")
 	}
-	caKey, err := x509.ParseECPrivateKey(caKeyBlock.Bytes)
+	caKey, err := parsePrivateKey(caKeyBlock.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse CA private key: %w", err)
 	}
 
-	// Generate new key for the certificate
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// Generate a key matching the CA's key type and parameters so that
+	// the issued certificate is consistent with the CA's algorithm choice.
+	key, err := generateMatchingKey(caKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate certificate key: %w", err)
 	}
@@ -145,24 +148,55 @@ func IssueCertificate(ca *CABundle, req CertificateRequest) (*IssuedCertificate,
 		IPAddresses:  req.IPAddresses,
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, key.Public(), caKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
-	keyDER, err := x509.MarshalECPrivateKey(key)
+	keyPEM, err := marshalPrivateKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal certificate key: %w", err)
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
 	return &IssuedCertificate{
 		CACertPEM: ca.CACertPEM,
 		CertPEM:   certPEM,
 		KeyPEM:    keyPEM,
 	}, nil
+}
+
+// generateMatchingKey creates a new private key matching the type and parameters
+// of the provided CA key. ECDSA CAs produce ECDSA keys with the same curve;
+// RSA CAs produce RSA keys with the same bit size.
+func generateMatchingKey(caKey crypto.Signer) (crypto.Signer, error) {
+	switch k := caKey.(type) {
+	case *ecdsa.PrivateKey:
+		return ecdsa.GenerateKey(k.Curve, rand.Reader)
+	case *rsa.PrivateKey:
+		return rsa.GenerateKey(rand.Reader, k.N.BitLen())
+	default:
+		return nil, fmt.Errorf("unsupported CA key type: %T", caKey)
+	}
+}
+
+// marshalPrivateKey serializes a private key to PEM format using the
+// type-specific encoding (SEC 1 for EC, PKCS#1 for RSA).
+func marshalPrivateKey(key crypto.Signer) ([]byte, error) {
+	switch k := key.(type) {
+	case *ecdsa.PrivateKey:
+		der, err := x509.MarshalECPrivateKey(k)
+		if err != nil {
+			return nil, err
+		}
+		return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), nil
+	case *rsa.PrivateKey:
+		der := x509.MarshalPKCS1PrivateKey(k)
+		return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}), nil
+	default:
+		return nil, fmt.Errorf("unsupported key type: %T", key)
+	}
 }
 
 // ParseCertificate parses a PEM-encoded certificate and returns the x509.Certificate.
@@ -220,6 +254,35 @@ func ValidateCertificate(
 	}
 
 	return nil
+}
+
+// parsePrivateKey attempts to parse a DER-encoded private key in multiple formats.
+// Supports PKCS#8 (BEGIN PRIVATE KEY), SEC 1 EC (BEGIN EC PRIVATE KEY),
+// and PKCS#1 RSA (BEGIN RSA PRIVATE KEY).
+func parsePrivateKey(der []byte) (crypto.Signer, error) {
+	// Try PKCS#8 first — this is the modern standard and handles any key type
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		switch k := key.(type) {
+		case *ecdsa.PrivateKey:
+			return k, nil
+		case *rsa.PrivateKey:
+			return k, nil
+		default:
+			return nil, fmt.Errorf("unsupported key type in PKCS#8 container: %T", key)
+		}
+	}
+
+	// Try SEC 1 EC format
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+
+	// Try PKCS#1 RSA format
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse private key in any supported format (PKCS#8, SEC1 EC, PKCS#1 RSA)")
 }
 
 func randomSerialNumber() (*big.Int, error) {

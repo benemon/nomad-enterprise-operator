@@ -17,7 +17,14 @@ limitations under the License.
 package tls
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -233,5 +240,216 @@ func TestValidateCertificate_ExpiringWithinWindow(t *testing.T) {
 	err = ValidateCertificate(issued.CertPEM, []string{"server.global.nomad"}, nil, 30*24*time.Hour)
 	if err == nil {
 		t.Error("ValidateCertificate() should return error for cert expiring within warning window")
+	}
+}
+
+// generateRSACA creates an RSA CA for testing key type matching.
+func generateRSACA(t *testing.T, bits int) *CABundle {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, bits)
+	if err != nil {
+		t.Fatalf("Failed to generate RSA key: %v", err)
+	}
+
+	serialNumber, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	template := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{CommonName: "Test RSA CA"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("Failed to create RSA CA certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+
+	return &CABundle{CACertPEM: certPEM, CAKeyPEM: keyPEM}
+}
+
+// generateECCA creates an ECDSA CA with a specific curve for testing.
+func generateECCA(t *testing.T, curve elliptic.Curve) *CABundle {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate EC key: %v", err)
+	}
+
+	serialNumber, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	template := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{CommonName: "Test EC CA"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("Failed to create EC CA certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("Failed to marshal EC key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	return &CABundle{CACertPEM: certPEM, CAKeyPEM: keyPEM}
+}
+
+func TestIssueCertificate_RSA_CA(t *testing.T) {
+	ca := generateRSACA(t, 2048)
+
+	issued, err := IssueCertificate(ca, CertificateRequest{
+		CommonName: "server.global.nomad",
+		DNSNames:   []string{"server.global.nomad", "localhost"},
+		TTL:        365 * 24 * time.Hour,
+		IsServer:   true,
+	})
+	if err != nil {
+		t.Fatalf("IssueCertificate() error = %v", err)
+	}
+
+	// Verify the issued key is RSA
+	keyBlock, _ := pem.Decode(issued.KeyPEM)
+	if keyBlock == nil {
+		t.Fatal("Failed to decode issued key PEM")
+	}
+	if keyBlock.Type != "RSA PRIVATE KEY" {
+		t.Errorf("Key PEM type = %q, want %q", keyBlock.Type, "RSA PRIVATE KEY")
+	}
+
+	rsaKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		t.Fatalf("Failed to parse issued key as RSA: %v", err)
+	}
+	if rsaKey.N.BitLen() != 2048 {
+		t.Errorf("RSA key size = %d bits, want 2048", rsaKey.N.BitLen())
+	}
+
+	// Verify the cert is valid and signed by the CA
+	cert, err := ParseCertificate(issued.CertPEM)
+	if err != nil {
+		t.Fatalf("Failed to parse issued cert: %v", err)
+	}
+	caCert, _ := ParseCertificate(ca.CACertPEM)
+	if err := cert.CheckSignatureFrom(caCert); err != nil {
+		t.Errorf("Certificate signature verification failed: %v", err)
+	}
+}
+
+func TestIssueCertificate_ECDSA_P384_CA(t *testing.T) {
+	ca := generateECCA(t, elliptic.P384())
+
+	issued, err := IssueCertificate(ca, CertificateRequest{
+		CommonName: "server.global.nomad",
+		DNSNames:   []string{"server.global.nomad"},
+		TTL:        365 * 24 * time.Hour,
+		IsServer:   true,
+	})
+	if err != nil {
+		t.Fatalf("IssueCertificate() error = %v", err)
+	}
+
+	// Verify the issued key is ECDSA P-384
+	keyBlock, _ := pem.Decode(issued.KeyPEM)
+	if keyBlock == nil {
+		t.Fatal("Failed to decode issued key PEM")
+	}
+	if keyBlock.Type != "EC PRIVATE KEY" {
+		t.Errorf("Key PEM type = %q, want %q", keyBlock.Type, "EC PRIVATE KEY")
+	}
+
+	ecKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		t.Fatalf("Failed to parse issued key as EC: %v", err)
+	}
+	if ecKey.Curve != elliptic.P384() {
+		t.Errorf("EC curve = %v, want P-384", ecKey.Curve.Params().Name)
+	}
+
+	// Verify the cert is signed by the CA
+	cert, err := ParseCertificate(issued.CertPEM)
+	if err != nil {
+		t.Fatalf("Failed to parse issued cert: %v", err)
+	}
+	caCert, _ := ParseCertificate(ca.CACertPEM)
+	if err := cert.CheckSignatureFrom(caCert); err != nil {
+		t.Errorf("Certificate signature verification failed: %v", err)
+	}
+}
+
+func TestIssueCertificate_PKCS8_CA(t *testing.T) {
+	// Generate an EC key and encode it as PKCS#8 instead of SEC 1
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate key: %v", err)
+	}
+
+	serialNumber, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	template := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{CommonName: "Test PKCS8 CA"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("Failed to create cert: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	// Marshal key as PKCS#8 (BEGIN PRIVATE KEY)
+	pkcs8DER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("Failed to marshal PKCS#8 key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8DER})
+
+	ca := &CABundle{CACertPEM: certPEM, CAKeyPEM: keyPEM}
+
+	issued, err := IssueCertificate(ca, CertificateRequest{
+		CommonName: "server.global.nomad",
+		DNSNames:   []string{"server.global.nomad"},
+		TTL:        365 * 24 * time.Hour,
+		IsServer:   true,
+	})
+	if err != nil {
+		t.Fatalf("IssueCertificate() with PKCS#8 CA error = %v", err)
+	}
+
+	// Verify issued key is EC (matching the PKCS#8 CA's underlying type)
+	keyBlock, _ := pem.Decode(issued.KeyPEM)
+	if keyBlock.Type != "EC PRIVATE KEY" {
+		t.Errorf("Key PEM type = %q, want %q", keyBlock.Type, "EC PRIVATE KEY")
+	}
+
+	// Verify cert is signed by the CA
+	cert, err := ParseCertificate(issued.CertPEM)
+	if err != nil {
+		t.Fatalf("Failed to parse issued cert: %v", err)
+	}
+	caCert, _ := ParseCertificate(ca.CACertPEM)
+	if err := cert.CheckSignatureFrom(caCert); err != nil {
+		t.Errorf("Certificate signature verification failed: %v", err)
 	}
 }

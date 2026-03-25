@@ -20,6 +20,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -1217,6 +1218,18 @@ spec:
 			}).Should(Succeed())
 		})
 
+		It("should issue server cert with EC key matching the CA", func() {
+			cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-tls", "-n", namespace,
+				"-o", `jsonpath={.data.tls\.key}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			keyPEM, err := base64.StdEncoding.DecodeString(output)
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(keyPEM)
+			Expect(block).NotTo(BeNil(), "Failed to decode server key PEM")
+			Expect(block.Type).To(Equal("EC PRIVATE KEY"), "Server key should be EC to match EC CA")
+		})
+
 		It("should NOT create an operator-generated CA secret", func() {
 			cmd := exec.Command("kubectl", "get", "secret", userCAClusterName+"-ca", "-n", namespace)
 			_, err := utils.Run(cmd)
@@ -1236,6 +1249,131 @@ spec:
 		It("should set certificateAuthority status to user-provided", func() {
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", userCAClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.certificateAuthority.source}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("user-provided"))
+			}).Should(Succeed())
+		})
+	})
+
+	Context("NomadCluster with RSA user-provided CA", Ordered, func() {
+		const rsaCAClusterName = "tls-rsa-ca-cluster"
+		const rsaCASecretName = "nomad-rsa-ca"
+
+		BeforeAll(func() {
+			By("generating an RSA CA for the user-provided CA test")
+			rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+
+			caTemplate := &x509.Certificate{
+				SerialNumber:          big.NewInt(1),
+				Subject:               pkix.Name{CommonName: "User RSA Test CA"},
+				NotBefore:             time.Now(),
+				NotAfter:              time.Now().Add(24 * time.Hour),
+				IsCA:                  true,
+				BasicConstraintsValid: true,
+				KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			}
+			caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &rsaKey.PublicKey, rsaKey)
+			Expect(err).NotTo(HaveOccurred())
+			caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertDER})
+			caKeyPEM := pem.EncodeToMemory(&pem.Block{
+				Type:  "RSA PRIVATE KEY",
+				Bytes: x509.MarshalPKCS1PrivateKey(rsaKey),
+			})
+
+			By("creating the RSA CA secret")
+			secretYAML := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: %s
+type: kubernetes.io/tls
+data:
+  tls.crt: %s
+  tls.key: %s
+`, rsaCASecretName, namespace,
+				base64Encode(caCertPEM),
+				base64Encode(caKeyPEM))
+
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(secretYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create RSA CA secret")
+
+			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: LoadBalancer
+      loadBalancerIP: "10.0.0.4"
+  server:
+    acl:
+      enabled: false
+    tls:
+      ca:
+        secretName: %s
+    audit:
+      enabled: false
+`, rsaCAClusterName, namespace, rsaCASecretName)
+
+			By("applying the RSA CA NomadCluster CR")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(cr)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply RSA CA NomadCluster CR")
+		})
+
+		AfterAll(func() {
+			By("deleting the RSA CA NomadCluster CR")
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", rsaCAClusterName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sts", rsaCAClusterName, "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "StatefulSet should be deleted")
+			}, 2*time.Minute).Should(Succeed())
+
+			By("deleting the RSA CA secret")
+			cmd = exec.Command("kubectl", "delete", "secret", rsaCASecretName, "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should create server TLS secret from RSA CA", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", rsaCAClusterName+"-tls", "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Server TLS secret not yet created")
+			}).Should(Succeed())
+		})
+
+		It("should issue server cert with RSA key matching the CA", func() {
+			cmd := exec.Command("kubectl", "get", "secret", rsaCAClusterName+"-tls", "-n", namespace,
+				"-o", `jsonpath={.data.tls\.key}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			keyPEM, err := base64.StdEncoding.DecodeString(output)
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(keyPEM)
+			Expect(block).NotTo(BeNil(), "Failed to decode server key PEM")
+			Expect(block.Type).To(Equal("RSA PRIVATE KEY"), "Server key should be RSA to match RSA CA")
+		})
+
+		It("should set certificateAuthority status to user-provided", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", rsaCAClusterName, "-n", namespace,
 					"-o", "jsonpath={.status.certificateAuthority.source}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
