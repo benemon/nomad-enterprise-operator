@@ -34,6 +34,8 @@ import (
 const (
 	certWarningWindow = 30 * 24 * time.Hour
 	serverCertTTL     = 365 * 24 * time.Hour
+	defaultTLSCertKey = "tls.crt"
+	defaultTLSKeyKey  = "tls.key"
 )
 
 // CertificatePhase ensures all TLS certificates exist, are valid, and are not
@@ -91,11 +93,11 @@ func (p *CertificatePhase) loadUserCA(ctx context.Context, cluster *nomadv1alpha
 
 	certKey := caSpec.SecretKeys.Certificate
 	if certKey == "" {
-		certKey = "tls.crt"
+		certKey = defaultTLSCertKey
 	}
 	keyKey := caSpec.SecretKeys.PrivateKey
 	if keyKey == "" {
-		keyKey = "tls.key"
+		keyKey = defaultTLSKeyKey
 	}
 
 	secret := &corev1.Secret{}

@@ -1,0 +1,125 @@
+# Comprehensive OpenShift NomadCluster with OIDC - production-ready configuration
+#
+# This CR extends the comprehensive sample with OIDC authentication via Keycloak:
+#   - 3-replica HA cluster with pod anti-affinity
+#   - Operator-managed TLS with auto-generated CA and certificates
+#   - ACL with auto-bootstrap
+#   - OIDC authentication via Keycloak (realm import, auth method, binding rules)
+#   - Audit logging with persistent storage
+#   - OpenShift Route with reencrypt TLS termination
+#   - ServiceMonitor and PrometheusRule for observability
+#   - Custom resource limits for production workloads
+#
+# Prerequisites:
+#   1. The Keycloak operator must be installed in the SAME namespace as this CR.
+#   2. A Keycloak CR named "keycloak" must exist and be Ready in this namespace.
+#   3. The Keycloak operator requires a PostgreSQL database (not managed by this operator).
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: nomad-enterprise
+spec:
+  replicas: 3
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+  topology:
+    region: global
+    # datacenter defaults to namespace if empty
+  openshift:
+    enabled: true
+    route:
+      enabled: true
+      # Route always uses reencrypt termination with HTTP→HTTPS redirect.
+      # To use a custom external certificate instead of the platform wildcard:
+      # tls:
+      #   certificateSecretName: my-route-cert
+    monitoring:
+      enabled: true
+      scrapeInterval: 30s
+      scrapeTimeout: 10s
+      prometheusRulesEnabled: true
+  server:
+    acl:
+      enabled: true
+    # mTLS is always enabled. The operator generates CA and all certificates.
+    # To use your own CA (e.g. from Vault PKI):
+    tls:
+      ca:
+        secretName: nomad-ca
+    autopilot:
+      cleanupDeadServers: true
+      lastContactThreshold: "200ms"
+      maxTrailingLogs: 250
+      serverStabilizationTime: "10s"
+    audit:
+      enabled: true
+      format: json
+      rotateDuration: "24h"
+      rotateMaxFiles: 15
+      size: 5Gi
+  oidc:
+    enabled: true
+    keycloakRef:
+      name: keycloak
+    # realm defaults to the NomadCluster name ("nomad-enterprise" here)
+    discoveryCA:
+      secretName: nomad-ca
+    # Default binding rule: maps /nomad-admins Keycloak group to a nomad-admins role.
+    # Omit bindingRules entirely to use the default, or customise:
+    bindingRules:
+      - keycloakGroup: "/nomad-admins"
+        nomadRole: "nomad-admins"
+        policyRules: |
+          namespace "*" {
+            policy = "write"
+            capabilities = ["alloc-exec", "alloc-lifecycle", "alloc-node-exec",
+                            "csi-mount-volume", "csi-write-volume", "dispatch-job",
+                            "list-jobs", "parse-job", "read-fs", "read-job",
+                            "read-logs", "submit-job"]
+          }
+          agent {
+            policy = "write"
+          }
+          node {
+            policy = "write"
+          }
+          operator {
+            policy = "write"
+          }
+          quota {
+            policy = "write"
+          }
+          host_volume "*" {
+            policy = "write"
+          }
+          plugin {
+            policy = "read"
+          }
+      - keycloakGroup: "/nomad-readers"
+        nomadRole: "nomad-readers"
+        policyRules: |
+          namespace "default" {
+            capabilities = ["list-jobs", "read-job"]
+          }
+          operator {
+            policy = "read"
+          }
+  persistence:
+    size: 10Gi
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  affinity:
+    podAntiAffinity:
+      enabled: true
+      type: preferred
+      weight: 100
+      topologyKey: kubernetes.io/hostname

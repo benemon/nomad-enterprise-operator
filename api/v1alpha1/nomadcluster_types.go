@@ -81,6 +81,10 @@ type NomadClusterSpec struct {
 	// ImagePullSecrets for private registries
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// OIDC configures OIDC authentication via Keycloak.
+	// +optional
+	OIDC *OIDCSpec `json:"oidc,omitempty"`
 }
 
 // ImageSpec defines container image configuration
@@ -418,6 +422,87 @@ type PodAntiAffinitySpec struct {
 	TopologyKey string `json:"topologyKey,omitempty"`
 }
 
+// OIDCSpec configures OIDC authentication for the Nomad cluster via Keycloak.
+// Requires the Keycloak operator to be installed in the same namespace and a
+// healthy Keycloak CR referenced by KeycloakRef.
+type OIDCSpec struct {
+	// Enabled controls whether OIDC authentication is configured.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// KeycloakRef references the Keycloak CR that the realm import targets.
+	// Must be in the same namespace as the NomadCluster.
+	KeycloakRef corev1.LocalObjectReference `json:"keycloakRef"`
+
+	// Realm is the name of the Keycloak realm to create. Defaults to the NomadCluster name.
+	// +optional
+	Realm string `json:"realm,omitempty"`
+
+	// DiscoveryCA references a Secret containing the CA certificate used to
+	// verify the Keycloak OIDC discovery endpoint. Required when the Keycloak
+	// hostname is served behind a TLS certificate not in the system trust store
+	// (e.g. OpenShift ingress with a private CA).
+	// +optional
+	DiscoveryCA *OIDCDiscoveryCASpec `json:"discoveryCA,omitempty"`
+
+	// BindingRules defines how Keycloak groups map to Nomad ACL roles.
+	// If empty, a default rule mapping the "nomad-admins" group to a
+	// management-equivalent role is created.
+	// +optional
+	BindingRules []OIDCBindingRule `json:"bindingRules,omitempty"`
+}
+
+// OIDCDiscoveryCASpec references a Secret containing the CA certificate for
+// OIDC discovery endpoint verification.
+type OIDCDiscoveryCASpec struct {
+	// SecretName is the name of the Secret containing the CA certificate.
+	SecretName string `json:"secretName"`
+
+	// SecretKey is the key within the Secret that holds the PEM-encoded CA certificate.
+	// +kubebuilder:default="tls.crt"
+	SecretKey string `json:"secretKey,omitempty"`
+}
+
+// RealmName returns the configured realm name, defaulting to the cluster name.
+func (o *OIDCSpec) RealmName(clusterName string) string {
+	if o.Realm != "" {
+		return o.Realm
+	}
+	return clusterName
+}
+
+// OIDCBindingRule maps a Keycloak group to a Nomad ACL role.
+type OIDCBindingRule struct {
+	// KeycloakGroup is the Keycloak group path, including leading slash (e.g. "/nomad-admins").
+	KeycloakGroup string `json:"keycloakGroup"`
+
+	// NomadRole is the name of the Nomad ACL role to bind to this group.
+	NomadRole string `json:"nomadRole"`
+
+	// PolicyRules is the HCL policy document granted to this role.
+	PolicyRules string `json:"policyRules"`
+}
+
+// OIDCStatus tracks the state of the OIDC integration.
+type OIDCStatus struct {
+	// RealmImportName is the name of the managed KeycloakRealmImport CR.
+	// +optional
+	RealmImportName string `json:"realmImportName,omitempty"`
+
+	// ClientSecretName is the name of the Secret containing the OIDC client secret.
+	// +optional
+	ClientSecretName string `json:"clientSecretName,omitempty"`
+
+	// AuthMethodName is the name of the Nomad ACL auth method created.
+	// +optional
+	AuthMethodName string `json:"authMethodName,omitempty"`
+
+	// Ready indicates that the realm import is complete and Nomad has been
+	// configured with the auth method, policies, roles, and binding rules.
+	// +optional
+	Ready bool `json:"ready,omitempty"`
+}
+
 // ClusterPhase represents the phase of the NomadCluster
 type ClusterPhase string
 
@@ -606,6 +691,10 @@ type NomadClusterStatus struct {
 	// CertificateAuthority contains information about the CA in use.
 	// +optional
 	CertificateAuthority *CertificateAuthorityStatus `json:"certificateAuthority,omitempty"`
+
+	// OIDC contains the observed state of the OIDC integration.
+	// +optional
+	OIDC OIDCStatus `json:"oidc,omitempty"`
 
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

@@ -28,7 +28,9 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -71,6 +73,7 @@ type NomadClusterReconciler struct {
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes/custom-host,verbs=create;update;patch
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors;prometheusrules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=k8s.keycloak.org,resources=keycloakrealmimports;keycloaks,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop
 func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -182,6 +185,7 @@ func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.
 		phases.NewRoutePhase(ctx),
 		phases.NewMonitoringPhase(ctx),
 		phases.NewACLBootstrapPhase(ctx),
+		phases.NewOIDCPhase(ctx),
 		phases.NewClusterStatusPhase(ctx), // Query Nomad API for status enrichment
 	}
 }
@@ -197,6 +201,13 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		if cluster.Status.OperatorStatusPolicyName != "" {
 			if err := r.cleanupOperatorStatusResources(ctx, cluster); err != nil {
 				log.Error(err, "Failed to clean up operator status ACL resources, continuing")
+			}
+		}
+
+		// Attempt to clean up OIDC resources
+		if cluster.Status.OIDC.AuthMethodName != "" {
+			if err := r.cleanupOIDCResources(ctx, cluster); err != nil {
+				log.Error(err, "Failed to clean up OIDC resources, continuing")
 			}
 		}
 
@@ -319,6 +330,107 @@ func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Cont
 		return err
 	}
 	log.Info("Deleted operator status ACL policy", "policy", cluster.Status.OperatorStatusPolicyName)
+
+	return nil
+}
+
+// cleanupOIDCResources removes Nomad-side OIDC resources and the KeycloakRealmImport CR.
+// Failures are non-fatal — best-effort cleanup on deletion.
+func (r *NomadClusterReconciler) cleanupOIDCResources(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) error {
+	log := logf.FromContext(ctx)
+
+	// Retrieve bootstrap token
+	bootstrapSecretName := cluster.Name + "-acl-bootstrap"
+	if cluster.Spec.Server.ACL.BootstrapSecretName != "" {
+		bootstrapSecretName = cluster.Spec.Server.ACL.BootstrapSecretName
+	}
+
+	bootstrapSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      bootstrapSecretName,
+		Namespace: cluster.Namespace,
+	}, bootstrapSecret); err != nil {
+		return fmt.Errorf("failed to get bootstrap secret for OIDC cleanup: %w", err)
+	}
+	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
+	if bootstrapToken == "" {
+		return fmt.Errorf("bootstrap secret has empty secret-id")
+	}
+
+	// Create Nomad client
+	address := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
+	var caCert []byte
+	tlsSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cluster.Name + "-tls",
+		Namespace: cluster.Namespace,
+	}, tlsSecret); err != nil {
+		log.Error(err, "Failed to get TLS secret for OIDC cleanup client")
+	} else {
+		caCert = tlsSecret.Data["ca.crt"]
+	}
+
+	cfg := nomad.ClientConfig{
+		Address:    address,
+		Token:      bootstrapToken,
+		TLSEnabled: true,
+		CACert:     caCert,
+		Timeout:    10 * time.Second,
+	}
+
+	nomadClient, err := nomad.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create Nomad client for OIDC cleanup: %w", err)
+	}
+
+	// 1. List and delete binding rules
+	rules, err := nomadClient.ListACLBindingRules(bootstrapToken, cluster.Status.OIDC.AuthMethodName)
+	if err != nil {
+		log.Error(err, "Failed to list OIDC binding rules for cleanup")
+	} else {
+		for _, rule := range rules {
+			if err := nomadClient.DeleteACLBindingRule(bootstrapToken, rule.ID); err != nil {
+				log.Error(err, "Failed to delete OIDC binding rule", "id", rule.ID)
+			}
+		}
+	}
+
+	// 2. Delete auth method
+	if err := nomadClient.DeleteACLAuthMethod(bootstrapToken, cluster.Status.OIDC.AuthMethodName); err != nil {
+		log.Error(err, "Failed to delete OIDC auth method", "name", cluster.Status.OIDC.AuthMethodName)
+	} else {
+		log.Info("Deleted OIDC auth method", "name", cluster.Status.OIDC.AuthMethodName)
+	}
+
+	// 3. Delete KeycloakRealmImport CR
+	if cluster.Status.OIDC.RealmImportName != "" {
+		realmImport := &unstructured.Unstructured{}
+		realmImport.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "k8s.keycloak.org",
+			Version: "v2alpha1",
+			Kind:    "KeycloakRealmImport",
+		})
+		realmImport.SetName(cluster.Status.OIDC.RealmImportName)
+		realmImport.SetNamespace(cluster.Namespace)
+		if err := r.Delete(ctx, realmImport); err != nil && !k8serrors.IsNotFound(err) {
+			log.Error(err, "Failed to delete KeycloakRealmImport", "name", cluster.Status.OIDC.RealmImportName)
+		} else {
+			log.Info("Deleted KeycloakRealmImport", "name", cluster.Status.OIDC.RealmImportName)
+		}
+	}
+
+	// 4. Delete client secret
+	if cluster.Status.OIDC.ClientSecretName != "" {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cluster.Status.OIDC.ClientSecretName,
+				Namespace: cluster.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, secret); err != nil && !k8serrors.IsNotFound(err) {
+			log.Error(err, "Failed to delete OIDC client secret", "name", cluster.Status.OIDC.ClientSecretName)
+		}
+	}
 
 	return nil
 }
