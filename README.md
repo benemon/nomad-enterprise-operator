@@ -302,6 +302,8 @@ On cluster deletion, the operator revokes the operator status token and deletes 
 
 The operator can configure OIDC authentication for the Nomad cluster via a user-managed Keycloak instance. When enabled, the operator creates a `KeycloakRealmImport` CR that provisions a Keycloak realm, client, and group-to-role mapping, then configures Nomad's ACL auth method, policies, roles, and binding rules.
 
+> **Realm import is a one-shot operation.** The Keycloak operator's `KeycloakRealmImport` creates the realm on first apply but does not update or delete it on subsequent changes. Deleting the `KeycloakRealmImport` CR does **not** remove the realm from Keycloak — it must be deleted manually via the Keycloak admin console or API. See the [Keycloak operator realm import documentation](https://www.keycloak.org/operator/realm-import) for details.
+
 ### Prerequisites
 
 1. The **Keycloak operator** must be installed **into the same namespace** as the NomadCluster before creating the NomadCluster CR. A Keycloak operator installed in a different namespace will not watch `KeycloakRealmImport` CRs in this namespace.
