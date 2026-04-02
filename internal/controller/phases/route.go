@@ -70,6 +70,7 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 			if err := p.Client.Create(ctx, route); err != nil {
 				return Error(err, "Failed to create Route")
 			}
+			// Route just created — host won't be admitted yet
 			return OK()
 		}
 		return Error(err, "Failed to get Route")
@@ -83,6 +84,11 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 		if err := p.Client.Update(ctx, existing); err != nil {
 			return Error(err, "Failed to update Route")
 		}
+	}
+
+	// Populate RouteHost so subsequent phases (e.g. OIDC) can use it
+	if len(existing.Status.Ingress) > 0 && existing.Status.Ingress[0].Host != "" {
+		cluster.Status.RouteHost = existing.Status.Ingress[0].Host
 	}
 
 	return OK()
@@ -113,11 +119,11 @@ func (p *RoutePhase) buildRoute(ctx context.Context, cluster *nomadv1alpha1.Noma
 		}
 		certKey := routeSpec.TLS.SecretKeys.Certificate
 		if certKey == "" {
-			certKey = "tls.crt"
+			certKey = defaultTLSCertKey
 		}
 		keyKey := routeSpec.TLS.SecretKeys.PrivateKey
 		if keyKey == "" {
-			keyKey = "tls.key"
+			keyKey = defaultTLSKeyKey
 		}
 		tlsConfig.Certificate = string(certSecret.Data[certKey])
 		tlsConfig.Key = string(certSecret.Data[keyKey])

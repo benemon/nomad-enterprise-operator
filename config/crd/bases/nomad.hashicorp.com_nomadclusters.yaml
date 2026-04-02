@@ -176,6 +176,81 @@ spec:
                   type: string
                 description: NodeSelector for pod scheduling
                 type: object
+              oidc:
+                description: OIDC configures OIDC authentication via Keycloak.
+                properties:
+                  bindingRules:
+                    description: |-
+                      BindingRules defines how Keycloak groups map to Nomad ACL roles.
+                      If empty, a default rule mapping the "nomad-admins" group to a
+                      management-equivalent role is created.
+                    items:
+                      description: OIDCBindingRule maps a Keycloak group to a Nomad
+                        ACL role.
+                      properties:
+                        keycloakGroup:
+                          description: KeycloakGroup is the Keycloak group path, including
+                            leading slash (e.g. "/nomad-admins").
+                          type: string
+                        nomadRole:
+                          description: NomadRole is the name of the Nomad ACL role
+                            to bind to this group.
+                          type: string
+                        policyRules:
+                          description: PolicyRules is the HCL policy document granted
+                            to this role.
+                          type: string
+                      required:
+                      - keycloakGroup
+                      - nomadRole
+                      - policyRules
+                      type: object
+                    type: array
+                  discoveryCA:
+                    description: |-
+                      DiscoveryCA references a Secret containing the CA certificate used to
+                      verify the Keycloak OIDC discovery endpoint. Required when the Keycloak
+                      hostname is served behind a TLS certificate not in the system trust store
+                      (e.g. OpenShift ingress with a private CA).
+                    properties:
+                      secretKey:
+                        default: tls.crt
+                        description: SecretKey is the key within the Secret that holds
+                          the PEM-encoded CA certificate.
+                        type: string
+                      secretName:
+                        description: SecretName is the name of the Secret containing
+                          the CA certificate.
+                        type: string
+                    required:
+                    - secretName
+                    type: object
+                  enabled:
+                    description: Enabled controls whether OIDC authentication is configured.
+                    type: boolean
+                  keycloakRef:
+                    description: |-
+                      KeycloakRef references the Keycloak CR that the realm import targets.
+                      Must be in the same namespace as the NomadCluster.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  realm:
+                    description: Realm is the name of the Keycloak realm to create.
+                      Defaults to the NomadCluster name.
+                    type: string
+                required:
+                - keycloakRef
+                type: object
               openshift:
                 description: OpenShift-specific configuration
                 properties:
@@ -901,6 +976,27 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              oidc:
+                description: OIDC contains the observed state of the OIDC integration.
+                properties:
+                  authMethodName:
+                    description: AuthMethodName is the name of the Nomad ACL auth
+                      method created.
+                    type: string
+                  clientSecretName:
+                    description: ClientSecretName is the name of the Secret containing
+                      the OIDC client secret.
+                    type: string
+                  ready:
+                    description: |-
+                      Ready indicates that the realm import is complete and Nomad has been
+                      configured with the auth method, policies, roles, and binding rules.
+                    type: boolean
+                  realmImportName:
+                    description: RealmImportName is the name of the managed KeycloakRealmImport
+                      CR.
+                    type: string
+                type: object
               operatorStatusPolicyName:
                 description: |-
                   OperatorStatusPolicyName is the Nomad ACL policy name created for the

@@ -298,6 +298,70 @@ ACLs are enabled by default (`server.acl.enabled: true`). When the StatefulSet b
 
 On cluster deletion, the operator revokes the operator status token and deletes the associated ACL policy from Nomad before removing Kubernetes resources.
 
+## OIDC Authentication
+
+The operator can configure OIDC authentication for the Nomad cluster via a user-managed Keycloak instance. When enabled, the operator creates a `KeycloakRealmImport` CR that provisions a Keycloak realm, client, and group-to-role mapping, then configures Nomad's ACL auth method, policies, roles, and binding rules.
+
+> **Realm import is a one-shot operation.** The Keycloak operator's `KeycloakRealmImport` creates the realm on first apply but does not update or delete it on subsequent changes. Deleting the `KeycloakRealmImport` CR does **not** remove the realm from Keycloak — it must be deleted manually via the Keycloak admin console or API. See the [Keycloak operator realm import documentation](https://www.keycloak.org/operator/realm-import) for details.
+
+### Prerequisites
+
+1. The **Keycloak operator** must be installed **into the same namespace** as the NomadCluster before creating the NomadCluster CR. A Keycloak operator installed in a different namespace will not watch `KeycloakRealmImport` CRs in this namespace.
+2. A **`Keycloak` CR** must exist and be in `Ready` state in that namespace.
+3. The Keycloak operator requires a **PostgreSQL database** — provisioning this is outside the scope of the Nomad operator.
+
+### `spec.oidc` Field Reference
+
+| Field | Type | Description |
+|---|---|---|
+| `oidc.enabled` | `bool` | Enable OIDC configuration |
+| `oidc.keycloakRef.name` | `string` | Name of the `Keycloak` CR in the same namespace |
+| `oidc.realm` | `string` | Keycloak realm name (default: NomadCluster name) |
+| `oidc.discoveryCA.secretName` | `string` | Secret containing the CA certificate for OIDC discovery endpoint verification |
+| `oidc.discoveryCA.secretKey` | `string` | Key within the Secret holding the PEM-encoded CA certificate (default: `tls.crt`) |
+| `oidc.bindingRules[].keycloakGroup` | `string` | Keycloak group path (e.g. `/nomad-admins`) |
+| `oidc.bindingRules[].nomadRole` | `string` | Nomad ACL role name to bind |
+| `oidc.bindingRules[].policyRules` | `string` | HCL policy granted to this role |
+
+### OIDC Example
+
+```yaml
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: nomad
+spec:
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: true
+  oidc:
+    enabled: true
+    keycloakRef:
+      name: my-keycloak
+    # realm defaults to the NomadCluster name ("nomad" here)
+    discoveryCA:
+      secretName: my-ca-secret   # CA that signed the Keycloak TLS certificate
+      secretKey: tls.crt         # default, can omit
+    bindingRules:
+      - keycloakGroup: "/nomad-admins"
+        nomadRole: "nomad-admins"
+        policyRules: |
+          namespace "*" {
+            policy = "write"
+          }
+          operator {
+            policy = "write"
+          }
+          agent {
+            policy = "write"
+          }
+          node {
+            policy = "write"
+          }
+```
+
 ## NomadSnapshot CRD Reference
 
 A `NomadSnapshot` deploys a Nomad snapshot agent as a Deployment, targeting a `NomadCluster` in the same or different namespace. It supports local PVC, S3, GCS, and Azure Blob storage backends.
@@ -470,6 +534,10 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.autopilot.failureTolerance` | Number of server failures the cluster can tolerate |
 | `status.autopilot.voters` | Number of voting servers |
 | `status.autopilot.servers[]` | Per-server health details |
+| `status.oidc.realmImportName` | Name of the managed `KeycloakRealmImport` CR |
+| `status.oidc.clientSecretName` | Name of the Secret containing the OIDC client secret |
+| `status.oidc.authMethodName` | Name of the Nomad ACL auth method created |
+| `status.oidc.ready` | Whether OIDC configuration is complete |
 
 ### Conditions
 
@@ -499,10 +567,11 @@ The NomadCluster controller reconciles through a sequential phase pipeline:
 7. **Secrets** — assembles the Nomad configuration secrets
 8. **ConfigMap** — renders the Nomad HCL server configuration
 9. **StatefulSet** — creates or updates the Nomad server StatefulSet
-10. **Route** — creates OpenShift Route (when enabled)
+10. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled)
 11. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled)
 12. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
-13. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
+13. **OIDC** — configures OIDC authentication via Keycloak (when `spec.oidc.enabled: true`)
+14. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
 
 ## Development
 
