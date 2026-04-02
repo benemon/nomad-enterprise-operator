@@ -129,7 +129,10 @@ COMMIT;
 echo "Deleting KeycloakRealmImport CRs..."
 kubectl delete keycloakrealmimport -n "$NAMESPACE" --all 2>/dev/null || true
 
-echo "Restarting Keycloak to clear caches..."
+# Restart Keycloak to flush Infinispan caches that still reference the
+# deleted realm. This is only necessary because this script bypasses
+# Keycloak and deletes directly from PostgreSQL.
+echo "Restarting Keycloak to flush caches after direct database deletion..."
 kubectl delete pod keycloak-0 -n "$NAMESPACE" 2>/dev/null || true
 
 echo "Done."
