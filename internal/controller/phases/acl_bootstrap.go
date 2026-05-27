@@ -31,6 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// SecretKeyAccessorID is the data key under which a Nomad ACL token's accessor
+// ID is stored in Kubernetes Secrets owned by this operator.
+const SecretKeyAccessorID = "accessor-id"
+
 // ACLBootstrapPhase automates ACL bootstrap using the Nomad API client.
 type ACLBootstrapPhase struct {
 	*PhaseContext
@@ -194,11 +198,11 @@ func (p *ACLBootstrapPhase) executeBootstrap(cluster *nomadv1alpha1.NomadCluster
 
 func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretName string, result *nomad.ACLBootstrapResult) PhaseResult {
 	secretData := map[string]string{
-		"accessor-id": result.AccessorID,
-		"secret-id":   result.SecretID,
-		"name":        result.Name,
-		"type":        result.Type,
-		"create-time": result.CreateTime.Format(time.RFC3339),
+		SecretKeyAccessorID: result.AccessorID,
+		"secret-id":         result.SecretID,
+		"name":              result.Name,
+		"type":              result.Type,
+		"create-time":       result.CreateTime.Format(time.RFC3339),
 	}
 
 	// Only include expiration-time if set (bootstrap tokens typically don't expire)
@@ -344,8 +348,8 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 		},
 		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"accessor-id": newToken.AccessorID,
-			"secret-id":   newToken.SecretID,
+			SecretKeyAccessorID: newToken.AccessorID,
+			"secret-id":         newToken.SecretID,
 		},
 	}
 

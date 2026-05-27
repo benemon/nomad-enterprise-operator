@@ -36,6 +36,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 )
 
@@ -546,8 +547,8 @@ func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snap
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
 		secret.Type = corev1.SecretTypeOpaque
 		secret.Data = map[string][]byte{
-			"secret-id":   []byte(nomadToken),
-			"accessor-id": []byte(snapshot.Status.TokenAccessorID),
+			"secret-id":                []byte(nomadToken),
+			phases.SecretKeyAccessorID: []byte(snapshot.Status.TokenAccessorID),
 		}
 		return controllerutil.SetControllerReference(snapshot, secret, r.Scheme)
 	})

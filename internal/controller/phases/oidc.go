@@ -35,6 +35,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+// SecretKeyClientSecret is the data key under which the OIDC client secret
+// value is stored in Kubernetes Secrets owned by this operator.
+const SecretKeyClientSecret = "client-secret"
+
 // OIDCPhase configures OIDC authentication for the Nomad cluster via Keycloak.
 type OIDCPhase struct {
 	*PhaseContext
@@ -102,7 +106,7 @@ func (p *OIDCPhase) ensureClientSecret(ctx context.Context, cluster *nomadv1alph
 			Namespace: cluster.Namespace,
 		}, existing)
 		if err == nil {
-			return string(existing.Data["client-secret"]), OK()
+			return string(existing.Data[SecretKeyClientSecret]), OK()
 		}
 		if !k8serrors.IsNotFound(err) {
 			return "", Error(err, "Failed to get OIDC client secret")
@@ -120,7 +124,7 @@ func (p *OIDCPhase) ensureClientSecret(ctx context.Context, cluster *nomadv1alph
 		if err := p.Client.Status().Update(ctx, cluster); err != nil {
 			return "", Error(err, "Failed to update cluster status with client secret name")
 		}
-		return string(existing.Data["client-secret"]), OK()
+		return string(existing.Data[SecretKeyClientSecret]), OK()
 	}
 	if !k8serrors.IsNotFound(err) {
 		return "", Error(err, "Failed to check for existing OIDC client secret")
@@ -141,7 +145,7 @@ func (p *OIDCPhase) ensureClientSecret(ctx context.Context, cluster *nomadv1alph
 		},
 		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"client-secret": clientSecretValue,
+			SecretKeyClientSecret: clientSecretValue,
 		},
 	}
 

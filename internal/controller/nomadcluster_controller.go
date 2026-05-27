@@ -313,7 +313,7 @@ func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Cont
 			Name:      cluster.Status.OperatorStatusSecretName,
 			Namespace: cluster.Namespace,
 		}, opSecret); err == nil {
-			accessorID := string(opSecret.Data["accessor-id"])
+			accessorID := string(opSecret.Data[phases.SecretKeyAccessorID])
 			if accessorID != "" {
 				if err := nomadClient.DeleteACLToken(bootstrapToken, accessorID); err != nil {
 					log.Error(err, "Failed to delete operator status ACL token", "accessorID", accessorID)
