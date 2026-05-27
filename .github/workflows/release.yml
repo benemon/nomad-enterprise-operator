@@ -9,7 +9,21 @@ env:
   IMAGE_TAG_BASE: quay.io/benjamin_holmes/nomad-enterprise-operator
 
 jobs:
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    needs: lint
+    uses: ./.github/workflows/test.yml
+
+  test-e2e:
+    needs: test
+    uses: ./.github/workflows/test-e2e.yml
+    secrets:
+      NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+
   release:
+    needs: test-e2e
     name: Build and Push Images
     runs-on: ubuntu-latest
     permissions:
