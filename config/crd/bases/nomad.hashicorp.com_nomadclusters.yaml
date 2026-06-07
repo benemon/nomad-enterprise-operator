@@ -949,6 +949,16 @@ spec:
                 description: GossipKeySecretName is the name of secret containing
                   gossip key
                 type: string
+              initialReconcileEventEmitted:
+                description: |-
+                  InitialReconcileEventEmitted records whether the operator has
+                  emitted the one-shot "InitialReconcileComplete" Event for this
+                  cluster. Used as a per-cluster debounce so the Event fires
+                  exactly once across the cluster's lifetime, even across
+                  operator restarts. Downstream issues (B6 audit migration, etc.)
+                  use the same status-field pattern for their per-cluster
+                  one-shot Events.
+                type: boolean
               lastReconcileTime:
                 description: |-
                   LastReconcileTime is the timestamp of the most recent reconciliation

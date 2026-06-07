@@ -720,6 +720,16 @@ type NomadClusterStatus struct {
 	// 5-minute steady-state requeue cadence, plus immediate updates on
 	// any real status transition.
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
+
+	// InitialReconcileEventEmitted records whether the operator has
+	// emitted the one-shot "InitialReconcileComplete" Event for this
+	// cluster. Used as a per-cluster debounce so the Event fires
+	// exactly once across the cluster's lifetime, even across
+	// operator restarts. Downstream issues (B6 audit migration, etc.)
+	// use the same status-field pattern for their per-cluster
+	// one-shot Events.
+	// +optional
+	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
 }
 
 // +kubebuilder:object:root=true

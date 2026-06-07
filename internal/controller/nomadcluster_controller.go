@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -68,8 +69,10 @@ type NomadClusterReconciler struct {
 	client.Client
 	Scheme     *runtime.Scheme
 	RESTConfig *rest.Config
+	Recorder   record.EventRecorder
 }
 
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/finalizers,verbs=update
@@ -541,6 +544,18 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 			Reason:  "ClusterReady",
 			Message: fmt.Sprintf("Nomad cluster is running with %d/%d replicas", cluster.Status.ReadyReplicas, cluster.Spec.Replicas),
 		})
+
+		// One-shot Event: emit the first time we observe Ready=True for this
+		// cluster. The debounce field on Status survives operator restart so
+		// we never re-emit. Downstream issues (B6 audit migration, etc.) use
+		// the same status-field pattern for their per-cluster one-shots.
+		// The flag mutation falls within updateFinalStatus's existing
+		// patchBase/Status().Patch window, so it lands in the merge patch.
+		if !cluster.Status.InitialReconcileEventEmitted && r.Recorder != nil {
+			r.Recorder.Event(cluster, corev1.EventTypeNormal, "Reconciled",
+				"InitialReconcileComplete")
+			cluster.Status.InitialReconcileEventEmitted = true
+		}
 	} else {
 		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseCreating
 		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{

@@ -221,14 +221,16 @@ func main() {
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		RESTConfig: mgr.GetConfig(),
+		Recorder:   mgr.GetEventRecorderFor("nomadcluster-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NomadCluster")
 		os.Exit(1)
 	}
 
 	if err := (&controller.NomadSnapshotReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("nomadsnapshot-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NomadSnapshot")
 		os.Exit(1)
