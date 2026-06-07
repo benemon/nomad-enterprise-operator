@@ -163,7 +163,7 @@ var _ = Describe("NomadCluster Controller", func() {
 				if err != nil {
 					break
 				}
-				if result.RequeueAfter == 30*time.Second {
+				if result.RequeueAfter == defaultRequeueInterval {
 					// Default requeue interval means reconciliation completed
 					break
 				}
@@ -305,7 +305,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			By("Verifying reconciliation returns error")
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("license secret"))
-			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+			Expect(result.RequeueAfter).To(Equal(defaultRequeueInterval))
 
 			By("Verifying status shows failure")
 			updatedCluster := &nomadv1alpha1.NomadCluster{}
@@ -414,7 +414,7 @@ var _ = Describe("NomadCluster Controller", func() {
 				if err != nil {
 					Fail(fmt.Sprintf("Reconciliation failed with error: %v", err))
 				}
-				if result.RequeueAfter == 30*time.Second {
+				if result.RequeueAfter == defaultRequeueInterval {
 					break
 				}
 			}
