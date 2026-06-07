@@ -1,0 +1,27 @@
+# Mount the webhook TLS Secret and expose the webhook port on the manager
+# Deployment. The Secret is provisioned at startup by internal/webhook/bootstrap.go
+# (Tree 1 in the operator's two-cert-tree model) — no cert-manager required.
+# POD_NAMESPACE is already set in config/manager/manager.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          ports:
+            - name: webhook-server
+              containerPort: 9443
+              protocol: TCP
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: nomad-enterprise-operator-webhook-tls
+            optional: true

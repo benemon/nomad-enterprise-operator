@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -31,6 +32,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -42,6 +44,7 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller"
+	webhookbootstrap "github.com/hashicorp/nomad-enterprise-operator/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -66,6 +69,7 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
+	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
@@ -79,9 +83,11 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
+	flag.StringVar(&webhookCertPath, "webhook-cert-path", webhookbootstrap.DefaultCertDir,
+		"The directory that contains the webhook certificate.")
 	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
@@ -138,6 +144,8 @@ func main() {
 
 	webhookServer := webhook.NewServer(webhook.Options{
 		TLSOpts: webhookTLSOpts,
+		Port:    webhookPort,
+		CertDir: webhookCertPath,
 	})
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
@@ -223,6 +231,44 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NomadSnapshot")
+		os.Exit(1)
+	}
+
+	// Register the NomadCluster validating webhook (Tree 1: operator-singleton
+	// admission validation). TLS material is provisioned by webhookBootstrap
+	// below — see internal/webhook/bootstrap.go for the rotation flow.
+	if err := (&nomadv1alpha1.NomadCluster{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "NomadCluster")
+		os.Exit(1)
+	}
+
+	// Provision the webhook TLS Secret BEFORE the manager starts so the
+	// webhook server has a cert to load. We use a direct client (not the
+	// cached one) because the manager's cache only starts inside mgr.Start.
+	webhookCfg := webhookbootstrap.Config{
+		Namespace: webhookbootstrap.NamespaceFromEnv(),
+		CertDir:   webhookCertPath,
+	}
+	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		setupLog.Error(err, "unable to create direct client for webhook bootstrap")
+		os.Exit(1)
+	}
+	webhookBootstrap := webhookbootstrap.NewBootstrap(directClient, webhookCfg)
+	if err := webhookBootstrap.EnsureSecret(context.Background()); err != nil {
+		setupLog.Error(err, "unable to ensure webhook TLS secret")
+		os.Exit(1)
+	}
+	if err := webhookBootstrap.WriteCertsToDir(context.Background()); err != nil {
+		setupLog.Error(err, "unable to write webhook certs to disk")
+		os.Exit(1)
+	}
+
+	// Register the bootstrap as a continuous Runnable for rotation + caBundle
+	// upkeep. It uses the cached manager client and runs under leader election.
+	managedBootstrap := webhookbootstrap.NewBootstrap(mgr.GetClient(), webhookCfg)
+	if err := mgr.Add(managedBootstrap); err != nil {
+		setupLog.Error(err, "unable to register webhook bootstrap with manager")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

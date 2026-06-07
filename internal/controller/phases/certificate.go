@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	certWarningWindow = 30 * 24 * time.Hour
-	serverCertTTL     = 365 * 24 * time.Hour
+	certWarningWindow = tlspkg.CertWarningWindow
+	serverCertTTL     = tlspkg.ServerCertTTL
 	defaultTLSCertKey = "tls.crt"
 	defaultTLSKeyKey  = "tls.key"
 )

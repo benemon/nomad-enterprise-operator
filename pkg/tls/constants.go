@@ -1,0 +1,36 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package tls
+
+import "time"
+
+// Shared TTL constants used by both cert trees:
+//   - Tree 1: operator webhook TLS (internal/webhook)
+//   - Tree 2: per-NomadCluster Nomad server certs (internal/controller/phases)
+//
+// Both trees use the same renewal cadence so the rotation behaviour is uniform
+// across the operator. Do not introduce tree-specific TTL constants without a
+// documented reason.
+const (
+	// ServerCertTTL is the validity duration of issued leaf certificates.
+	ServerCertTTL = 365 * 24 * time.Hour
+
+	// CertWarningWindow is the window before expiry at which a certificate is
+	// considered due for renewal. ValidateCertificate returns an error inside
+	// this window so the calling reconciler reissues the cert.
+	CertWarningWindow = 30 * 24 * time.Hour
+)
