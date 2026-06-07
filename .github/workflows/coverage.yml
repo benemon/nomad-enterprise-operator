@@ -1,0 +1,89 @@
+name: Coverage
+
+# Per-package coverage gate. Enforces the thresholds in CONTRIBUTING.md §1.5:
+#
+#   pkg/...                          ≥ 75%
+#   internal/controller/phases/...   ≥ 65%
+#   internal/controller/...          ≥ 55%   (excluding the phases subtree)
+#
+# Exclusions (also per §1.5):
+#   cmd/...
+#   api/v1alpha1/zz_generated.deepcopy.go
+#
+# The aggregation and threshold logic lives in hack/coverage-gate/main.go so
+# the rules are version-controlled Go, not buried in shell. Update the gate
+# in lockstep with §1.5.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, stability]
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Per-package coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Cache the setup-envtest binaries (etcd, kube-apiserver, kubectl) so
+      # the controller envtest suites can actually run in CI. The Makefile's
+      # `setup-envtest` target downloads these into ./bin via `setup-envtest
+      # use --bin-dir`; the cache key tracks ENVTEST_K8S_VERSION (which is
+      # derived from k8s.io/api in go.mod) so a go.mod bump invalidates the
+      # cache automatically.
+      - name: Resolve envtest k8s version
+        id: envtest
+        run: |
+          version=$(go list -m -f '{{ .Version }}' k8s.io/api | awk -F'[v.]' '{printf "1.%d", $3}')
+          echo "k8s_version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: bin/k8s
+          key: envtest-${{ runner.os }}-${{ steps.envtest.outputs.k8s_version }}
+
+      - name: Provision envtest binaries
+        run: make setup-envtest
+
+      - name: Run tests with coverage
+        # Mirror the Makefile `test` target but emit a coverage profile we
+        # can post-process. We exclude the e2e suite (it needs a real kind
+        # cluster) and tell go test to atomic-mode the counts so parallel
+        # tests don't race the cover file.
+        run: |
+          KUBEBUILDER_ASSETS="$(bin/setup-envtest use ${{ steps.envtest.outputs.k8s_version }} --bin-dir bin -p path)" \
+            go test $(go list ./... | grep -v /e2e) \
+              -covermode=atomic \
+              -coverprofile=cover.out \
+              -timeout=10m
+
+      - name: Generate per-function coverage report
+        run: go tool cover -func=cover.out | tee cover.func.txt
+
+      - name: Enforce per-package thresholds
+        # The gate exits non-zero if any rule fails; the YAML's job-level
+        # failure is the PR's failure signal.
+        run: go run ./hack/coverage-gate cover.func.txt
+
+      - name: Upload coverage artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            cover.out
+            cover.func.txt
+          retention-days: 14

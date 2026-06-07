@@ -143,6 +143,20 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
+# Smoke e2e helpers used by .github/workflows/smoke-e2e.yml. The script in
+# hack/smoke-e2e/kind-up.sh provisions kind + metallb so LoadBalancer
+# Services are routable; teardown is just `kind delete`. Override the
+# cluster name with KIND_CLUSTER=... to match the workflow if running locally.
+SMOKE_KIND_CLUSTER ?= neo-smoke
+
+.PHONY: smoke-e2e-up
+smoke-e2e-up: ## Bring up kind + metallb for smoke e2e (see hack/smoke-e2e/kind-up.sh).
+	KIND_CLUSTER=$(SMOKE_KIND_CLUSTER) hack/smoke-e2e/kind-up.sh
+
+.PHONY: smoke-e2e-down
+smoke-e2e-down: ## Tear down the smoke e2e kind cluster.
+	$(KIND) delete cluster --name $(SMOKE_KIND_CLUSTER)
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run

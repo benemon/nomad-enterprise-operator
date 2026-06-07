@@ -1,4 +1,11 @@
 # Binaries for programs and plugins
+.beads
+.bd
+.claude
+docs/
+CONTRIBUTING.md
+CHANGELOG.md
+.github/PULL_REQUEST_TEMPLATE.md
 *.exe
 *.exe~
 *.dll
@@ -28,3 +35,8 @@ go.work
 *.swp
 *.swo
 *~
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

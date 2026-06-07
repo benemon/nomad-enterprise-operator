@@ -1,0 +1,121 @@
+name: Grep checks
+
+# Static-text gates that enforce CONTRIBUTING.md §1.5's three "no foot-gun"
+# rules. Each rule is its own step so the failure surface is precisely the
+# rule that triggered it (not a generic "grep-checks failed").
+#
+# Rules:
+#
+#   1. No `LastTransitionTime: metav1.Now()` (A1 anti-pattern).
+#      Setting LastTransitionTime explicitly defeats meta.SetStatusCondition's
+#      transition detection — every reconcile mutates the condition and the
+#      status field churns even when nothing changed. The accepted pattern
+#      is to let meta.SetStatusCondition manage the timestamp.
+#
+#   2. TODO comments without an accompanying `bd-<id>` link.
+#      Workflow rule: every TODO must reference a beads issue so the
+#      follow-up work is tracked. Bare TODOs accumulate and become dead
+#      weight.
+#
+#   3. Commented-out code blocks (heuristic).
+#      A run of consecutive `//` lines whose content looks like Go
+#      statements (ends in `;`, `{`, `}`, `,`, or starts with a Go keyword)
+#      is almost always commented-out code left from a refactor. Delete
+#      it; git history is the archive.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, stability]
+
+permissions:
+  contents: read
+
+jobs:
+  grep-checks:
+    name: Static-text gates (CONTRIBUTING.md §1.5)
+    runs-on: ubuntu-latest
+    env:
+      # Scopes are limited to first-party code; generated files and the
+      # repo's own tooling (hack/, test/) are excluded so the gates don't
+      # collide with intentional usages in helper code.
+      SCOPES: "internal pkg api"
+      # Rule 1 — A1 anti-pattern. Matches BOTH forms that mutate
+      # LastTransitionTime on every reconcile:
+      #   struct literal:  LastTransitionTime: metav1.Now()
+      #   assignment:      condition.LastTransitionTime = metav1.Now()
+      # The single character class [:=] covers both colon and equals; the
+      # whitespace allowance handles either form. A1.1 added the assignment
+      # form after the original A1 fix only caught the struct-literal form.
+      RULE_A1_REGEX: 'LastTransitionTime[[:space:]]*[:=][[:space:]]*metav1\.Now\(\)'
+      # Rule 2 — TODO without a bd-<id> reference on the same line.
+      # Implemented as a two-pass pipeline: first match every line
+      # containing a `TODO` (case-insensitive), then exclude lines that
+      # also reference a beads issue via `bd-<alnum>`. PCRE lookaheads are
+      # tempting but break here because the `bd-<id>` can appear either
+      # side of the `TODO` token.
+      RULE_TODO_REGEX: '\bTODO\b'
+      RULE_TODO_ALLOWLIST_REGEX: '\bbd-[A-Za-z0-9]+\b'
+      # Rule 3 — commented-out code heuristic. Match any line that begins
+      # with `//` (after optional whitespace) and ends in a Go statement
+      # terminator ({, }, ;) or contains an `=` followed by a non-comment
+      # token. We exclude lines that look like prose by requiring no space
+      # between `//` and the trailing punctuation candidate — i.e. the line
+      # has to look like indented commented Go. This is a heuristic; tune
+      # the regex if it produces false positives.
+      RULE_COMMENTED_CODE_REGEX: '^[[:space:]]*//[[:space:]]*(if|for|switch|func|return|var|const|type|go|defer|select|range|case|default)[[:space:]].*[{};]?[[:space:]]*$|^[[:space:]]*//[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:?=|<-|\+\+|--)'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: "Rule 1 — no `LastTransitionTime: metav1.Now()` in internal/, pkg/, api/"
+        run: |
+          set -uo pipefail
+          # The A1 regression test (lasttransitiontime_test.go) deliberately
+          # mentions the anti-pattern in its docstring and an error message —
+          # excluded so the gate doesn't self-trip.
+          # shellcheck disable=SC2086
+          matches=$(grep -RInE --exclude='lasttransitiontime_test.go' "$RULE_A1_REGEX" $SCOPES || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Found A1 anti-pattern (LastTransitionTime: metav1.Now() or =metav1.Now()) — let meta.SetStatusCondition manage the timestamp."
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK — no LastTransitionTime mutation pattern in $SCOPES."
+
+      - name: Rule 2 — every TODO must reference a bd-<id>
+        run: |
+          set -uo pipefail
+          # First grep finds every TODO line; second grep -v filters out
+          # those that reference a bd issue. Anything that survives is a
+          # bare TODO and must be either linked or deleted. Excludes
+          # generated DeepCopy because it is not first-party.
+          # shellcheck disable=SC2086
+          matches=$(grep -RInE \
+            --include='*.go' \
+            --exclude='zz_generated.*.go' \
+            -i "$RULE_TODO_REGEX" $SCOPES \
+            | grep -vE "$RULE_TODO_ALLOWLIST_REGEX" || true)
+          if [ -n "$matches" ]; then
+            echo "::error::TODO without a bd-<id> reference. Either link the follow-up issue (e.g. \`// TODO(bd-neo-d90): ...\`) or delete the TODO."
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK — every TODO references a bd issue (or none exist)."
+
+      - name: Rule 3 — no commented-out Go code blocks
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2086
+          matches=$(grep -RInE \
+            --include='*.go' \
+            --exclude='zz_generated.*.go' \
+            "$RULE_COMMENTED_CODE_REGEX" $SCOPES || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Commented-out Go code detected. Delete it — git history is the archive. If the regex misfired, rephrase the comment or update the heuristic in this workflow."
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK — no commented-out Go code detected."

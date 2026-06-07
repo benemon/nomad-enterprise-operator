@@ -809,9 +809,12 @@ func (r *NomadSnapshotReconciler) addLocalStorage(snapshot *nomadv1alpha1.NomadS
 	})
 }
 
-// setCondition updates a condition on the snapshot
+// setCondition updates a condition on the snapshot. LastTransitionTime is
+// intentionally left to meta.SetStatusCondition: it advances the timestamp
+// only on a real Status transition and leaves it alone on steady state.
+// Hand-stamping metav1.Now() here was the A1 anti-pattern surfaced in
+// nomadcluster_controller.go; the same fix applies here (A1.1).
 func (r *NomadSnapshotReconciler) setCondition(snapshot *nomadv1alpha1.NomadSnapshot, condition metav1.Condition) {
-	condition.LastTransitionTime = metav1.Now()
 	meta.SetStatusCondition(&snapshot.Status.Conditions, condition)
 }
 
