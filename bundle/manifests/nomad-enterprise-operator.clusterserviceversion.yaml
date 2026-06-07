@@ -25,7 +25,7 @@ metadata:
             },
             "image": {
               "repository": "hashicorp/nomad",
-              "tag": "1.11-ent"
+              "tag": "2.0.0-ent"
             },
             "license": {
               "secretKey": "license",
@@ -40,11 +40,7 @@ metadata:
                 "scrapeTimeout": "10s"
               },
               "route": {
-                "enabled": true,
-                "tls": {
-                  "insecureEdgeTerminationPolicy": "Redirect",
-                  "termination": "edge"
-                }
+                "enabled": true
               }
             },
             "persistence": {
@@ -76,9 +72,6 @@ metadata:
                 "lastContactThreshold": "200ms",
                 "maxTrailingLogs": 250,
                 "serverStabilizationTime": "10s"
-              },
-              "tls": {
-                "enabled": false
               }
             },
             "services": {
@@ -130,9 +123,9 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    categories: Integration & Delivery
+    categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-03-20T13:18:57Z"
+    createdAt: "2026-06-07T11:50:17Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
@@ -196,6 +189,19 @@ spec:
           resources:
           - deployments
           - statefulsets
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - k8s.keycloak.org
+          resources:
+          - keycloakrealmimports
+          - keycloaks
           verbs:
           - create
           - delete
@@ -272,6 +278,14 @@ spec:
           - update
           - watch
         - apiGroups:
+          - route.openshift.io
+          resources:
+          - routes/custom-host
+          verbs:
+          - create
+          - patch
+          - update
+        - apiGroups:
           - authentication.k8s.io
           resources:
           - tokenreviews
@@ -329,10 +343,10 @@ spec:
                 resources:
                   limits:
                     cpu: 500m
-                    memory: 128Mi
+                    memory: 512Mi
                   requests:
                     cpu: 10m
-                    memory: 64Mi
+                    memory: 128Mi
                 securityContext:
                   allowPrivilegeEscalation: false
                   capabilities:
@@ -384,9 +398,9 @@ spec:
     type: OwnNamespace
   - supported: true
     type: SingleNamespace
-  - supported: false
+  - supported: true
     type: MultiNamespace
-  - supported: false
+  - supported: true
     type: AllNamespaces
   keywords:
   - nomad

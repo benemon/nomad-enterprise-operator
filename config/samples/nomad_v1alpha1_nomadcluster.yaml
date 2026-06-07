@@ -9,7 +9,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.0-ent"
   license:
     # Option 1: Reference an existing secret
     secretName: nomad-license

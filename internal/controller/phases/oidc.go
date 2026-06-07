@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -120,9 +121,10 @@ func (p *OIDCPhase) ensureClientSecret(ctx context.Context, cluster *nomadv1alph
 		Namespace: cluster.Namespace,
 	}, existing)
 	if err == nil {
+		patchBase := cluster.DeepCopy()
 		cluster.Status.OIDC.ClientSecretName = secretName
-		if err := p.Client.Status().Update(ctx, cluster); err != nil {
-			return "", Error(err, "Failed to update cluster status with client secret name")
+		if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
+			return "", Error(err, "Failed to patch cluster status with client secret name")
 		}
 		return string(existing.Data[SecretKeyClientSecret]), OK()
 	}
@@ -158,9 +160,10 @@ func (p *OIDCPhase) ensureClientSecret(ctx context.Context, cluster *nomadv1alph
 		return "", Error(err, "Failed to create OIDC client secret")
 	}
 
+	patchBase := cluster.DeepCopy()
 	cluster.Status.OIDC.ClientSecretName = secretName
-	if err := p.Client.Status().Update(ctx, cluster); err != nil {
-		return "", Error(err, "Failed to update cluster status with client secret name")
+	if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
+		return "", Error(err, "Failed to patch cluster status with client secret name")
 	}
 
 	return clientSecretValue, OK()
@@ -230,9 +233,10 @@ func (p *OIDCPhase) reconcileRealmImport(ctx context.Context, cluster *nomadv1al
 	}
 
 	// Update status
+	patchBase := cluster.DeepCopy()
 	cluster.Status.OIDC.RealmImportName = realmImport.GetName()
-	if err := p.Client.Status().Update(ctx, cluster); err != nil {
-		return Error(err, "Failed to update cluster status with realm import name")
+	if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
+		return Error(err, "Failed to patch cluster status with realm import name")
 	}
 
 	// Step 4d — Wait for realm import readiness
@@ -417,10 +421,11 @@ func (p *OIDCPhase) configureNomad(ctx context.Context, cluster *nomadv1alpha1.N
 		}
 	}
 
+	patchBase := cluster.DeepCopy()
 	cluster.Status.OIDC.AuthMethodName = "keycloak"
 	cluster.Status.OIDC.Ready = true
-	if err := p.Client.Status().Update(ctx, cluster); err != nil {
-		return Error(err, "Failed to update cluster status with OIDC ready state")
+	if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
+		return Error(err, "Failed to patch cluster status with OIDC ready state")
 	}
 
 	p.Log.Info("OIDC configuration completed successfully")

@@ -105,10 +105,11 @@ spec:
                   pullPolicy:
                     default: Always
                     description: |-
-                      PullPolicy defines when to pull the image. Defaults to Always because
-                      the default tag (1.11-ent) is a floating tag that resolves to the latest
-                      patch release. Set to IfNotPresent when pinning to a specific version
-                      (e.g. 1.11.3-ent).
+                      PullPolicy defines when to pull the image. Defaults to Always as a
+                      safety measure against registry-side image content changes (a tag
+                      being re-pushed) even though the default tag is now pinned to a
+                      concrete patch version. Users on strict-pin workflows running fully
+                      air-gapped or using image digests can override to IfNotPresent.
                     enum:
                     - Always
                     - IfNotPresent
@@ -119,8 +120,15 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 1.11-ent
-                    description: Tag is the container image tag
+                    default: 2.0.0-ent
+                    description: |-
+                      Tag is the container image tag. The default is pinned to a concrete
+                      patch version rather than a floating tag, because Nomad is a Raft
+                      cluster — a registry-side retag during a rolling restart can produce
+                      version-mismatched peers and silent quorum loss. The operator's
+                      release process updates this default in deliberate increments per
+                      Nomad Enterprise release (see docs/release-process.md).
+                    pattern: ^[A-Za-z0-9._-]+$
                     type: string
                 type: object
               imagePullSecrets:
@@ -942,11 +950,25 @@ spec:
                   gossip key
                 type: string
               lastReconcileTime:
-                description: LastReconcileTime is the timestamp of last reconciliation
+                description: |-
+                  LastReconcileTime is the timestamp of the most recent reconciliation
+                  that produced a status mutation or that crossed the heartbeat
+                  threshold of (defaultRequeueInterval / 2). It is NOT updated on
+                  every reconcile loop — that would produce per-loop status writes
+                  even when nothing observable changed (etcd write amplification and
+                  false GitOps drift). Consumers treating this as "is the operator
+                  alive?" should expect updates roughly every 2m30s at the operator's
+                  5-minute steady-state requeue cadence, plus immediate updates on
+                  any real status transition.
                 format: date-time
                 type: string
-              leaderID:
-                description: LeaderID is the Raft leader node ID (if known)
+              leaderAddress:
+                description: |-
+                  LeaderAddress is the host:port of the current Raft leader as
+                  reported by Nomad (if known). This is NOT the Raft server ID;
+                  it is the leader's RPC address. Consumers that need the actual
+                  Raft server ID should read it from
+                  `status.autopilot.servers[?(@.leader==true)].id`.
                 type: string
               license:
                 description: License contains Nomad Enterprise license information

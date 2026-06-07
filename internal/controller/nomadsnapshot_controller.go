@@ -102,13 +102,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}, cluster); err != nil {
 		if k8serrors.IsNotFound(err) {
 			log.Error(err, "Referenced NomadCluster not found", "cluster", snapshot.Spec.ClusterRef.Name)
+			patchBase := snapshot.DeepCopy()
 			r.setCondition(snapshot, metav1.Condition{
 				Type:    "Ready",
 				Status:  metav1.ConditionFalse,
 				Reason:  "ClusterNotFound",
 				Message: fmt.Sprintf("Referenced NomadCluster %s not found", snapshot.Spec.ClusterRef.Name),
 			})
-			if err := r.Status().Update(ctx, snapshot); err != nil {
+			if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
@@ -119,13 +120,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Check if cluster has ACL bootstrapped
 	if !cluster.Status.ACLBootstrapped {
 		log.Info("Waiting for NomadCluster ACL bootstrap", "cluster", cluster.Name)
+		patchBase := snapshot.DeepCopy()
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
 			Reason:  "WaitingForACLBootstrap",
 			Message: "Waiting for NomadCluster ACL bootstrap to complete",
 		})
-		if err := r.Status().Update(ctx, snapshot); err != nil {
+		if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
@@ -143,13 +145,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Namespace: clusterNamespace,
 	}, bootstrapSecret); err != nil {
 		log.Error(err, "Failed to get bootstrap token secret", "secret", bootstrapSecretName)
+		patchBase := snapshot.DeepCopy()
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
 			Reason:  "BootstrapSecretNotFound",
 			Message: fmt.Sprintf("Bootstrap secret %s not found", bootstrapSecretName),
 		})
-		if err := r.Status().Update(ctx, snapshot); err != nil {
+		if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
@@ -170,13 +173,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	snapshotToken, err := r.ensureSnapshotToken(ctx, snapshot, cluster, clusterNamespace, bootstrapToken)
 	if err != nil {
 		log.Error(err, "Failed to ensure snapshot agent token")
+		patchBase := snapshot.DeepCopy()
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
 			Reason:  "TokenCreationFailed",
 			Message: fmt.Sprintf("Failed to create snapshot agent token: %v", err),
 		})
-		if err := r.Status().Update(ctx, snapshot); err != nil {
+		if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
@@ -213,6 +217,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	deploymentName := snapshot.Name + "-snapshot-agent"
 	configMapName := snapshot.Name + "-snapshot-config"
 
+	patchBase := snapshot.DeepCopy()
 	snapshot.Status.ObservedGeneration = snapshot.Generation
 	snapshot.Status.DeploymentName = deploymentName
 	snapshot.Status.ConfigMapName = configMapName
@@ -242,7 +247,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		})
 	}
 
-	if err := r.Status().Update(ctx, snapshot); err != nil {
+	if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -358,10 +363,11 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(
 	log.Info("Created snapshot agent token", "accessor", newToken.AccessorID, "policy", policyName)
 
 	// Update status with accessor ID and policy name for cleanup
+	patchBase := snapshot.DeepCopy()
 	snapshot.Status.TokenAccessorID = newToken.AccessorID
 	snapshot.Status.PolicyName = policyName
-	if err := r.Status().Update(ctx, snapshot); err != nil {
-		return "", fmt.Errorf("failed to update status with token accessor: %w", err)
+	if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
+		return "", fmt.Errorf("failed to patch status with token accessor: %w", err)
 	}
 
 	return newToken.SecretID, nil

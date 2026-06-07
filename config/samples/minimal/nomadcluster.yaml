@@ -5,7 +5,7 @@
 #
 # Defaults applied automatically:
 #   replicas: 3
-#   image: hashicorp/nomad:1.11-ent
+#   image: hashicorp/nomad:2.0.0-ent
 #   region: global
 #   datacenter: <namespace>
 #   gossip key: auto-generated

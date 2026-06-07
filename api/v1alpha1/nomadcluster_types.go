@@ -93,14 +93,21 @@ type ImageSpec struct {
 	// +kubebuilder:default="hashicorp/nomad"
 	Repository string `json:"repository,omitempty"`
 
-	// Tag is the container image tag
-	// +kubebuilder:default="1.11-ent"
+	// Tag is the container image tag. The default is pinned to a concrete
+	// patch version rather than a floating tag, because Nomad is a Raft
+	// cluster — a registry-side retag during a rolling restart can produce
+	// version-mismatched peers and silent quorum loss. The operator's
+	// release process updates this default in deliberate increments per
+	// Nomad Enterprise release (see docs/release-process.md).
+	// +kubebuilder:default="2.0.0-ent"
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
 
-	// PullPolicy defines when to pull the image. Defaults to Always because
-	// the default tag (1.11-ent) is a floating tag that resolves to the latest
-	// patch release. Set to IfNotPresent when pinning to a specific version
-	// (e.g. 1.11.3-ent).
+	// PullPolicy defines when to pull the image. Defaults to Always as a
+	// safety measure against registry-side image content changes (a tag
+	// being re-pushed) even though the default tag is now pinned to a
+	// concrete patch version. Users on strict-pin workflows running fully
+	// air-gapped or using image digests can override to IfNotPresent.
 	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
 	// +kubebuilder:default="Always"
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
@@ -644,9 +651,13 @@ type NomadClusterStatus struct {
 	// CurrentReplicas is the current number of Nomad server pods
 	CurrentReplicas int32 `json:"currentReplicas,omitempty"`
 
-	// LeaderID is the Raft leader node ID (if known)
+	// LeaderAddress is the host:port of the current Raft leader as
+	// reported by Nomad (if known). This is NOT the Raft server ID;
+	// it is the leader's RPC address. Consumers that need the actual
+	// Raft server ID should read it from
+	// `status.autopilot.servers[?(@.leader==true)].id`.
 	// +optional
-	LeaderID string `json:"leaderID,omitempty"`
+	LeaderAddress string `json:"leaderAddress,omitempty"`
 
 	// AdvertiseAddress is the resolved LoadBalancer address
 	// +optional
@@ -699,7 +710,15 @@ type NomadClusterStatus struct {
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// LastReconcileTime is the timestamp of last reconciliation
+	// LastReconcileTime is the timestamp of the most recent reconciliation
+	// that produced a status mutation or that crossed the heartbeat
+	// threshold of (defaultRequeueInterval / 2). It is NOT updated on
+	// every reconcile loop — that would produce per-loop status writes
+	// even when nothing observable changed (etcd write amplification and
+	// false GitOps drift). Consumers treating this as "is the operator
+	// alive?" should expect updates roughly every 2m30s at the operator's
+	// 5-minute steady-state requeue cadence, plus immediate updates on
+	// any real status transition.
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
 }
 

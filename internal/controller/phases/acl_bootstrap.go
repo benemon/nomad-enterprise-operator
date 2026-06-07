@@ -28,6 +28,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -322,10 +323,11 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	}, existingOpSecret); err == nil {
 		p.Log.V(1).Info("Operator status secret exists but status not persisted, retrying status update",
 			"secret", secretName)
+		patchBase := cluster.DeepCopy()
 		cluster.Status.OperatorStatusSecretName = secretName
 		cluster.Status.OperatorStatusPolicyName = policyName
-		if updateErr := p.Client.Status().Update(ctx, cluster); updateErr != nil {
-			return Error(updateErr, "Failed to persist operator status token fields")
+		if patchErr := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); patchErr != nil {
+			return Error(patchErr, "Failed to persist operator status token fields")
 		}
 		return OK()
 	} else if !k8serrors.IsNotFound(err) {
@@ -363,10 +365,11 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	}
 
 	// Update cluster status with the secret and policy names
+	patchBase := cluster.DeepCopy()
 	cluster.Status.OperatorStatusSecretName = secretName
 	cluster.Status.OperatorStatusPolicyName = policyName
-	if err := p.Client.Status().Update(ctx, cluster); err != nil {
-		return Error(err, "Failed to update cluster status with operator status token info")
+	if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
+		return Error(err, "Failed to patch cluster status with operator status token info")
 	}
 
 	p.Log.Info("Operator status token created successfully", "secret", secretName, "policy", policyName)

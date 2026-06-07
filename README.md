@@ -11,6 +11,26 @@
 
 A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise server clusters on OpenShift and Kubernetes. It manages the full lifecycle through two custom resources: `NomadCluster` for server clusters and `NomadSnapshot` for automated Raft snapshots.
 
+## Contributing
+
+Contributions follow the workflow and standards defined in [`CONTRIBUTING.md`](CONTRIBUTING.md). Work is tracked in [`bd`](https://github.com/gastownhall/beads) (issue prefix: `neo-`); the full backlog is mirrored in [`docs/bd-backlog-2026-06-06.md`](docs/bd-backlog-2026-06-06.md). Per-issue templates: [`.bd/issue-template.md`](.bd/issue-template.md); PR descriptions: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
+
+## Security posture
+
+The v1alpha2 release is deliberately scoped: it prioritises operational stability, runtime security, developer maintainability, and value delivery. Some supply-chain hardening is **deliberately deferred** to a future release:
+
+- **Container images are not signed** (no cosign signatures attached). Verification by signature is not available against the upstream-published images.
+- **No SBOM** is attached to releases. Software composition analysis must be performed against the image itself by the consumer's tooling.
+
+For environments with CISO-gated container-image requirements (signed images, SBOM, provenance attestation), the recommended workaround is:
+
+1. Pull the upstream image (`quay.io/benjamin_holmes/nomad-enterprise-operator:v<version>`).
+2. Scan with your preferred scanner (Trivy, Snyk, Grype, etc.).
+3. Re-tag and push to your internal registry; sign per your organisation's policy (cosign, notation, etc.).
+4. Deploy from the internal-registry tag; override the operator image in the deployment manifest.
+
+The operator's runtime is compatible with any image that exposes the same entrypoint and binary contract, so this fork-and-sign workflow does not require code changes. See the design review's §4.6 and platform-engineer review's §3.8 / §3.3 for the full discussion of this deferral.
+
 ## Prerequisites
 
 - Go v1.25.0+ (development only)
@@ -128,8 +148,8 @@ make undeploy
 |-------|------|---------|-------------|
 | `replicas` | `int` | `3` | Number of Nomad server replicas. Must be 1, 3, or 5 |
 | `image.repository` | `string` | `hashicorp/nomad` | Container image repository |
-| `image.tag` | `string` | `1.11-ent` | Container image tag |
-| `image.pullPolicy` | `string` | `IfNotPresent` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
+| `image.tag` | `string` | `2.0.0-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
+| `image.pullPolicy` | `string` | `Always` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
 | `license.secretName` | `string` | | Name of secret containing the Nomad license. Mutually exclusive with `value` |
 | `license.secretKey` | `string` | `license` | Key within the license secret |
 | `license.value` | `string` | | Inline license content. The operator creates a managed secret. Mutually exclusive with `secretName` |
@@ -230,6 +250,22 @@ See [ACL Configuration](#acl-configuration) for details.
 | `affinity.podAntiAffinity.type` | `string` | `preferred` | Anti-affinity type (`preferred` or `required`) |
 | `affinity.podAntiAffinity.weight` | `int` | `100` | Weight for preferred anti-affinity (1-100) |
 | `affinity.podAntiAffinity.topologyKey` | `string` | `kubernetes.io/hostname` | Topology key |
+
+## Image version pinning
+
+The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.0-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
+
+**Why a pinned default matters.** Nomad is a Raft consensus cluster. A floating tag (one that resolves to "whatever the latest patch happens to be at this instant") combined with the operator's default `imagePullPolicy: Always` means a registry-side retag during a rolling restart can produce version-mismatched peers. Two servers running 2.0.3 and one server running 2.0.4 may interact in ways that produce silent quorum loss or replication anomalies. By pinning the default to a single concrete version per operator release, every server in every Raft cluster runs the same Nomad binary unless the user explicitly opts out.
+
+**How to override.** Set `spec.image.tag` to your desired version (concrete or floating) at the CR level:
+
+```yaml
+spec:
+  image:
+    tag: "2.0.4-ent"   # or any other tag your environment requires
+```
+
+**Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. The release procedure is documented in [`docs/release-process.md`](docs/release-process.md) §1. Upgrade behaviour: existing NomadClusters that do not override `spec.image.tag` receive the new default on next reconcile, which triggers a rolling restart of the StatefulSet.
 
 ## TLS Configuration
 
@@ -451,7 +487,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.0-ent"
   license:
     secretName: nomad-license
   server:

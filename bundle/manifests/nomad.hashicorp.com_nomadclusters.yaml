@@ -103,8 +103,13 @@ spec:
                 description: Image configuration for the Nomad container
                 properties:
                   pullPolicy:
-                    default: IfNotPresent
-                    description: PullPolicy defines when to pull the image
+                    default: Always
+                    description: |-
+                      PullPolicy defines when to pull the image. Defaults to Always as a
+                      safety measure against registry-side image content changes (a tag
+                      being re-pushed) even though the default tag is now pinned to a
+                      concrete patch version. Users on strict-pin workflows running fully
+                      air-gapped or using image digests can override to IfNotPresent.
                     enum:
                     - Always
                     - IfNotPresent
@@ -115,8 +120,15 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 1.11-ent
-                    description: Tag is the container image tag
+                    default: 2.0.0-ent
+                    description: |-
+                      Tag is the container image tag. The default is pinned to a concrete
+                      patch version rather than a floating tag, because Nomad is a Raft
+                      cluster — a registry-side retag during a rolling restart can produce
+                      version-mismatched peers and silent quorum loss. The operator's
+                      release process updates this default in deliberate increments per
+                      Nomad Enterprise release (see docs/release-process.md).
+                    pattern: ^[A-Za-z0-9._-]+$
                     type: string
                 type: object
               imagePullSecrets:
@@ -172,6 +184,81 @@ spec:
                   type: string
                 description: NodeSelector for pod scheduling
                 type: object
+              oidc:
+                description: OIDC configures OIDC authentication via Keycloak.
+                properties:
+                  bindingRules:
+                    description: |-
+                      BindingRules defines how Keycloak groups map to Nomad ACL roles.
+                      If empty, a default rule mapping the "nomad-admins" group to a
+                      management-equivalent role is created.
+                    items:
+                      description: OIDCBindingRule maps a Keycloak group to a Nomad
+                        ACL role.
+                      properties:
+                        keycloakGroup:
+                          description: KeycloakGroup is the Keycloak group path, including
+                            leading slash (e.g. "/nomad-admins").
+                          type: string
+                        nomadRole:
+                          description: NomadRole is the name of the Nomad ACL role
+                            to bind to this group.
+                          type: string
+                        policyRules:
+                          description: PolicyRules is the HCL policy document granted
+                            to this role.
+                          type: string
+                      required:
+                      - keycloakGroup
+                      - nomadRole
+                      - policyRules
+                      type: object
+                    type: array
+                  discoveryCA:
+                    description: |-
+                      DiscoveryCA references a Secret containing the CA certificate used to
+                      verify the Keycloak OIDC discovery endpoint. Required when the Keycloak
+                      hostname is served behind a TLS certificate not in the system trust store
+                      (e.g. OpenShift ingress with a private CA).
+                    properties:
+                      secretKey:
+                        default: tls.crt
+                        description: SecretKey is the key within the Secret that holds
+                          the PEM-encoded CA certificate.
+                        type: string
+                      secretName:
+                        description: SecretName is the name of the Secret containing
+                          the CA certificate.
+                        type: string
+                    required:
+                    - secretName
+                    type: object
+                  enabled:
+                    description: Enabled controls whether OIDC authentication is configured.
+                    type: boolean
+                  keycloakRef:
+                    description: |-
+                      KeycloakRef references the Keycloak CR that the realm import targets.
+                      Must be in the same namespace as the NomadCluster.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  realm:
+                    description: Realm is the name of the Keycloak realm to create.
+                      Defaults to the NomadCluster name.
+                    type: string
+                required:
+                - keycloakRef
+                type: object
               openshift:
                 description: OpenShift-specific configuration
                 properties:
@@ -224,24 +311,27 @@ spec:
                       tls:
                         description: TLS configuration
                         properties:
-                          insecureEdgeTerminationPolicy:
-                            default: Redirect
-                            description: 'InsecureEdgeTerminationPolicy: Redirect,
-                              Allow, or None'
-                            enum:
-                            - Redirect
-                            - Allow
-                            - None
+                          certificateSecretName:
+                            description: |-
+                              CertificateSecretName is the name of a Secret containing a custom
+                              TLS certificate for the external-facing side of the Route.
+                              If omitted, the platform wildcard certificate is used.
                             type: string
-                          termination:
-                            default: edge
-                            description: 'Termination type: edge, passthrough, or
-                              reencrypt'
-                            enum:
-                            - edge
-                            - passthrough
-                            - reencrypt
-                            type: string
+                          secretKeys:
+                            description: SecretKeys allows overriding the key names
+                              within the certificate Secret.
+                            properties:
+                              certificate:
+                                default: tls.crt
+                                description: Certificate is the key name for the TLS
+                                  certificate.
+                                type: string
+                              privateKey:
+                                default: tls.key
+                                description: PrivateKey is the key name for the TLS
+                                  private key.
+                                type: string
+                            type: object
                         type: object
                     type: object
                 type: object
@@ -415,65 +505,37 @@ spec:
                   tls:
                     description: TLS configuration
                     properties:
-                      caCert:
+                      ca:
                         description: |-
-                          CACert is the CA certificate in PEM format.
-                          The operator will create and manage a secret from inline certificates.
-                          Must be provided together with ServerCert and ServerKey.
-                        type: string
-                      enabled:
-                        default: false
-                        description: Enabled determines if TLS is enabled
-                        type: boolean
-                      secretKeys:
-                        description: |-
-                          SecretKeys allows overriding the expected key names within the TLS secret.
-                          Useful when the secret is produced by cert-manager or another provider
-                          that uses different key names (e.g., tls.crt instead of server.crt).
-                          Only used when SecretName is specified.
+                          CA optionally specifies a user-provided Certificate Authority for
+                          certificate issuance. If not specified, the operator generates and
+                          manages a self-signed CA. Providing a CA allows certificates to chain
+                          to your organisation's trusted root.
                         properties:
-                          caCert:
-                            default: ca.crt
-                            description: CACert is the key name for the CA certificate
-                              in the TLS secret.
+                          secretKeys:
+                            description: SecretKeys allows overriding the key names
+                              within the CA secret.
+                            properties:
+                              certificate:
+                                default: tls.crt
+                                description: Certificate is the key name for the CA
+                                  certificate.
+                                type: string
+                              privateKey:
+                                default: tls.key
+                                description: PrivateKey is the key name for the CA
+                                  private key.
+                                type: string
+                            type: object
+                          secretName:
+                            description: |-
+                              SecretName is the name of the Secret containing the CA certificate
+                              and private key. Expected keys: tls.crt (certificate), tls.key (private key).
                             type: string
-                          serverCert:
-                            default: server.crt
-                            description: ServerCert is the key name for the server
-                              certificate in the TLS secret.
-                            type: string
-                          serverKey:
-                            default: server.key
-                            description: ServerKey is the key name for the server
-                              private key in the TLS secret.
-                            type: string
+                        required:
+                        - secretName
                         type: object
-                      secretName:
-                        description: |-
-                          SecretName containing TLS certificates.
-                          Mutually exclusive with inline certificates.
-                        type: string
-                      serverCert:
-                        description: |-
-                          ServerCert is the server certificate in PEM format.
-                          Must be provided together with CACert and ServerKey.
-                        type: string
-                      serverKey:
-                        description: |-
-                          ServerKey is the server private key in PEM format.
-                          Must be provided together with CACert and ServerCert.
-                        type: string
                     type: object
-                    x-kubernetes-validations:
-                    - message: when TLS is enabled, either secretName or all inline
-                        certificates (caCert, serverCert, serverKey) must be specified
-                      rule: '!self.enabled || (has(self.secretName) && size(self.secretName)
-                        > 0) || (has(self.caCert) && size(self.caCert) > 0 && has(self.serverCert)
-                        && size(self.serverCert) > 0 && has(self.serverKey) && size(self.serverKey)
-                        > 0)'
-                    - message: secretName and inline certificates are mutually exclusive
-                      rule: '!((has(self.secretName) && size(self.secretName) > 0)
-                        && (has(self.caCert) && size(self.caCert) > 0))'
                 type: object
               services:
                 description: Services configuration for Nomad endpoints
@@ -801,6 +863,25 @@ spec:
                 - healthy
                 - voters
                 type: object
+              certificateAuthority:
+                description: CertificateAuthority contains information about the CA
+                  in use.
+                properties:
+                  expiryTime:
+                    description: ExpiryTime is when the CA certificate expires.
+                    type: string
+                  source:
+                    description: |-
+                      Source indicates how the CA was provisioned.
+                      Valid values: "operator-generated", "user-provided"
+                    type: string
+                  subject:
+                    description: Subject is the CA certificate's subject distinguished
+                      name.
+                    type: string
+                required:
+                - source
+                type: object
               conditions:
                 description: Conditions represent the latest observations of the cluster
                   state
@@ -869,11 +950,25 @@ spec:
                   gossip key
                 type: string
               lastReconcileTime:
-                description: LastReconcileTime is the timestamp of last reconciliation
+                description: |-
+                  LastReconcileTime is the timestamp of the most recent reconciliation
+                  that produced a status mutation or that crossed the heartbeat
+                  threshold of (defaultRequeueInterval / 2). It is NOT updated on
+                  every reconcile loop — that would produce per-loop status writes
+                  even when nothing observable changed (etcd write amplification and
+                  false GitOps drift). Consumers treating this as "is the operator
+                  alive?" should expect updates roughly every 2m30s at the operator's
+                  5-minute steady-state requeue cadence, plus immediate updates on
+                  any real status transition.
                 format: date-time
                 type: string
-              leaderID:
-                description: LeaderID is the Raft leader node ID (if known)
+              leaderAddress:
+                description: |-
+                  LeaderAddress is the host:port of the current Raft leader as
+                  reported by Nomad (if known). This is NOT the Raft server ID;
+                  it is the leader's RPC address. Consumers that need the actual
+                  Raft server ID should read it from
+                  `status.autopilot.servers[?(@.leader==true)].id`.
                 type: string
               license:
                 description: License contains Nomad Enterprise license information
@@ -903,6 +998,39 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              oidc:
+                description: OIDC contains the observed state of the OIDC integration.
+                properties:
+                  authMethodName:
+                    description: AuthMethodName is the name of the Nomad ACL auth
+                      method created.
+                    type: string
+                  clientSecretName:
+                    description: ClientSecretName is the name of the Secret containing
+                      the OIDC client secret.
+                    type: string
+                  ready:
+                    description: |-
+                      Ready indicates that the realm import is complete and Nomad has been
+                      configured with the auth method, policies, roles, and binding rules.
+                    type: boolean
+                  realmImportName:
+                    description: RealmImportName is the name of the managed KeycloakRealmImport
+                      CR.
+                    type: string
+                type: object
+              operatorStatusPolicyName:
+                description: |-
+                  OperatorStatusPolicyName is the Nomad ACL policy name created for the
+                  operator status token. Stored for cleanup if the cluster is deleted.
+                type: string
+              operatorStatusSecretName:
+                description: |-
+                  OperatorStatusSecretName is the name of the Secret containing the
+                  narrow-scope ACL token used by the operator for day-2 status API calls.
+                  This token has operator:read only. The bootstrap token is not used after
+                  initial ACL bootstrap completes.
+                type: string
               phase:
                 description: Phase represents the current phase of the cluster
                 enum:
