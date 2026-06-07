@@ -494,7 +494,7 @@ func (p *OIDCPhase) upsertAuthMethodWithFallback(cluster *nomadv1alpha1.NomadClu
 	cfg := p.BuildClientConfig(cluster, 30*time.Second, bootstrapToken)
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client: %w", err)
 	}
@@ -514,7 +514,7 @@ func (p *OIDCPhase) upsertAuthMethodWithFallback(cluster *nomadv1alpha1.NomadClu
 	}
 
 	cfg.Address = loadBalancerAddress
-	nomadClient, err = nomad.NewClient(cfg)
+	nomadClient, err = p.NewNomadClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", err)
 	}
@@ -522,11 +522,11 @@ func (p *OIDCPhase) upsertAuthMethodWithFallback(cluster *nomadv1alpha1.NomadClu
 	return nomadClient.UpsertACLAuthMethod(bootstrapToken, "keycloak", "OIDC", "10m", config)
 }
 
-func (p *OIDCPhase) createNomadClientWithFallback(cluster *nomadv1alpha1.NomadCluster, bootstrapToken string) (*nomad.Client, error) {
+func (p *OIDCPhase) createNomadClientWithFallback(cluster *nomadv1alpha1.NomadCluster, bootstrapToken string) (nomad.NomadAPI, error) {
 	cfg := p.BuildClientConfig(cluster, 30*time.Second, bootstrapToken)
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Nomad client: %w", err)
 	}
@@ -547,5 +547,5 @@ func (p *OIDCPhase) createNomadClientWithFallback(cluster *nomadv1alpha1.NomadCl
 	}
 
 	cfg.Address = loadBalancerAddress
-	return nomad.NewClient(cfg)
+	return p.NewNomadClient(cfg)
 }

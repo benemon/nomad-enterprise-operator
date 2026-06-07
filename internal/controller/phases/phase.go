@@ -83,6 +83,11 @@ type PhaseContext struct {
 	Log        logr.Logger
 	RESTConfig *rest.Config
 
+	// NomadClientFactory builds Nomad API clients used by phases that call the
+	// Nomad API. Defaults to nomad.NewClient when nil. Tests inject a factory
+	// that returns a mock NomadAPI to avoid real HTTP calls.
+	NomadClientFactory func(cfg nomad.ClientConfig) (nomad.NomadAPI, error)
+
 	// AdvertiseAddress is the cached advertise address resolved during reconciliation.
 	AdvertiseAddress string
 	// GossipKey is the cached gossip key resolved during reconciliation.
@@ -149,6 +154,16 @@ func (pc *PhaseContext) BuildClientConfig(cluster *nomadv1alpha1.NomadCluster, t
 		Timeout:    timeout,
 		CACert:     pc.CACert,
 	}
+}
+
+// NewNomadClient constructs a Nomad API client using PhaseContext.NomadClientFactory
+// if set, falling back to nomad.NewClient. The return type is the NomadAPI
+// interface so phases depend on the interface rather than the concrete *Client.
+func (pc *PhaseContext) NewNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, error) {
+	if pc.NomadClientFactory != nil {
+		return pc.NomadClientFactory(cfg)
+	}
+	return nomad.NewClient(cfg)
 }
 
 // CheckPodsReady returns true if at least one pod matching the cluster's selector labels is ready.

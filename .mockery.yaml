@@ -1,0 +1,11 @@
+with-expecter: true
+dir: "pkg/nomad/mocks"
+outpkg: "mocks"
+filename: "{{ .InterfaceName }}.go"
+resolve-type-alias: false
+disable-version-string: true
+issue-845-fix: true
+packages:
+  github.com/hashicorp/nomad-enterprise-operator/pkg/nomad:
+    interfaces:
+      NomadAPI:

@@ -145,7 +145,7 @@ func (p *ACLBootstrapPhase) executeBootstrap(cluster *nomadv1alpha1.NomadCluster
 
 	p.Log.Info("Attempting ACL bootstrap via internal service", "address", internalAddress)
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Nomad client: %w", err)
 	}
@@ -177,7 +177,7 @@ func (p *ACLBootstrapPhase) executeBootstrap(cluster *nomadv1alpha1.NomadCluster
 
 	p.Log.Info("Attempting ACL bootstrap via LoadBalancer", "address", loadBalancerAddress)
 
-	nomadClient, err = nomad.NewClient(cfg)
+	nomadClient, err = p.NewNomadClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", err)
 	}
@@ -239,7 +239,7 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(cluster *nomadv1alpha1.NomadCl
 	// Try internal service first, fall back to LoadBalancer
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client: %w", err)
 	}
@@ -253,7 +253,7 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(cluster *nomadv1alpha1.NomadCl
 	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 	if err != nil && loadBalancerAddress != "" {
 		cfg.Address = loadBalancerAddress
-		nomadClient, err = nomad.NewClient(cfg)
+		nomadClient, err = p.NewNomadClient(cfg)
 		if err != nil {
 			return fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", err)
 		}
@@ -290,7 +290,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	// Try internal service first, fall back to LoadBalancer
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return Error(err, "Failed to create Nomad client for operator status token")
 	}
@@ -301,7 +301,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 		loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 		if loadBalancerAddress != "" {
 			cfg.Address = loadBalancerAddress
-			nomadClient, err = nomad.NewClient(cfg)
+			nomadClient, err = p.NewNomadClient(cfg)
 			if err != nil {
 				return Error(err, "Failed to create Nomad client for LoadBalancer")
 			}

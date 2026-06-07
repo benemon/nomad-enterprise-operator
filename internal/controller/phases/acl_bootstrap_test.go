@@ -18,14 +18,11 @@ package phases
 
 import (
 	"context"
-	"encoding/json"
-	"encoding/pem"
-	"net"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,41 +33,14 @@ import (
 
 const testOperatorStatusName = "test-cluster-operator-status"
 
+// TestACLBootstrapPhase_CreatesOperatorStatusToken is the F1 demonstration of
+// the NomadAPI mock pattern. The behaviour is unchanged from the previous
+// HTTPS-server-on-:4646 version: it asserts the same outcomes (no error / no
+// requeue, Secret created with the expected accessor and secret IDs, status
+// fields populated, owner reference set) but injects a mocks.MockNomadAPI via
+// PhaseContext.NomadClientFactory rather than standing up a real Nomad
+// endpoint.
 func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
-	// Start a test HTTP server on port 4646 to stub Nomad API calls.
-	// LoadBalancerAddress hardcodes :4646, so the server must listen there.
-	listener, err := net.Listen("tcp", "127.0.0.1:4646")
-	if err != nil {
-		t.Skipf("Skipping: port 4646 not available: %v", err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/acl/policy/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{}"))
-	})
-	mux.HandleFunc("/v1/acl/token", func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]interface{}{
-			"AccessorID": "test-accessor-id",
-			"SecretID":   "test-secret-id",
-			"Name":       testOperatorStatusName,
-			"Type":       "client",
-			"CreateTime": "2025-01-01T00:00:00Z",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	})
-
-	ts := httptest.NewUnstartedServer(mux)
-	_ = ts.Listener.Close()
-	ts.Listener = listener
-	ts.StartTLS()
-	defer ts.Close()
-
-	// Extract the test server's CA cert so the Nomad client trusts it
-	serverCACert := ts.TLS.Certificates[0].Certificate[0]
-	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCACert})
-
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.ACL.Enabled = true
 	// Both must be empty so neither idempotency guard fires
@@ -83,12 +53,37 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 		WithStatusSubresource(cluster).
 		Build()
 
+	mockNomad := mocks.NewMockNomadAPI(t)
+	mockNomad.EXPECT().
+		CreateACLPolicy(
+			"test-bootstrap-token",
+			testOperatorStatusName,
+			"Operator day-2 status API access (operator:read)",
+			nomad.OperatorStatusPolicyRules,
+		).
+		Return(nil).
+		Once()
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies(
+			"test-bootstrap-token",
+			testOperatorStatusName,
+			[]string{testOperatorStatusName},
+		).
+		Return(&nomad.ACLTokenResult{
+			AccessorID: "test-accessor-id",
+			SecretID:   "test-secret-id",
+			Name:       testOperatorStatusName,
+			Type:       "client",
+		}, nil).
+		Once()
+
 	phaseCtx := &PhaseContext{
-		Client:           fakeClient,
-		Scheme:           scheme.Scheme,
-		Log:              zap.New(zap.UseDevMode(true)),
-		AdvertiseAddress: "127.0.0.1",
-		CACert:           caCertPEM,
+		Client: fakeClient,
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+		NomadClientFactory: func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+			return mockNomad, nil
+		},
 	}
 
 	phase := NewACLBootstrapPhase(phaseCtx)

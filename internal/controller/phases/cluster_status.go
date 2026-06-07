@@ -137,7 +137,7 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 	return OK()
 }
 
-func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*nomad.Client, string, error) {
+func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (nomad.NomadAPI, string, error) {
 	// If ACL is enabled and bootstrapped, use the token
 	var aclToken string
 	if cluster.Spec.Server.ACL.Enabled {
@@ -153,7 +153,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 	cfg.Address = internalAddress
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return nil, "", err
 	}
@@ -170,7 +170,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 		cfg.Address = loadBalancerAddress
 		p.Log.V(1).Info("Internal service not reachable, using LoadBalancer for status",
 			"loadBalancerAddress", loadBalancerAddress)
-		client, err := nomad.NewClient(cfg)
+		client, err := p.NewNomadClient(cfg)
 		return client, aclToken, err
 	}
 
