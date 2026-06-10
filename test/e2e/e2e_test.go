@@ -79,7 +79,10 @@ spec:
 // testClusterCR is the NomadCluster CR applied during reconciliation tests.
 // Uses replicas=1 to minimise Kind resource usage, loadBalancerIP to bypass
 // AdvertisePhase LB wait, and disables TLS to reduce dependencies.
-// Audit is enabled to exercise that feature path.
+// Audit is enabled to exercise that feature path; the audit shape
+// (format=json, rotateDuration=24h, rotateMaxFiles=15) is operator-owned
+// per ADR 0003 and no longer settable from spec — the test asserts on
+// the operator-applied defaults instead.
 const testClusterCR = `apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
 metadata:
@@ -101,9 +104,6 @@ spec:
       enabled: true
     audit:
       enabled: true
-      format: json
-      rotateDuration: "24h"
-      rotateMaxFiles: 10
 `
 
 var _ = Describe("Manager", Ordered, func() {
@@ -290,8 +290,15 @@ var _ = Describe("Manager", Ordered, func() {
 				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("controller-runtime.metrics\tServing metrics server"),
-					"Metrics server not yet started")
+				// A5 flipped zap.Development=false, so the manager emits
+				// JSON-format logs. The tab-separated text-format string the
+				// kubebuilder scaffold originally generated no longer
+				// appears. Match both formats so the assertion survives
+				// development-vs-production logger toggles.
+				g.Expect(output).To(SatisfyAny(
+					ContainSubstring(`"logger":"controller-runtime.metrics"`),
+					ContainSubstring("controller-runtime.metrics\tServing metrics server"),
+				), "Metrics server not yet started")
 			}
 			Eventually(verifyMetricsServerStarted).Should(Succeed())
 
@@ -536,12 +543,14 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(ContainSubstring("encrypt ="), "missing gossip encrypt key")
 			Expect(output).To(ContainSubstring("acl {"), "missing acl block")
 
-			By("verifying audit configuration in HCL")
+			By("verifying audit configuration in HCL (ADR 0003 operator-owned shape)")
 			Expect(output).To(ContainSubstring("audit {"), "missing audit block")
 			Expect(output).To(ContainSubstring(`sink "file"`), "missing audit sink")
-			Expect(output).To(ContainSubstring(`"json"`), "missing audit format")
-			Expect(output).To(ContainSubstring(`"24h"`), "missing audit rotate_duration")
-			Expect(output).To(ContainSubstring("10"), "missing audit rotate_max_files")
+			Expect(output).To(ContainSubstring(`"json"`), "missing operator-owned audit format=json")
+			Expect(output).To(ContainSubstring(`"24h"`), "missing operator-owned audit rotate_duration=24h")
+			Expect(output).To(ContainSubstring("rotate_max_files   = 15"),
+				"missing operator-owned audit rotate_max_files=15 (previously settable to 10 in fixture)")
+			Expect(output).To(ContainSubstring("enforced"), "missing operator-owned audit delivery_guarantee=enforced")
 
 			By("verifying autopilot configuration in HCL")
 			Expect(output).To(ContainSubstring("autopilot {"), "missing autopilot block")
@@ -783,12 +792,16 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("1"), "should have 1 voter")
 
-			By("verifying leader ID is populated")
+			By("verifying leader address is populated")
+			// A6 (neo-tuo): the field was renamed from leaderID to
+			// leaderAddress because it actually stores the leader's
+			// host:port (RPC address), not the Raft server ID. For the
+			// server ID, see status.autopilot.servers[].id.
 			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
-				"-o", "jsonpath={.status.leaderID}")
+				"-o", "jsonpath={.status.leaderAddress}")
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).NotTo(BeEmpty(), "leaderID should be populated")
+			Expect(output).NotTo(BeEmpty(), "leaderAddress should be populated")
 
 			By("verifying currentReplicas is set")
 			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
