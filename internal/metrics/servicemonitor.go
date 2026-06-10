@@ -73,12 +73,21 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 				Port:            "https",
 				Scheme:          &httpsScheme,
 				BearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token",
-				TLSConfig: &monitoringv1.TLSConfig{
-					SafeTLSConfig: monitoringv1.SafeTLSConfig{
-						// The metrics endpoint serves a controller-runtime
-						// self-signed cert; scrape verification is skipped,
-						// matching config/prometheus/monitor.yaml.
-						InsecureSkipVerify: ptrBool(true),
+				// prometheus-operator/apis v0.88+ moved Endpoint.TLSConfig
+				// inside the embedded HTTPConfigWithProxyAndTLSFiles ->
+				// HTTPConfigWithTLSFiles struct. Reach it via the embed
+				// path in struct-literal form.
+				HTTPConfigWithProxyAndTLSFiles: monitoringv1.HTTPConfigWithProxyAndTLSFiles{
+					HTTPConfigWithTLSFiles: monitoringv1.HTTPConfigWithTLSFiles{
+						TLSConfig: &monitoringv1.TLSConfig{
+							SafeTLSConfig: monitoringv1.SafeTLSConfig{
+								// The metrics endpoint serves a
+								// controller-runtime self-signed cert;
+								// scrape verification is skipped, matching
+								// config/prometheus/monitor.yaml.
+								InsecureSkipVerify: ptrBool(true),
+							},
+						},
 					},
 				},
 			}},

@@ -20,10 +20,9 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -33,8 +32,10 @@ var nomadclusterlog = logf.Log.WithName("nomadcluster-webhook")
 // SetupWebhookWithManager registers the NomadCluster validating webhook with
 // the controller-runtime manager.
 func (r *NomadCluster) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(r).
+	// controller-runtime v0.24 replaced the NewWebhookManagedBy(mgr).For(r)
+	// pair with a single generic builder.WebhookManagedBy[T](mgr, r)
+	// constructor.
+	return builder.WebhookManagedBy(mgr, r).
 		WithDefaulter(&NomadClusterCustomDefaulter{}).
 		WithValidator(&NomadClusterCustomValidator{}).
 		Complete()
@@ -46,16 +47,16 @@ func (r *NomadCluster) SetupWebhookWithManager(mgr ctrl.Manager) error {
 // The Default method is intentionally a no-op skeleton: the CRD's
 // kubebuilder:default markers cover all current defaulting needs. The
 // scaffolding is in place for future C6 work.
+//
+// controller-runtime v0.24 made the Defaulter/Validator interfaces
+// generic over the concrete type — the framework now handles the
+// runtime.Object → *NomadCluster type assertion before invoking us.
 type NomadClusterCustomDefaulter struct{}
 
-var _ webhook.CustomDefaulter = &NomadClusterCustomDefaulter{}
+var _ admission.Defaulter[*NomadCluster] = &NomadClusterCustomDefaulter{}
 
-// Default implements webhook.CustomDefaulter.
-func (d *NomadClusterCustomDefaulter) Default(_ context.Context, obj runtime.Object) error {
-	cluster, ok := obj.(*NomadCluster)
-	if !ok {
-		return fmt.Errorf("expected a NomadCluster object but got %T", obj)
-	}
+// Default implements admission.Defaulter[*NomadCluster].
+func (d *NomadClusterCustomDefaulter) Default(_ context.Context, cluster *NomadCluster) error {
 	nomadclusterlog.V(1).Info("defaulting NomadCluster", "name", cluster.GetName())
 	return nil
 }
@@ -69,30 +70,22 @@ func (d *NomadClusterCustomDefaulter) Default(_ context.Context, obj runtime.Obj
 // helpers and call them from ValidateCreate/ValidateUpdate.
 type NomadClusterCustomValidator struct{}
 
-var _ webhook.CustomValidator = &NomadClusterCustomValidator{}
+var _ admission.Validator[*NomadCluster] = &NomadClusterCustomValidator{}
 
-// ValidateCreate implements webhook.CustomValidator.
-func (v *NomadClusterCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	cluster, ok := obj.(*NomadCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected a NomadCluster object but got %T", obj)
-	}
+// ValidateCreate implements admission.Validator[*NomadCluster].
+func (v *NomadClusterCustomValidator) ValidateCreate(_ context.Context, cluster *NomadCluster) (admission.Warnings, error) {
 	nomadclusterlog.V(1).Info("validating NomadCluster create", "name", cluster.GetName())
 	return nil, validateReplicas(cluster)
 }
 
-// ValidateUpdate implements webhook.CustomValidator.
-func (v *NomadClusterCustomValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
-	cluster, ok := newObj.(*NomadCluster)
-	if !ok {
-		return nil, fmt.Errorf("expected a NomadCluster object but got %T", newObj)
-	}
+// ValidateUpdate implements admission.Validator[*NomadCluster].
+func (v *NomadClusterCustomValidator) ValidateUpdate(_ context.Context, _, cluster *NomadCluster) (admission.Warnings, error) {
 	nomadclusterlog.V(1).Info("validating NomadCluster update", "name", cluster.GetName())
 	return nil, validateReplicas(cluster)
 }
 
-// ValidateDelete implements webhook.CustomValidator.
-func (v *NomadClusterCustomValidator) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator[*NomadCluster].
+func (v *NomadClusterCustomValidator) ValidateDelete(_ context.Context, _ *NomadCluster) (admission.Warnings, error) {
 	return nil, nil
 }
 
