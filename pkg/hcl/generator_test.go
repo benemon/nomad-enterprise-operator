@@ -194,6 +194,10 @@ func TestGenerator_Generate_TLSEnabled(t *testing.T) {
 	}
 }
 
+// TestGenerator_Generate_AuditEnabled pins the operator-owned audit shape
+// from ADR 0003 ("Fields dropped in v1"): enforced delivery, json format,
+// 24h rotation × 15 files. These are hardcoded — no spec field can change
+// them (B3 / TestHCLDefaultsBaked equivalent).
 func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 	cluster := &nomadv1alpha1.NomadCluster{
 		ObjectMeta: metav1.ObjectMeta{
@@ -204,10 +208,7 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 			Replicas: 3,
 			Server: nomadv1alpha1.ServerSpec{
 				Audit: nomadv1alpha1.AuditSpec{
-					Enabled:        true,
-					Format:         "json",
-					RotateDuration: "12h",
-					RotateMaxFiles: 10,
+					Enabled: true,
 				},
 			},
 		},
@@ -219,7 +220,7 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 		t.Fatalf("Generate() error = %v", err)
 	}
 
-	// Verify audit block is present
+	// Verify audit block carries the ADR 0003 hardcoded values
 	assertions := []struct {
 		name     string
 		contains string
@@ -230,53 +231,13 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 		{"sink block", `sink "file" {`},
 		{"format", `format             = "json"`},
 		{"path", `path               = "/nomad/audit/audit.log"`},
-		{"rotate_duration", `rotate_duration    = "12h"`},
-		{"rotate_max_files", "rotate_max_files   = 10"},
+		{"rotate_duration", `rotate_duration    = "24h"`},
+		{"rotate_max_files", "rotate_max_files   = 15"},
 	}
 
 	for _, a := range assertions {
 		if !strings.Contains(hcl, a.contains) {
 			t.Errorf("Generate() missing audit %s: expected to contain %q", a.name, a.contains)
-		}
-	}
-}
-
-func TestGenerator_Generate_AuditDefaults(t *testing.T) {
-	cluster := &nomadv1alpha1.NomadCluster{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-cluster",
-			Namespace: "nomad",
-		},
-		Spec: nomadv1alpha1.NomadClusterSpec{
-			Replicas: 3,
-			Server: nomadv1alpha1.ServerSpec{
-				Audit: nomadv1alpha1.AuditSpec{
-					Enabled: true,
-					// Leave format, rotation empty to test defaults
-				},
-			},
-		},
-	}
-
-	gen := NewGenerator(cluster, "10.0.0.100", "key")
-	hcl, err := gen.Generate()
-	if err != nil {
-		t.Fatalf("Generate() error = %v", err)
-	}
-
-	// Verify default audit values
-	assertions := []struct {
-		name     string
-		contains string
-	}{
-		{"default format", `format             = "json"`},
-		{"default rotate_duration", `rotate_duration    = "24h"`},
-		{"default rotate_max_files", "rotate_max_files   = 15"},
-	}
-
-	for _, a := range assertions {
-		if !strings.Contains(hcl, a.contains) {
-			t.Errorf("Generate() missing default audit %s: expected to contain %q", a.name, a.contains)
 		}
 	}
 }
@@ -299,12 +260,6 @@ func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 				},
 				Audit: nomadv1alpha1.AuditSpec{
 					Enabled: true,
-				},
-				Autopilot: nomadv1alpha1.AutopilotSpec{
-					CleanupDeadServers:      true,
-					LastContactThreshold:    "500ms",
-					MaxTrailingLogs:         500,
-					ServerStabilizationTime: "30s",
 				},
 			},
 		},
@@ -338,12 +293,13 @@ func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 		}
 	}
 
-	// Verify custom autopilot settings
-	if !strings.Contains(hcl, `last_contact_threshold    = "500ms"`) {
-		t.Error("Generate() should contain custom last_contact_threshold")
+	// Verify the operator-owned autopilot settings (ADR 0003 — not
+	// user-configurable; these are Nomad's defaults baked in).
+	if !strings.Contains(hcl, `last_contact_threshold    = "200ms"`) {
+		t.Error("Generate() should contain the ADR 0003 last_contact_threshold")
 	}
-	if !strings.Contains(hcl, "max_trailing_logs         = 500") {
-		t.Error("Generate() should contain custom max_trailing_logs")
+	if !strings.Contains(hcl, "max_trailing_logs         = 250") {
+		t.Error("Generate() should contain the ADR 0003 max_trailing_logs")
 	}
 }
 

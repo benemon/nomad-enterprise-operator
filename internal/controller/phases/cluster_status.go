@@ -199,10 +199,7 @@ func (p *ClusterStatusPhase) getOperatorStatusToken(ctx context.Context, cluster
 	}
 
 	// Fallback: bootstrap token (used only until operator status token is created)
-	secretName := cluster.Name + "-acl-bootstrap"
-	if cluster.Spec.Server.ACL.BootstrapSecretName != "" {
-		secretName = cluster.Spec.Server.ACL.BootstrapSecretName
-	}
+	secretName := BootstrapSecretName(cluster.Name)
 
 	secret := &corev1.Secret{}
 	if err := p.Client.Get(ctx, types.NamespacedName{

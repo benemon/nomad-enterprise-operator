@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -44,6 +45,7 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller"
+	operatormetrics "github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	webhookbootstrap "github.com/hashicorp/nomad-enterprise-operator/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -271,6 +273,18 @@ func main() {
 	managedBootstrap := webhookbootstrap.NewBootstrap(mgr.GetClient(), webhookCfg)
 	if err := mgr.Add(managedBootstrap); err != nil {
 		setupLog.Error(err, "unable to register webhook bootstrap with manager")
+		os.Exit(1)
+	}
+
+	// Ensure the operator's own metrics ServiceMonitor once the cache is
+	// ready (AC-F4.4). No-op on clusters without Prometheus Operator CRDs.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if err := operatormetrics.EnsureOperatorServiceMonitor(ctx, mgr.GetClient(), webhookCfg.Namespace); err != nil {
+			setupLog.Error(err, "unable to ensure operator ServiceMonitor; continuing without it")
+		}
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to register operator ServiceMonitor runnable")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -15,30 +15,19 @@ metadata:
             "name": "nomad-enterprise"
           },
           "spec": {
-            "affinity": {
-              "podAntiAffinity": {
-                "enabled": true,
-                "topologyKey": "kubernetes.io/hostname",
-                "type": "preferred",
-                "weight": 100
-              }
-            },
             "image": {
               "repository": "hashicorp/nomad",
               "tag": "2.0.0-ent"
             },
             "license": {
-              "secretKey": "license",
               "secretName": "nomad-license"
+            },
+            "monitoring": {
+              "enabled": true,
+              "prometheusRulesEnabled": true
             },
             "openshift": {
               "enabled": true,
-              "monitoring": {
-                "enabled": true,
-                "prometheusRulesEnabled": true,
-                "scrapeInterval": "30s",
-                "scrapeTimeout": "10s"
-              },
               "route": {
                 "enabled": true
               }
@@ -62,16 +51,7 @@ metadata:
                 "enabled": true
               },
               "audit": {
-                "enabled": true,
-                "format": "json",
-                "rotateDuration": "24h",
-                "rotateMaxFiles": 15
-              },
-              "autopilot": {
-                "cleanupDeadServers": true,
-                "lastContactThreshold": "200ms",
-                "maxTrailingLogs": 250,
-                "serverStabilizationTime": "10s"
+                "enabled": true
               }
             },
             "services": {
@@ -125,7 +105,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-06-07T21:14:26Z"
+    createdAt: "2026-06-10T18:39:05Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
@@ -206,19 +186,6 @@ spec:
           resources:
           - deployments
           - statefulsets
-          verbs:
-          - create
-          - delete
-          - get
-          - list
-          - patch
-          - update
-          - watch
-        - apiGroups:
-          - k8s.keycloak.org
-          resources:
-          - keycloakrealmimports
-          - keycloaks
           verbs:
           - create
           - delete

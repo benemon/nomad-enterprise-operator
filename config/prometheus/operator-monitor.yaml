@@ -1,0 +1,26 @@
+# ServiceMonitor for the operator's own :8443/metrics endpoint (F4 /
+# AC-F4.4). The operator also creates this resource at runtime when the
+# Prometheus Operator CRDs are installed (internal/metrics.
+# EnsureOperatorServiceMonitor) — this manifest is the declarative
+# equivalent for GitOps flows. The two are idempotent: the runtime path
+# skips creation when a ServiceMonitor of this name already exists.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: nomad-enterprise-operator
+  name: nomad-enterprise-operator-metrics-monitor
+  namespace: system
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: nomad-enterprise-operator

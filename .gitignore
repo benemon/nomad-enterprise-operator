@@ -2,7 +2,12 @@
 .beads
 .bd
 .claude
-docs/
+# docs/* (not docs/) so the negation below can re-include repo content;
+# a directory-level exclude would make git skip the dir without
+# considering negations inside it.
+docs/*
+# User-facing migration guide referenced from README — repo content, not scratch
+!docs/migration-oidc-to-terraform.md
 CONTRIBUTING.md
 CHANGELOG.md
 .github/PULL_REQUEST_TEMPLATE.md

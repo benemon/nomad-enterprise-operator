@@ -40,14 +40,6 @@ type NomadAPI interface {
 	CheckHealth() (*HealthResult, error)
 	GetLicense(ctx context.Context, token string) (*LicenseResult, error)
 	GetAutopilotHealth(ctx context.Context, token string) (*AutopilotHealthResult, error)
-
-	// OIDC / ACL auth method, role, and binding rule management
-	UpsertACLAuthMethod(authToken, name, methodType, maxTokenTTL string, config ACLAuthMethodConfig) error
-	UpsertACLRole(authToken, name string, policyNames []string) (string, error)
-	UpsertACLBindingRule(authToken string, rule ACLBindingRuleStub) (string, error)
-	ListACLBindingRules(authToken, authMethodName string) ([]ACLBindingRuleStub, error)
-	DeleteACLAuthMethod(authToken, name string) error
-	DeleteACLBindingRule(authToken, id string) error
 }
 
 // Compile-time assertion that *Client satisfies NomadAPI.

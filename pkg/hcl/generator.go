@@ -117,69 +117,39 @@ func (g *Generator) buildTemplateData() templateData {
 		replicas = 3
 	}
 
-	// Autopilot defaults
-	lastContactThreshold := cluster.Spec.Server.Autopilot.LastContactThreshold
-	if lastContactThreshold == "" {
-		lastContactThreshold = "200ms"
-	}
-
-	maxTrailingLogs := cluster.Spec.Server.Autopilot.MaxTrailingLogs
-	if maxTrailingLogs == 0 {
-		maxTrailingLogs = 250
-	}
-
-	serverStabilizationTime := cluster.Spec.Server.Autopilot.ServerStabilizationTime
-	if serverStabilizationTime == "" {
-		serverStabilizationTime = "10s"
-	}
-
-	// Audit defaults
-	auditDeliveryGuarantee := cluster.Spec.Server.Audit.DeliveryGuarantee
-	if auditDeliveryGuarantee == "" {
-		auditDeliveryGuarantee = "enforced"
-	}
-
-	auditFormat := cluster.Spec.Server.Audit.Format
-	if auditFormat == "" {
-		auditFormat = "json"
-	}
-
-	auditRotateDur := cluster.Spec.Server.Audit.RotateDuration
-	if auditRotateDur == "" {
-		auditRotateDur = "24h"
-	}
-
-	auditRotateMax := cluster.Spec.Server.Audit.RotateMaxFiles
-	if auditRotateMax == 0 {
-		auditRotateMax = 15
-	}
-
 	return templateData{
-		Region:                 region,
-		Datacenter:             datacenter,
-		AdvertiseAddress:       g.advertiseAddress,
-		Replicas:               replicas,
-		ClusterName:            cluster.Name,
-		Namespace:              cluster.Namespace,
-		HeadlessService:        cluster.Name + "-headless",
-		GossipKey:              g.gossipKey,
-		ACLEnabled:             cluster.Spec.Server.ACL.Enabled,
-		TLSEnabled:             true,
-		TLSCAFile:              "/nomad/tls/ca.crt",
-		TLSCertFile:            "/nomad/tls/tls.crt",
-		TLSKeyFile:             "/nomad/tls/tls.key",
-		VerifyServerHostname:   true,
-		VerifyHTTPSClient:      false,
-		AuditEnabled:           cluster.Spec.Server.Audit.Enabled,
-		AuditDeliveryGuarantee: auditDeliveryGuarantee,
-		AuditFormat:            auditFormat,
-		AuditRotateDur:         auditRotateDur,
-		AuditRotateMax:         auditRotateMax,
+		Region:               region,
+		Datacenter:           datacenter,
+		AdvertiseAddress:     g.advertiseAddress,
+		Replicas:             replicas,
+		ClusterName:          cluster.Name,
+		Namespace:            cluster.Namespace,
+		HeadlessService:      cluster.Name + "-headless",
+		GossipKey:            g.gossipKey,
+		ACLEnabled:           cluster.Spec.Server.ACL.Enabled,
+		TLSEnabled:           true,
+		TLSCAFile:            "/nomad/tls/ca.crt",
+		TLSCertFile:          "/nomad/tls/tls.crt",
+		TLSKeyFile:           "/nomad/tls/tls.key",
+		VerifyServerHostname: true,
+		VerifyHTTPSClient:    false,
+		AuditEnabled:         cluster.Spec.Server.Audit.Enabled,
+		// Audit shape is operator-owned per ADR 0003 ("Fields dropped
+		// in v1"): enforced delivery (best-effort is a footgun), JSON
+		// only, 24h rotation × 15 files (~15 days). Users needing
+		// different log shipping use a sidecar, not rotation tuning.
+		AuditDeliveryGuarantee: "enforced",
+		AuditFormat:            "json",
+		AuditRotateDur:         "24h",
+		AuditRotateMax:         15,
+		// Autopilot is operator-owned per ADR 0003: cleanup_dead_servers
+		// must stay true for Serf cleanup delegation (AC-2.3.4e); the
+		// thresholds are Nomad's own defaults.
 		Autopilot: autopilotData{
-			CleanupDeadServers:      cluster.Spec.Server.Autopilot.CleanupDeadServers,
-			LastContactThreshold:    lastContactThreshold,
-			MaxTrailingLogs:         maxTrailingLogs,
-			ServerStabilizationTime: serverStabilizationTime,
+			CleanupDeadServers:      true,
+			LastContactThreshold:    "200ms",
+			MaxTrailingLogs:         250,
+			ServerStabilizationTime: "10s",
 		},
 	}
 }

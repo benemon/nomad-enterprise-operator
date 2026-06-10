@@ -20,14 +20,24 @@ import (
 	"context"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// serviceMonitorGVK is the GVK whose presence indicates the Prometheus
+// Operator CRDs are installed.
+var serviceMonitorGVK = schema.GroupVersionKind{
+	Group:   "monitoring.coreos.com",
+	Version: "v1",
+	Kind:    "ServiceMonitor",
+}
 
 // MonitoringPhase creates ServiceMonitor and PrometheusRule for Prometheus monitoring.
 type MonitoringPhase struct {
@@ -46,9 +56,17 @@ func (p *MonitoringPhase) Name() string {
 
 // Execute creates or updates Prometheus monitoring resources.
 func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	// Skip if OpenShift or monitoring is disabled
-	if !cluster.Spec.OpenShift.Enabled || !cluster.Spec.OpenShift.Monitoring.Enabled {
-		p.Log.V(1).Info("OpenShift monitoring disabled, skipping")
+	if !cluster.Spec.Monitoring.Enabled {
+		p.Log.V(1).Info("Monitoring disabled, skipping")
+		return OK()
+	}
+
+	// Gate on Prometheus Operator CRD availability, not openshift.enabled
+	// (AC-2.2.4): vanilla clusters running Prometheus Operator get
+	// monitoring; clusters without the CRDs skip cleanly instead of
+	// producing apiserver 404s.
+	if !discovery.HasGVK(p.Client.RESTMapper(), serviceMonitorGVK) {
+		p.Log.V(1).Info("Prometheus Operator CRDs not installed, skipping monitoring resources")
 		return OK()
 	}
 
@@ -58,7 +76,7 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 	}
 
 	// Create PrometheusRule if enabled
-	if cluster.Spec.OpenShift.Monitoring.PrometheusRulesEnabled {
+	if cluster.Spec.Monitoring.PrometheusRulesEnabled {
 		if result := p.ensurePrometheusRule(ctx, cluster); result.Error != nil || result.Requeue {
 			return result
 		}
@@ -68,28 +86,11 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 }
 
 func (p *MonitoringPhase) ensureServiceMonitor(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	monitoring := cluster.Spec.OpenShift.Monitoring
-
-	interval := monitoring.ScrapeInterval
-	if interval == "" {
-		interval = "30s"
-	}
-
-	scrapeTimeout := monitoring.ScrapeTimeout
-	if scrapeTimeout == "" {
-		scrapeTimeout = "10s"
-	}
-
-	labels := GetLabels(cluster)
-	for k, v := range monitoring.AdditionalLabels {
-		labels[k] = v
-	}
-
 	sm := &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
 			Namespace: cluster.Namespace,
-			Labels:    labels,
+			Labels:    GetLabels(cluster),
 		},
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Selector: metav1.LabelSelector{
@@ -100,10 +101,12 @@ func (p *MonitoringPhase) ensureServiceMonitor(ctx context.Context, cluster *nom
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
-					Port:          "http",
-					Path:          "/v1/metrics",
-					Interval:      monitoringv1.Duration(interval),
-					ScrapeTimeout: monitoringv1.Duration(scrapeTimeout),
+					Port: "http",
+					Path: "/v1/metrics",
+					// Scrape cadence is operator-owned per ADR 0003;
+					// advanced tuning belongs in Prometheus config.
+					Interval:      monitoringv1.Duration("30s"),
+					ScrapeTimeout: monitoringv1.Duration("10s"),
 					Params: map[string][]string{
 						"format": {"prometheus"},
 					},

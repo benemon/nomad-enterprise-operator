@@ -573,3 +573,213 @@ func TestAnonymousPolicyRules(t *testing.T) {
 		}
 	}
 }
+
+// newACLTestServer fakes the Nomad API routes the ACL and status client
+// methods hit, so each method's request formation and response mapping is
+// exercised through the real SDK plumbing.
+func newACLTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+
+	tokenJSON := map[string]interface{}{
+		"AccessorID": "accessor-1",
+		"SecretID":   "secret-1",
+		"Name":       "test-token",
+		"Type":       "client",
+		"CreateTime": "2025-01-01T00:00:00Z",
+	}
+
+	mux.HandleFunc("/v1/acl/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		mgmt := map[string]interface{}{
+			"AccessorID": "boot-accessor",
+			"SecretID":   "boot-secret",
+			"Name":       "Bootstrap Token",
+			"Type":       "management",
+			"CreateTime": "2025-01-01T00:00:00Z",
+		}
+		_ = json.NewEncoder(w).Encode(mgmt)
+	})
+	mux.HandleFunc("/v1/acl/policy/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/v1/acl/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(tokenJSON)
+	})
+	mux.HandleFunc("/v1/acl/token/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/missing") {
+			http.Error(w, "ACL token not found", http.StatusNotFound)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(tokenJSON)
+	})
+	mux.HandleFunc("/v1/status/leader", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode("10.0.0.1:4647")
+	})
+	mux.HandleFunc("/v1/status/peers", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]string{"10.0.0.1:4647", "10.0.0.2:4647"})
+	})
+	mux.HandleFunc("/v1/agent/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"server": map[string]interface{}{"ok": true, "message": "ok"},
+		})
+	})
+
+	return httptest.NewServer(mux)
+}
+
+func newACLTestClient(t *testing.T, addr string) *Client {
+	t.Helper()
+	client, err := NewClient(ClientConfig{Address: addr})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	return client
+}
+
+func TestBootstrapACL(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	result, err := client.BootstrapACL()
+	if err != nil {
+		t.Fatalf("BootstrapACL() error = %v", err)
+	}
+	if result.AccessorID != "boot-accessor" || result.SecretID != "boot-secret" {
+		t.Errorf("BootstrapACL() = %+v, want boot-accessor/boot-secret", result)
+	}
+	if result.Type != "management" {
+		t.Errorf("Type = %q, want management", result.Type)
+	}
+}
+
+func TestBootstrapACLAlreadyBootstrapped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "ACL bootstrap already done (reset index: 1)", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	_, err := client.BootstrapACL()
+	if !errors.Is(err, ErrAlreadyBootstrapped) {
+		t.Errorf("BootstrapACL() error = %v, want ErrAlreadyBootstrapped", err)
+	}
+}
+
+func TestCreateACLPolicy(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	if err := client.CreateACLPolicy("mgmt-token", "test-policy", "desc", `operator { policy = "read" }`); err != nil {
+		t.Errorf("CreateACLPolicy() error = %v", err)
+	}
+}
+
+func TestCreateACLTokenWithPolicies(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	result, err := client.CreateACLTokenWithPolicies("mgmt-token", "test-token", []string{"p1"})
+	if err != nil {
+		t.Fatalf("CreateACLTokenWithPolicies() error = %v", err)
+	}
+	if result.AccessorID != "accessor-1" || result.Type != "client" {
+		t.Errorf("CreateACLTokenWithPolicies() = %+v, want accessor-1/client", result)
+	}
+}
+
+func TestGetACLToken(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	result, err := client.GetACLToken("mgmt-token", "accessor-1")
+	if err != nil {
+		t.Fatalf("GetACLToken() error = %v", err)
+	}
+	if result == nil || result.AccessorID != "accessor-1" {
+		t.Errorf("GetACLToken() = %+v, want accessor-1", result)
+	}
+}
+
+func TestGetACLTokenNotFound(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	result, err := client.GetACLToken("mgmt-token", "missing")
+	if err != nil {
+		t.Fatalf("GetACLToken() error = %v, want nil for not-found", err)
+	}
+	if result != nil {
+		t.Errorf("GetACLToken() = %+v, want nil for not-found", result)
+	}
+}
+
+func TestDeleteACLToken(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	if err := client.DeleteACLToken("mgmt-token", "accessor-1"); err != nil {
+		t.Errorf("DeleteACLToken() error = %v", err)
+	}
+}
+
+func TestDeleteACLPolicy(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	if err := client.DeleteACLPolicy("mgmt-token", "test-policy"); err != nil {
+		t.Errorf("DeleteACLPolicy() error = %v", err)
+	}
+}
+
+func TestGetLeader(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	leader, err := client.GetLeader()
+	if err != nil {
+		t.Fatalf("GetLeader() error = %v", err)
+	}
+	if leader != "10.0.0.1:4647" {
+		t.Errorf("GetLeader() = %q, want 10.0.0.1:4647", leader)
+	}
+}
+
+func TestGetPeers(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	peers, err := client.GetPeers()
+	if err != nil {
+		t.Fatalf("GetPeers() error = %v", err)
+	}
+	if len(peers) != 2 {
+		t.Errorf("GetPeers() returned %d peers, want 2", len(peers))
+	}
+}
+
+func TestCheckHealth(t *testing.T) {
+	server := newACLTestServer(t)
+	defer server.Close()
+	client := newACLTestClient(t, server.URL)
+
+	health, err := client.CheckHealth()
+	if err != nil {
+		t.Fatalf("CheckHealth() error = %v", err)
+	}
+	if !health.Server.OK {
+		t.Errorf("CheckHealth().Server.OK = false, want true")
+	}
+}

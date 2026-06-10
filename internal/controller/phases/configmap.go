@@ -60,11 +60,6 @@ func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		"server.hcl": serverHCL,
 	}
 
-	// Add extra config if specified
-	if cluster.Spec.Server.ExtraConfig != "" {
-		data["90-custom.hcl"] = cluster.Spec.Server.ExtraConfig
-	}
-
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name + "-config",

@@ -26,5 +26,5 @@ spec:
     enabled: true
     route:
       enabled: true
-    monitoring:
-      enabled: true
+  monitoring:
+    enabled: true

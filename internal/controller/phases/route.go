@@ -20,15 +20,24 @@ import (
 	"context"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// routeGVK is the GVK whose presence indicates OpenShift Route support.
+var routeGVK = schema.GroupVersionKind{
+	Group:   "route.openshift.io",
+	Version: "v1",
+	Kind:    "Route",
+}
 
 // RoutePhase creates the OpenShift Route for Nomad UI access.
 type RoutePhase struct {
@@ -51,6 +60,18 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 	// Skip if OpenShift or Route is disabled
 	if !cluster.Spec.OpenShift.Enabled || !cluster.Spec.OpenShift.Route.Enabled {
 		p.Log.V(1).Info("OpenShift Route disabled, skipping")
+		return OK()
+	}
+
+	// Guard against openshift.enabled=true on a cluster without Route
+	// CRDs (AC-B4.2): creating the Route would 404 against the
+	// apiserver. Warn once per reconcile via Event and skip instead.
+	if !discovery.HasGVK(p.Client.RESTMapper(), routeGVK) {
+		p.Log.Info("OpenShift Route CRDs not installed; skipping Route creation")
+		if p.Recorder != nil {
+			p.Recorder.Event(cluster, corev1.EventTypeWarning, "RouteCRDMissing",
+				"spec.openshift.enabled is true but route.openshift.io/v1 CRDs are not installed; Route not created")
+		}
 		return OK()
 	}
 
@@ -86,7 +107,7 @@ func (p *RoutePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCl
 		}
 	}
 
-	// Populate RouteHost so subsequent phases (e.g. OIDC) can use it
+	// Populate RouteHost for status reporting and downstream consumers
 	if len(existing.Status.Ingress) > 0 && existing.Status.Ingress[0].Host != "" {
 		cluster.Status.RouteHost = existing.Status.Ingress[0].Host
 	}
@@ -117,16 +138,12 @@ func (p *RoutePhase) buildRoute(ctx context.Context, cluster *nomadv1alpha1.Noma
 		}, certSecret); err != nil {
 			return nil, err
 		}
-		certKey := routeSpec.TLS.SecretKeys.Certificate
-		if certKey == "" {
-			certKey = defaultTLSCertKey
-		}
-		keyKey := routeSpec.TLS.SecretKeys.PrivateKey
-		if keyKey == "" {
-			keyKey = defaultTLSKeyKey
-		}
-		tlsConfig.Certificate = string(certSecret.Data[certKey])
-		tlsConfig.Key = string(certSecret.Data[keyKey])
+		// Key names are guaranteed non-empty by kubebuilder defaulting
+		// (+kubebuilder:default={} on SecretKeys + nested field defaults).
+		// Overridable for ESO/VSO-populated Secrets that don't follow the
+		// kubernetes.io/tls key convention.
+		tlsConfig.Certificate = string(certSecret.Data[routeSpec.TLS.SecretKeys.Certificate])
+		tlsConfig.Key = string(certSecret.Data[routeSpec.TLS.SecretKeys.PrivateKey])
 	}
 
 	route := &routev1.Route{

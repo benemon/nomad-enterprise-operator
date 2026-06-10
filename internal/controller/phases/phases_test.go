@@ -282,14 +282,17 @@ func TestGossipPhase_PreserveExisting(t *testing.T) {
 	}
 }
 
-func TestGossipPhase_CustomSecretKey(t *testing.T) {
+// TestGossipPhase_ExternalSecretFixedKey pins ADR 0003's operator-owned
+// key convention: external gossip Secrets must store the key under
+// "gossip-key" — there is no per-CR override.
+func TestGossipPhase_ExternalSecretFixedKey(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "custom-gossip",
 			Namespace: "test-ns",
 		},
 		Data: map[string][]byte{
-			"custom-key": []byte("custom-value"),
+			"gossip-key": []byte("custom-value"),
 		},
 	}
 
@@ -298,7 +301,6 @@ func TestGossipPhase_CustomSecretKey(t *testing.T) {
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Gossip.SecretName = "custom-gossip"
-	cluster.Spec.Gossip.SecretKey = "custom-key"
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -674,7 +676,10 @@ func TestSecretsPhase_LicenseSecretMissingKey(t *testing.T) {
 	}
 }
 
-func TestSecretsPhase_CustomLicenseKey(t *testing.T) {
+// TestSecretsPhase_FixedLicenseKey pins ADR 0003's operator-owned key
+// convention: license Secrets must store the license under "license" —
+// a Secret using any other key fails validation.
+func TestSecretsPhase_FixedLicenseKey(t *testing.T) {
 	licenseSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "nomad-license",
@@ -689,12 +694,11 @@ func TestSecretsPhase_CustomLicenseKey(t *testing.T) {
 	phase := NewSecretsPhase(ctx)
 
 	cluster := newTestCluster("test-cluster", "test-ns")
-	cluster.Spec.License.SecretKey = "my-license-key"
 
 	result := phase.Execute(context.Background(), cluster)
 
-	if result.Error != nil {
-		t.Fatalf("Execute() error = %v", result.Error)
+	if result.Error == nil {
+		t.Fatal("Execute() should reject a license Secret without the operator-owned \"license\" key")
 	}
 }
 
@@ -753,6 +757,12 @@ func TestCertificatePhase_UsesUserCA(t *testing.T) {
 
 	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
 		SecretName: "user-ca",
+		// Unit tests bypass admission, so mirror the CRD defaults that
+		// kubebuilder applies on a real apiserver (A7 / neo-1u5).
+		SecretKeys: nomadv1alpha1.CASecretKeys{
+			Certificate: "tls.crt",
+			PrivateKey:  "tls.key",
+		},
 	}
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1105,6 +1115,12 @@ func TestRoutePhase_CustomCertificate(t *testing.T) {
 	cluster.Spec.OpenShift.Enabled = true
 	cluster.Spec.OpenShift.Route.Enabled = true
 	cluster.Spec.OpenShift.Route.TLS.CertificateSecretName = "custom-cert"
+	// Unit tests bypass admission, so mirror the CRD defaults that
+	// kubebuilder applies on a real apiserver (A7 / neo-1u5).
+	cluster.Spec.OpenShift.Route.TLS.SecretKeys = nomadv1alpha1.CertificateSecretKeys{
+		Certificate: "tls.crt",
+		PrivateKey:  "tls.key",
+	}
 
 	route, err := phase.buildRoute(context.Background(), cluster)
 	if err != nil {
@@ -1201,10 +1217,12 @@ func TestACLBootstrapPhase_AlreadyBootstrapped(t *testing.T) {
 	}
 }
 
-func TestACLBootstrapPhase_CustomSecretName(t *testing.T) {
+// TestACLBootstrapPhase_OperatorOwnedSecretName pins ADR 0003's naming
+// convention: the bootstrap Secret is always `<cluster>-acl-bootstrap`.
+func TestACLBootstrapPhase_OperatorOwnedSecretName(t *testing.T) {
 	bootstrapSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "custom-bootstrap-secret",
+			Name:      "test-cluster-acl-bootstrap",
 			Namespace: "test-ns",
 		},
 		Data: map[string][]byte{
@@ -1217,12 +1235,14 @@ func TestACLBootstrapPhase_CustomSecretName(t *testing.T) {
 
 	cluster := newTestCluster("test-cluster", "test-ns")
 	cluster.Spec.Server.ACL.Enabled = true
-	cluster.Spec.Server.ACL.BootstrapSecretName = "custom-bootstrap-secret"
 
 	result := phase.Execute(context.Background(), cluster)
 
 	if result.Error != nil {
 		t.Fatalf("Execute() error = %v", result.Error)
+	}
+	if result.Requeue {
+		t.Error("Execute() should treat the existing <cluster>-acl-bootstrap Secret as already bootstrapped")
 	}
 }
 

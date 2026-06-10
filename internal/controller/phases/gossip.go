@@ -47,18 +47,14 @@ func (p *GossipPhase) Name() string {
 
 // Execute ensures a gossip encryption key exists, either from an external secret or auto-generated.
 func (p *GossipPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	secretKey := cluster.Spec.Gossip.SecretKey
-	if secretKey == "" {
-		secretKey = "gossip-key"
-	}
-
 	// If user provided external secret name, use it (VSO, sealed-secrets, etc.)
+	// The key within the Secret is operator-owned (ADR 0003): "gossip-key".
 	if cluster.Spec.Gossip.SecretName != "" {
-		return p.readExternalSecret(ctx, cluster, secretKey)
+		return p.readExternalSecret(ctx, cluster, gossipSecretKey)
 	}
 
 	// Otherwise, check for operator-managed secret
-	return p.ensureOperatorManagedSecret(ctx, cluster, secretKey)
+	return p.ensureOperatorManagedSecret(ctx, cluster, gossipSecretKey)
 }
 
 func (p *GossipPhase) readExternalSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretKey string) PhaseResult {

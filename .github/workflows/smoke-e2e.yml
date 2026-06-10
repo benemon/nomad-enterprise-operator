@@ -177,6 +177,33 @@ jobs:
           fi
           echo "Nomad leader observable: ${leader}"
 
+      - name: 'Stage 6: operator metrics expose the seven F4 handles'
+        run: |
+          # Scrape the operator's metrics endpoint from inside the cluster
+          # (ServiceAccount bearer token auth, self-signed cert → -k).
+          # F4 registers all seven §8.1 handles at startup; zero values
+          # are acceptable, absence is a failure.
+          kubectl -n nomad-enterprise-operator-system run metrics-probe \
+            --image=curlimages/curl:8.10.1 --restart=Never --rm -i --quiet \
+            --overrides='{"spec":{"serviceAccountName":"nomad-enterprise-operator-controller-manager"}}' \
+            -- sh -c 'curl -sk -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+              https://nomad-enterprise-operator-controller-manager-metrics-service:8443/metrics' \
+            > /tmp/metrics.out
+          for m in \
+            nomad_operator_phase_duration_seconds \
+            nomad_operator_nomad_api_requests_total \
+            nomad_operator_cert_expiry_timestamp_seconds \
+            nomad_operator_license_expiry_timestamp_seconds \
+            nomad_operator_acl_bootstrap_failures_total \
+            nomad_operator_scale_down_in_progress \
+            nomad_operator_nomad_version_info; do
+            if ! grep -q "$m" /tmp/metrics.out; then
+              echo "::error::metric $m missing from operator /metrics"
+              exit 1
+            fi
+          done
+          echo "All seven nomad_operator_* metrics present."
+
       - name: Diagnostics on failure
         if: failure()
         run: hack/smoke-e2e/diagnostics.sh "${SAMPLE_NS}" "${CLUSTER_NAME}"

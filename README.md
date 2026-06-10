@@ -150,13 +150,13 @@ make undeploy
 | `image.repository` | `string` | `hashicorp/nomad` | Container image repository |
 | `image.tag` | `string` | `2.0.0-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
 | `image.pullPolicy` | `string` | `Always` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
-| `license.secretName` | `string` | | Name of secret containing the Nomad license. Mutually exclusive with `value` |
-| `license.secretKey` | `string` | `license` | Key within the license secret |
+| `license.secretName` | `string` | | Name of secret containing the Nomad license, stored under the key `license` (operator-owned per ADR 0003). Mutually exclusive with `value` |
 | `license.value` | `string` | | Inline license content. The operator creates a managed secret. Mutually exclusive with `secretName` |
 | `topology.region` | `string` | `global` | Nomad region name |
 | `topology.datacenter` | `string` | | Nomad datacenter name. Defaults to the namespace |
 | `persistence.size` | `string` | `10Gi` | Data volume size. Set to empty string to use emptyDir |
 | `persistence.storageClassName` | `string` | | Storage class for the data PVC. Uses cluster default if empty |
+| `persistence.reclaimPolicy` | `Retain` \| `Delete` | `Retain` | What happens to data PVCs on cluster deletion. `Retain` (default) preserves Raft state so an accidentally deleted cluster can be recreated against its old data; `Delete` removes the PVCs with the cluster. The value at deletion time wins |
 | `resources` | `ResourceRequirements` | | Standard Kubernetes CPU/memory requests and limits |
 | `imagePullSecrets` | `[]LocalObjectReference` | | Image pull secrets for private registries |
 | `nodeSelector` | `map[string]string` | | Node selector for pod scheduling |
@@ -167,7 +167,6 @@ make undeploy
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `server.extraConfig` | `string` | | Raw HCL appended to the server configuration |
 
 ### TLS (`spec.server.tls`)
 
@@ -185,29 +184,26 @@ See [TLS Configuration](#tls-configuration) for details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `server.acl.enabled` | `bool` | `true` | Enable Nomad ACLs. The operator auto-bootstraps and creates a least-privilege status token |
-| `server.acl.bootstrapSecretName` | `string` | | Override the bootstrap token secret name (auto-generated as `<name>-acl-bootstrap`) |
+| `server.acl.enabled` | `bool` | `true` | Enable Nomad ACLs. The operator auto-bootstraps; the token is always stored in `<name>-acl-bootstrap` (operator-owned per ADR 0003) |
 
 See [ACL Configuration](#acl-configuration) for details.
 
-### Autopilot (`spec.server.autopilot`)
+### Autopilot
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `server.autopilot.cleanupDeadServers` | `bool` | `true` | Automatically remove dead servers |
-| `server.autopilot.lastContactThreshold` | `string` | `200ms` | Threshold before marking server unhealthy |
-| `server.autopilot.maxTrailingLogs` | `int` | `250` | Max trailing logs before server is unhealthy |
-| `server.autopilot.serverStabilizationTime` | `string` | `10s` | Time before a server becomes a voter |
+Autopilot is operator-owned per ADR 0003 and not configurable:
+`cleanup_dead_servers = true` (required for Serf cleanup delegation),
+`last_contact_threshold = 200ms`, `max_trailing_logs = 250`,
+`server_stabilization_time = 10s` — Nomad's own defaults.
 
 ### Audit (`spec.server.audit`)
+
+Delivery guarantee (`enforced`), format (`json`), and rotation
+(`24h` × 15 files) are operator-owned per ADR 0003. Ship logs with a
+sidecar if you need different retention.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `server.audit.enabled` | `bool` | `true` | Enable audit logging. Auto-creates an audit volume |
-| `server.audit.deliveryGuarantee` | `string` | `enforced` | `enforced` blocks requests if audit fails; `best-effort` allows them |
-| `server.audit.format` | `string` | `json` | Log format (`json` or `log`) |
-| `server.audit.rotateDuration` | `string` | `24h` | Log rotation interval |
-| `server.audit.rotateMaxFiles` | `int` | `15` | Number of rotated files to retain |
 | `server.audit.size` | `string` | `5Gi` | Audit volume size |
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
 
@@ -215,8 +211,7 @@ See [ACL Configuration](#acl-configuration) for details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `gossip.secretName` | `string` | | Name of existing secret containing gossip key. Auto-generated if empty |
-| `gossip.secretKey` | `string` | `gossip-key` | Key within the gossip secret |
+| `gossip.secretName` | `string` | | Name of existing secret containing the gossip key under the key `gossip-key` (operator-owned per ADR 0003). Auto-generated if empty |
 
 ### Services (`spec.services`)
 
@@ -230,26 +225,35 @@ See [ACL Configuration](#acl-configuration) for details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `openshift.enabled` | `bool` | `false` | Enable OpenShift-specific resources (Routes, ServiceMonitors) |
+| `openshift.enabled` | `bool` | `false` | Enable OpenShift-specific resources (Routes). If true on a cluster without Route CRDs, the operator emits a `RouteCRDMissing` Warning Event and skips Route creation |
 | `openshift.route.enabled` | `bool` | `false` | Create an OpenShift Route. Always uses `reencrypt` termination with `Redirect` |
 | `openshift.route.host` | `string` | | Custom hostname. Auto-generated if empty |
 | `openshift.route.tls.certificateSecretName` | `string` | | Secret containing a custom external-facing certificate. If omitted, the platform wildcard certificate is used |
 | `openshift.route.tls.secretKeys.certificate` | `string` | `tls.crt` | Key name for the certificate in the Route certificate Secret |
 | `openshift.route.tls.secretKeys.privateKey` | `string` | `tls.key` | Key name for the private key in the Route certificate Secret |
-| `openshift.monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
-| `openshift.monitoring.scrapeInterval` | `string` | `30s` | Prometheus scrape interval |
-| `openshift.monitoring.scrapeTimeout` | `string` | `10s` | Prometheus scrape timeout |
-| `openshift.monitoring.additionalLabels` | `map[string]string` | | Additional labels on the ServiceMonitor |
-| `openshift.monitoring.prometheusRulesEnabled` | `bool` | `false` | Create PrometheusRule |
 
-### Affinity (`spec.affinity`)
+### Monitoring (`spec.monitoring`)
+
+ServiceMonitor and PrometheusRule are created when monitoring is enabled
+AND the Prometheus Operator CRDs (`monitoring.coreos.com/v1`) are installed
+— on any Kubernetes distribution, independent of `openshift.enabled`.
+Clusters without the CRDs skip monitoring resources cleanly.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `affinity.podAntiAffinity.enabled` | `bool` | `true` | Enable pod anti-affinity |
-| `affinity.podAntiAffinity.type` | `string` | `preferred` | Anti-affinity type (`preferred` or `required`) |
-| `affinity.podAntiAffinity.weight` | `int` | `100` | Weight for preferred anti-affinity (1-100) |
-| `affinity.podAntiAffinity.topologyKey` | `string` | `kubernetes.io/hostname` | Topology key |
+| `monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
+| `monitoring.prometheusRulesEnabled` | `bool` | `false` | Create PrometheusRule |
+
+Scrape cadence is operator-owned per ADR 0003 (30s interval, 10s
+timeout); ServiceMonitor label/relabel customisation belongs in
+Prometheus configuration.
+
+### Pod placement
+
+Pod anti-affinity is operator-owned per ADR 0003: preferred scheduling,
+weight 100, `kubernetes.io/hostname` topology, applied when
+`replicas >= 3`. For multi-zone distribution use the standard
+`spec.topologySpreadConstraints` field.
 
 ## Image version pinning
 
@@ -336,67 +340,18 @@ On cluster deletion, the operator revokes the operator status token and deletes 
 
 ## OIDC Authentication
 
-The operator can configure OIDC authentication for the Nomad cluster via a user-managed Keycloak instance. When enabled, the operator creates a `KeycloakRealmImport` CR that provisions a Keycloak realm, client, and group-to-role mapping, then configures Nomad's ACL auth method, policies, roles, and binding rules.
+The operator no longer reconciles OIDC authentication. Earlier versions
+managed a Keycloak realm and Nomad ACL auth method via `spec.oidc`; that
+field has been removed. Configure Nomad SSO out-of-band with the
+[Terraform Provider for Nomad](https://registry.terraform.io/providers/hashicorp/nomad/latest)
+(`nomad_acl_auth_method`, `nomad_acl_binding_rule`, `nomad_acl_role`,
+`nomad_acl_policy`), which covers the full auth-method lifecycle against
+any OIDC identity provider.
 
-> **Realm import is a one-shot operation.** The Keycloak operator's `KeycloakRealmImport` creates the realm on first apply but does not update or delete it on subsequent changes. Deleting the `KeycloakRealmImport` CR does **not** remove the realm from Keycloak — it must be deleted manually via the Keycloak admin console or API. See the [Keycloak operator realm import documentation](https://www.keycloak.org/operator/realm-import) for details.
-
-### Prerequisites
-
-1. The **Keycloak operator** must be installed **into the same namespace** as the NomadCluster before creating the NomadCluster CR. A Keycloak operator installed in a different namespace will not watch `KeycloakRealmImport` CRs in this namespace.
-2. A **`Keycloak` CR** must exist and be in `Ready` state in that namespace.
-3. The Keycloak operator requires a **PostgreSQL database** — provisioning this is outside the scope of the Nomad operator.
-
-### `spec.oidc` Field Reference
-
-| Field | Type | Description |
-|---|---|---|
-| `oidc.enabled` | `bool` | Enable OIDC configuration |
-| `oidc.keycloakRef.name` | `string` | Name of the `Keycloak` CR in the same namespace |
-| `oidc.realm` | `string` | Keycloak realm name (default: NomadCluster name) |
-| `oidc.discoveryCA.secretName` | `string` | Secret containing the CA certificate for OIDC discovery endpoint verification |
-| `oidc.discoveryCA.secretKey` | `string` | Key within the Secret holding the PEM-encoded CA certificate (default: `tls.crt`) |
-| `oidc.bindingRules[].keycloakGroup` | `string` | Keycloak group path (e.g. `/nomad-admins`) |
-| `oidc.bindingRules[].nomadRole` | `string` | Nomad ACL role name to bind |
-| `oidc.bindingRules[].policyRules` | `string` | HCL policy granted to this role |
-
-### OIDC Example
-
-```yaml
-apiVersion: nomad.hashicorp.com/v1alpha1
-kind: NomadCluster
-metadata:
-  name: nomad
-spec:
-  license:
-    secretName: nomad-license
-  server:
-    acl:
-      enabled: true
-  oidc:
-    enabled: true
-    keycloakRef:
-      name: my-keycloak
-    # realm defaults to the NomadCluster name ("nomad" here)
-    discoveryCA:
-      secretName: my-ca-secret   # CA that signed the Keycloak TLS certificate
-      secretKey: tls.crt         # default, can omit
-    bindingRules:
-      - keycloakGroup: "/nomad-admins"
-        nomadRole: "nomad-admins"
-        policyRules: |
-          namespace "*" {
-            policy = "write"
-          }
-          operator {
-            policy = "write"
-          }
-          agent {
-            policy = "write"
-          }
-          node {
-            policy = "write"
-          }
-```
+See [docs/migration-oidc-to-terraform.md](docs/migration-oidc-to-terraform.md)
+for a worked migration guide, including a complete
+`nomad_acl_auth_method` example and the steps to clean up
+operator-managed OIDC resources from existing clusters.
 
 ## NomadSnapshot CRD Reference
 
@@ -493,16 +448,8 @@ spec:
   server:
     acl:
       enabled: true
-    autopilot:
-      cleanupDeadServers: true
-      lastContactThreshold: "200ms"
-      maxTrailingLogs: 250
-      serverStabilizationTime: "10s"
     audit:
       enabled: true
-      format: json
-      rotateDuration: "24h"
-      rotateMaxFiles: 15
   persistence:
     size: 10Gi
   resources:
@@ -512,12 +459,6 @@ spec:
     requests:
       cpu: 500m
       memory: 1Gi
-  affinity:
-    podAntiAffinity:
-      enabled: true
-      type: preferred
-      weight: 100
-      topologyKey: kubernetes.io/hostname
 ---
 apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadSnapshot
@@ -552,7 +493,7 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.phase` | Cluster lifecycle phase: `Pending`, `Creating`, `Running`, `Failed` |
 | `status.readyReplicas` | Number of ready Nomad server pods |
 | `status.currentReplicas` | Current number of Nomad server pods |
-| `status.leaderID` | Raft leader node ID |
+| `status.leaderAddress` | Raft leader host:port (RPC address). For the Raft server ID, see `status.autopilot.servers[]` |
 | `status.advertiseAddress` | Resolved LoadBalancer address |
 | `status.gossipKeySecretName` | Name of the gossip key secret |
 | `status.aclBootstrapped` | Whether ACL bootstrap has completed |
@@ -570,10 +511,6 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.autopilot.failureTolerance` | Number of server failures the cluster can tolerate |
 | `status.autopilot.voters` | Number of voting servers |
 | `status.autopilot.servers[]` | Per-server health details |
-| `status.oidc.realmImportName` | Name of the managed `KeycloakRealmImport` CR |
-| `status.oidc.clientSecretName` | Name of the Secret containing the OIDC client secret |
-| `status.oidc.authMethodName` | Name of the Nomad ACL auth method created |
-| `status.oidc.ready` | Whether OIDC configuration is complete |
 
 ### Conditions
 
@@ -590,6 +527,31 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `LicenseValid` | Nomad Enterprise license is valid |
 | `AutopilotHealthy` | Raft autopilot reports healthy |
 
+### Operator Metrics
+
+The operator exports its own Prometheus metrics on the existing
+`:8443/metrics` endpoint (HTTPS, kube-rbac-proxy-style auth via
+ServiceAccount bearer token). When the Prometheus Operator CRDs are
+installed, the operator creates a ServiceMonitor for itself
+automatically; the declarative equivalent ships at
+`config/prometheus/operator-monitor.yaml`.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `nomad_operator_phase_duration_seconds` | Histogram | `cluster`, `namespace`, `phase` | Wall-clock duration of each reconciliation phase. Expected range: milliseconds (no-op phases) to low seconds (certificate issuance) |
+| `nomad_operator_nomad_api_requests_total` | Counter | `method`, `outcome` | Nomad API requests issued by the operator. `outcome` is `success` or `error` |
+| `nomad_operator_cert_expiry_timestamp_seconds` | Gauge | `cluster`, `namespace`, `cert` | NotAfter of each operator-managed certificate as a Unix timestamp. Alert when `< time() + 30d` |
+| `nomad_operator_license_expiry_timestamp_seconds` | Gauge | `cluster`, `namespace` | Nomad Enterprise license expiration as a Unix timestamp |
+| `nomad_operator_acl_bootstrap_failures_total` | Counter | `cluster`, `namespace` | Failed ACL bootstrap attempts. Any non-zero rate warrants investigation |
+| `nomad_operator_scale_down_in_progress` | Gauge | `cluster`, `namespace` | 1 while a Raft scale-down operation is running, else 0 |
+| `nomad_operator_nomad_version_info` | Gauge | `cluster`, `namespace`, `version` | Constant 1; the observed Nomad server version is carried as a label. The previous series is deleted on version change so each cluster exposes a single version label |
+
+**Cardinality budget:** the operator is designed for ≤200 NomadClusters
+per operator instance. Beyond that, the per-cluster label on
+`nomad_operator_phase_duration_seconds` produces histogram cardinality
+you should size your Prometheus storage for. Multi-instance operator
+deployments (sharded by namespace) are not currently supported.
+
 ## Reconciliation Phases
 
 The NomadCluster controller reconciles through a sequential phase pipeline:
@@ -597,17 +559,16 @@ The NomadCluster controller reconciles through a sequential phase pipeline:
 1. **ServiceAccount** — creates the Nomad server ServiceAccount
 2. **RBAC** — creates Roles and RoleBindings
 3. **Gossip** — generates or resolves the gossip encryption key
-4. **Certificate** — generates CA and issues server/client certificates (when TLS enabled)
-5. **Services** — creates headless and external Kubernetes Services
-6. **Advertise** — resolves the external LoadBalancer address
+4. **Services** — creates headless and external Kubernetes Services
+5. **Advertise** — resolves the external LoadBalancer address
+6. **Certificate** — generates CA and issues server/client certificates (after Advertise so the LoadBalancer IP is in the cert SANs)
 7. **Secrets** — assembles the Nomad configuration secrets
 8. **ConfigMap** — renders the Nomad HCL server configuration
 9. **StatefulSet** — creates or updates the Nomad server StatefulSet
-10. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled)
-11. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled)
+10. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
+11. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
 12. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
-13. **OIDC** — configures OIDC authentication via Keycloak (when `spec.oidc.enabled: true`)
-14. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
+13. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
 
 ## Development
 

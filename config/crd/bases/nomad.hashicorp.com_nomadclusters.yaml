@@ -57,46 +57,14 @@ spec:
           spec:
             description: NomadClusterSpec defines the desired state of NomadCluster.
             properties:
-              affinity:
-                description: Affinity configuration for pod scheduling
-                properties:
-                  podAntiAffinity:
-                    description: PodAntiAffinity configuration
-                    properties:
-                      enabled:
-                        default: true
-                        description: Enabled determines if pod anti-affinity is configured
-                        type: boolean
-                      topologyKey:
-                        default: kubernetes.io/hostname
-                        description: TopologyKey for anti-affinity
-                        type: string
-                      type:
-                        default: preferred
-                        description: 'Type: preferred or required'
-                        enum:
-                        - preferred
-                        - required
-                        type: string
-                      weight:
-                        default: 100
-                        description: Weight for preferred anti-affinity (1-100)
-                        format: int32
-                        maximum: 100
-                        minimum: 1
-                        type: integer
-                    type: object
-                type: object
               gossip:
                 description: Gossip encryption configuration
                 properties:
-                  secretKey:
-                    default: gossip-key
-                    description: SecretKey is the key within the secret
-                    type: string
                   secretName:
-                    description: SecretName is the name of secret containing gossip
-                      key (auto-created if empty)
+                    description: |-
+                      SecretName is the name of secret containing gossip key (auto-created
+                      if empty). The key must be stored under "gossip-key" (the key name
+                      is operator-owned per ADR 0003).
                     type: string
                 type: object
               image:
@@ -154,16 +122,11 @@ spec:
                 description: License is a reference to a secret containing the Nomad
                   Enterprise license
                 properties:
-                  secretKey:
-                    default: license
-                    description: |-
-                      SecretKey is the key within the secret (default: "license")
-                      Only used when SecretName is specified.
-                    type: string
                   secretName:
                     description: |-
                       SecretName is the name of an existing secret containing the license.
-                      Mutually exclusive with Value.
+                      The license must be stored under the key "license" (the key name is
+                      operator-owned per ADR 0003). Mutually exclusive with Value.
                     type: string
                   value:
                     description: |-
@@ -179,85 +142,27 @@ spec:
                 - message: secretName and value are mutually exclusive
                   rule: '!((has(self.secretName) && size(self.secretName) > 0) &&
                     (has(self.value) && size(self.value) > 0))'
+              monitoring:
+                description: |-
+                  Monitoring configures ServiceMonitor and PrometheusRule creation.
+                  Resources are created when enabled AND the Prometheus Operator CRDs
+                  are installed — independent of openshift.enabled, so vanilla
+                  Kubernetes clusters running Prometheus Operator get monitoring too.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled determines if monitoring resources are created
+                    type: boolean
+                  prometheusRulesEnabled:
+                    default: false
+                    description: PrometheusRulesEnabled determines if PrometheusRule
+                      is created
+                    type: boolean
+                type: object
               nodeSelector:
                 additionalProperties:
                   type: string
                 description: NodeSelector for pod scheduling
-                type: object
-              oidc:
-                description: OIDC configures OIDC authentication via Keycloak.
-                properties:
-                  bindingRules:
-                    description: |-
-                      BindingRules defines how Keycloak groups map to Nomad ACL roles.
-                      If empty, a default rule mapping the "nomad-admins" group to a
-                      management-equivalent role is created.
-                    items:
-                      description: OIDCBindingRule maps a Keycloak group to a Nomad
-                        ACL role.
-                      properties:
-                        keycloakGroup:
-                          description: KeycloakGroup is the Keycloak group path, including
-                            leading slash (e.g. "/nomad-admins").
-                          type: string
-                        nomadRole:
-                          description: NomadRole is the name of the Nomad ACL role
-                            to bind to this group.
-                          type: string
-                        policyRules:
-                          description: PolicyRules is the HCL policy document granted
-                            to this role.
-                          type: string
-                      required:
-                      - keycloakGroup
-                      - nomadRole
-                      - policyRules
-                      type: object
-                    type: array
-                  discoveryCA:
-                    description: |-
-                      DiscoveryCA references a Secret containing the CA certificate used to
-                      verify the Keycloak OIDC discovery endpoint. Required when the Keycloak
-                      hostname is served behind a TLS certificate not in the system trust store
-                      (e.g. OpenShift ingress with a private CA).
-                    properties:
-                      secretKey:
-                        default: tls.crt
-                        description: SecretKey is the key within the Secret that holds
-                          the PEM-encoded CA certificate.
-                        type: string
-                      secretName:
-                        description: SecretName is the name of the Secret containing
-                          the CA certificate.
-                        type: string
-                    required:
-                    - secretName
-                    type: object
-                  enabled:
-                    description: Enabled controls whether OIDC authentication is configured.
-                    type: boolean
-                  keycloakRef:
-                    description: |-
-                      KeycloakRef references the Keycloak CR that the realm import targets.
-                      Must be in the same namespace as the NomadCluster.
-                    properties:
-                      name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                    type: object
-                    x-kubernetes-map-type: atomic
-                  realm:
-                    description: Realm is the name of the Keycloak realm to create.
-                      Defaults to the NomadCluster name.
-                    type: string
-                required:
-                - keycloakRef
                 type: object
               openshift:
                 description: OpenShift-specific configuration
@@ -265,37 +170,8 @@ spec:
                   enabled:
                     description: |-
                       Enabled determines if OpenShift-specific resources are created.
-                      Set to true to create Routes and ServiceMonitors.
+                      Set to true to create Routes.
                     type: boolean
-                  monitoring:
-                    description: Monitoring configuration for ServiceMonitor and PrometheusRule
-                    properties:
-                      additionalLabels:
-                        additionalProperties:
-                          type: string
-                        description: AdditionalLabels to add to ServiceMonitor
-                        type: object
-                      enabled:
-                        default: true
-                        description: Enabled determines if monitoring resources are
-                          created
-                        type: boolean
-                      prometheusRulesEnabled:
-                        default: false
-                        description: PrometheusRulesEnabled determines if PrometheusRule
-                          is created
-                        type: boolean
-                      scrapeInterval:
-                        default: 30s
-                        description: ScrapeInterval for metrics collection (simplified
-                          from serviceMonitor.interval)
-                        type: string
-                      scrapeTimeout:
-                        default: 10s
-                        description: ScrapeTimeout for metric collection (simplified
-                          from serviceMonitor.scrapeTimeout)
-                        type: string
-                    type: object
                   route:
                     description: Route configuration for OpenShift Route
                     properties:
@@ -318,8 +194,14 @@ spec:
                               If omitted, the platform wildcard certificate is used.
                             type: string
                           secretKeys:
-                            description: SecretKeys allows overriding the key names
-                              within the certificate Secret.
+                            default: {}
+                            description: |-
+                              SecretKeys allows overriding the key names within the certificate
+                              Secret, for Secrets populated by tooling (ESO, VSO) that does not
+                              follow the kubernetes.io/tls key convention. The {} default makes
+                              admission materialise the nested tls.crt/tls.key defaults even when
+                              secretKeys is omitted — kubebuilder nested defaults only apply
+                              inside objects that are present in the stored JSON.
                             properties:
                               certificate:
                                 default: tls.crt
@@ -338,6 +220,19 @@ spec:
               persistence:
                 description: Persistence configuration for data volumes
                 properties:
+                  reclaimPolicy:
+                    default: Retain
+                    description: |-
+                      ReclaimPolicy controls what happens to the data PVCs when the
+                      NomadCluster is deleted. Retain (the default) leaves the PVCs in
+                      place so Raft state survives accidental CR deletion and can be
+                      re-adopted by a recreated cluster of the same name; Delete removes
+                      them with the cluster. The value in effect at deletion time wins —
+                      earlier values are not remembered.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
                   size:
                     default: 10Gi
                     description: |-
@@ -424,10 +319,6 @@ spec:
                   acl:
                     description: ACL configuration
                     properties:
-                      bootstrapSecretName:
-                        description: BootstrapSecretName is the secret to store bootstrap
-                          token (auto-created)
-                        type: string
                       enabled:
                         default: true
                         description: Enabled determines if ACLs are enabled (defaults
@@ -437,37 +328,12 @@ spec:
                   audit:
                     description: Audit logging configuration
                     properties:
-                      deliveryGuarantee:
-                        default: enforced
-                        description: |-
-                          DeliveryGuarantee determines behavior when audit logging fails.
-                          "enforced" blocks requests if audit fails (recommended for production).
-                          "best-effort" allows requests even if audit fails (useful for development).
-                        enum:
-                        - enforced
-                        - best-effort
-                        type: string
                       enabled:
                         default: true
                         description: |-
                           Enabled determines if audit logging is enabled.
                           When enabled, an audit volume is automatically created.
                         type: boolean
-                      format:
-                        default: json
-                        description: Format of audit logs (json or log)
-                        enum:
-                        - json
-                        - log
-                        type: string
-                      rotateDuration:
-                        default: 24h
-                        description: RotateDuration for log rotation
-                        type: string
-                      rotateMaxFiles:
-                        default: 15
-                        description: RotateMaxFiles to retain
-                        type: integer
                       size:
                         default: 5Gi
                         description: Size of the audit volume (created automatically
@@ -478,30 +344,6 @@ spec:
                           default if empty)
                         type: string
                     type: object
-                  autopilot:
-                    description: Autopilot configuration
-                    properties:
-                      cleanupDeadServers:
-                        default: true
-                        description: CleanupDeadServers enables automatic removal
-                          of dead servers
-                        type: boolean
-                      lastContactThreshold:
-                        default: 200ms
-                        description: LastContactThreshold before marking server unhealthy
-                        type: string
-                      maxTrailingLogs:
-                        default: 250
-                        description: MaxTrailingLogs before server is considered unhealthy
-                        type: integer
-                      serverStabilizationTime:
-                        default: 10s
-                        description: ServerStabilizationTime before becoming voter
-                        type: string
-                    type: object
-                  extraConfig:
-                    description: ExtraConfig is raw HCL to append to server configuration
-                    type: string
                   tls:
                     description: TLS configuration
                     properties:
@@ -513,8 +355,14 @@ spec:
                           to your organisation's trusted root.
                         properties:
                           secretKeys:
-                            description: SecretKeys allows overriding the key names
-                              within the CA secret.
+                            default: {}
+                            description: |-
+                              SecretKeys allows overriding the key names within the CA secret,
+                              for Secrets populated by tooling (ESO, VSO) that does not follow
+                              the kubernetes.io/tls key convention. The {} default makes
+                              admission materialise the nested tls.crt/tls.key defaults even when
+                              secretKeys is omitted — kubebuilder nested defaults only apply
+                              inside objects that are present in the stored JSON.
                             properties:
                               certificate:
                                 default: tls.crt
@@ -1008,27 +856,6 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
-              oidc:
-                description: OIDC contains the observed state of the OIDC integration.
-                properties:
-                  authMethodName:
-                    description: AuthMethodName is the name of the Nomad ACL auth
-                      method created.
-                    type: string
-                  clientSecretName:
-                    description: ClientSecretName is the name of the Secret containing
-                      the OIDC client secret.
-                    type: string
-                  ready:
-                    description: |-
-                      Ready indicates that the realm import is complete and Nomad has been
-                      configured with the auth method, policies, roles, and binding rules.
-                    type: boolean
-                  realmImportName:
-                    description: RealmImportName is the name of the managed KeycloakRealmImport
-                      CR.
-                    type: string
-                type: object
               operatorStatusPolicyName:
                 description: |-
                   OperatorStatusPolicyName is the Nomad ACL policy name created for the

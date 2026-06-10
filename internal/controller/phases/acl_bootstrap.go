@@ -130,10 +130,7 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 }
 
 func (p *ACLBootstrapPhase) getBootstrapSecretName(cluster *nomadv1alpha1.NomadCluster) string {
-	if cluster.Spec.Server.ACL.BootstrapSecretName != "" {
-		return cluster.Spec.Server.ACL.BootstrapSecretName
-	}
-	return cluster.Name + "-acl-bootstrap"
+	return BootstrapSecretName(cluster.Name)
 }
 
 func (p *ACLBootstrapPhase) executeBootstrap(cluster *nomadv1alpha1.NomadCluster) (*nomad.ACLBootstrapResult, error) {

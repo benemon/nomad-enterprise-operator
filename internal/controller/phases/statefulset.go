@@ -164,9 +164,12 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		Tolerations:  cluster.Spec.Tolerations,
 	}
 
-	// Add affinity if configured
-	if cluster.Spec.Affinity != nil && cluster.Spec.Affinity.PodAntiAffinity.Enabled {
-		podSpec.Affinity = p.buildAffinity(cluster)
+	// Pod anti-affinity is operator-owned per ADR 0003: preferred
+	// (required is a footgun on small clusters), weight 100, hostname
+	// topology, applied at replicas >= 3. Multi-zone spreading uses the
+	// user-facing spec.topologySpreadConstraints instead.
+	if replicas >= 3 {
+		podSpec.Affinity = buildOperatorAffinity(cluster)
 	}
 
 	// Add topology spread constraints
@@ -181,9 +184,8 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		"gossip":        p.GossipKey,
 		"acl":           strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
 		"tls":           "true",
-		"audit":         strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
-		"auditDelivery": cluster.Spec.Server.Audit.DeliveryGuarantee,
-		"replicas":      strconv.Itoa(int(replicas)),
+		"audit":    strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
+		"replicas": strconv.Itoa(int(replicas)),
 		"region":        cluster.Spec.Topology.Region,
 		"datacenter":    cluster.Spec.Topology.Datacenter,
 	})
@@ -232,10 +234,6 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
 	// Get the effective license secret name (handles inline vs external)
 	licenseSecretName := getLicenseSecretName(cluster)
-	licenseKey := cluster.Spec.License.SecretKey
-	if licenseKey == "" {
-		licenseKey = "license"
-	}
 
 	env := []corev1.EnvVar{
 		{
@@ -245,7 +243,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: licenseSecretName,
 					},
-					Key: licenseKey,
+					// Key name is operator-owned per ADR 0003.
+					Key: licenseSecretKey,
 				},
 			},
 		},
@@ -427,51 +426,29 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 	return templates
 }
 
-func (p *StatefulSetPhase) buildAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity {
-	antiAffinity := cluster.Spec.Affinity.PodAntiAffinity
-
-	topologyKey := antiAffinity.TopologyKey
-	if topologyKey == "" {
-		topologyKey = "kubernetes.io/hostname"
-	}
-
-	labelSelector := &metav1.LabelSelector{
-		MatchLabels: GetSelectorLabels(cluster),
-	}
-
-	if antiAffinity.Type == "required" {
-		return &corev1.Affinity{
-			PodAntiAffinity: &corev1.PodAntiAffinity{
-				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
-					{
-						LabelSelector: labelSelector,
-						TopologyKey:   topologyKey,
-					},
-				},
-			},
-		}
-	}
-
-	// Default to preferred
-	weight := antiAffinity.Weight
-	if weight == 0 {
-		weight = 100
-	}
-
+// buildOperatorAffinity returns the operator-owned pod anti-affinity
+// (ADR 0003): preferred scheduling, weight 100, hostname topology.
+// Preferred (not required) so small clusters degrade to co-location
+// instead of Pending pods; multi-zone distribution belongs to the
+// user-facing spec.topologySpreadConstraints.
+func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity {
 	return &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
 			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
 				{
-					Weight: weight,
+					Weight: 100,
 					PodAffinityTerm: corev1.PodAffinityTerm{
-						LabelSelector: labelSelector,
-						TopologyKey:   topologyKey,
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: GetSelectorLabels(cluster),
+						},
+						TopologyKey: "kubernetes.io/hostname",
 					},
 				},
 			},
 		},
 	}
 }
+
 
 func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) bool {
 	// Check replicas

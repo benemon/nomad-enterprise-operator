@@ -61,7 +61,7 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 			name:   cluster.Name + "-license",
 			labels: GetLabels(cluster),
 			data: map[string]string{
-				"license": cluster.Spec.License.Value,
+				licenseSecretKey: cluster.Spec.License.Value,
 			},
 		})
 	}
@@ -72,10 +72,8 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 			"Either license.secretName or license.value must be specified")
 	}
 
-	secretKey := cluster.Spec.License.SecretKey
-	if secretKey == "" {
-		secretKey = "license"
-	}
+	// Key name is operator-owned per ADR 0003.
+	secretKey := licenseSecretKey
 
 	secret := &corev1.Secret{}
 	err := p.Client.Get(ctx, types.NamespacedName{

@@ -27,8 +27,29 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// Operator-owned Secret key names and naming conventions per ADR 0003
+// ("Fields dropped in v1"). These were previously user-configurable spec
+// fields; one convention is supported forever instead.
+const (
+	// licenseSecretKey is the key holding the Nomad Enterprise license
+	// in the license Secret.
+	licenseSecretKey = "license"
+
+	// gossipSecretKey is the key holding the gossip encryption key in
+	// the gossip Secret.
+	gossipSecretKey = "gossip-key"
+)
+
+// BootstrapSecretName returns the operator-owned name of the ACL
+// bootstrap token Secret for a cluster: `<cluster>-acl-bootstrap`
+// (ADR 0003 — previously spec.server.acl.bootstrapSecretName).
+func BootstrapSecretName(clusterName string) string {
+	return clusterName + "-acl-bootstrap"
+}
 
 // PhaseResult represents the outcome of a phase execution.
 type PhaseResult struct {
@@ -82,6 +103,10 @@ type PhaseContext struct {
 	Scheme     *runtime.Scheme
 	Log        logr.Logger
 	RESTConfig *rest.Config
+
+	// Recorder emits Kubernetes Events on the NomadCluster from phases
+	// (e.g. RouteCRDMissing). May be nil in tests; guard before use.
+	Recorder record.EventRecorder
 
 	// NomadClientFactory builds Nomad API clients used by phases that call the
 	// Nomad API. Defaults to nomad.NewClient when nil. Tests inject a factory

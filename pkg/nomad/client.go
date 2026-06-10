@@ -22,10 +22,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -161,31 +159,6 @@ type ACLTokenResult struct {
 	ExpirationTime *time.Time
 }
 
-// CreateACLToken creates a new ACL token.
-// Requires a management token for authentication.
-func (c *Client) CreateACLToken(authToken, name, tokenType string) (*ACLTokenResult, error) {
-	token := &nomadapi.ACLToken{
-		Name: name,
-		Type: tokenType,
-	}
-
-	result, _, err := c.api.ACLTokens().Create(token, &nomadapi.WriteOptions{
-		AuthToken: authToken,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ACL token: %w", err)
-	}
-
-	return &ACLTokenResult{
-		AccessorID:     result.AccessorID,
-		SecretID:       result.SecretID,
-		Name:           result.Name,
-		Type:           result.Type,
-		CreateTime:     result.CreateTime,
-		ExpirationTime: result.ExpirationTime,
-	}, nil
-}
-
 // CreateACLTokenWithPolicies creates a new client ACL token bound to the named policies.
 // Requires a management token for authentication.
 func (c *Client) CreateACLTokenWithPolicies(authToken, name string, policies []string) (*ACLTokenResult, error) {
@@ -298,123 +271,57 @@ func (c *Client) CheckHealth() (*HealthResult, error) {
 // GetLicense retrieves the current Nomad Enterprise license information.
 // Requires an ACL token with operator:read capability.
 func (c *Client) GetLicense(ctx context.Context, token string) (*LicenseResult, error) {
-	addr := c.api.Address()
+	q := (&nomadapi.QueryOptions{AuthToken: token}).WithContext(ctx)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", addr+"/v1/operator/license", nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create license request: %w", err)
-	}
-	if token != "" {
-		req.Header.Set("X-Nomad-Token", token)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	reply, _, err := c.api.Operator().LicenseGet(q)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get license: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read license response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("license request failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var result struct {
-		License struct {
-			LicenseID       string   `json:"LicenseID"`
-			ExpirationTime  string   `json:"ExpirationTime"`
-			TerminationTime string   `json:"TerminationTime"`
-			Features        []string `json:"Features"`
-		} `json:"License"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse license response: %w", err)
+	if reply == nil || reply.License == nil {
+		return nil, fmt.Errorf("license response contained no license")
 	}
 
 	return &LicenseResult{
-		LicenseID:       result.License.LicenseID,
-		ExpirationTime:  result.License.ExpirationTime,
-		TerminationTime: result.License.TerminationTime,
-		Features:        result.License.Features,
+		LicenseID:       reply.License.LicenseID,
+		ExpirationTime:  reply.License.ExpirationTime.Format(time.RFC3339),
+		TerminationTime: reply.License.TerminationTime.Format(time.RFC3339),
+		Features:        reply.License.Features,
 	}, nil
 }
 
 // GetAutopilotHealth retrieves the Raft autopilot health information.
 // Requires an ACL token with operator:read capability.
 func (c *Client) GetAutopilotHealth(ctx context.Context, token string) (*AutopilotHealthResult, error) {
-	addr := c.api.Address()
+	q := (&nomadapi.QueryOptions{AuthToken: token}).WithContext(ctx)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", addr+"/v1/operator/autopilot/health", nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create autopilot health request: %w", err)
-	}
-	if token != "" {
-		req.Header.Set("X-Nomad-Token", token)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	reply, _, err := c.api.Operator().AutopilotServerHealth(q)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get autopilot health: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read autopilot health response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("autopilot health request failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var apiResult struct {
-		Healthy          bool `json:"Healthy"`
-		FailureTolerance int  `json:"FailureTolerance"`
-		Servers          []struct {
-			ID          string `json:"ID"`
-			Name        string `json:"Name"`
-			Address     string `json:"Address"`
-			SerfStatus  string `json:"SerfStatus"`
-			Version     string `json:"Version"`
-			Leader      bool   `json:"Leader"`
-			Voter       bool   `json:"Voter"`
-			LastContact string `json:"LastContact"`
-			LastTerm    uint64 `json:"LastTerm"`
-			LastIndex   uint64 `json:"LastIndex"`
-			Healthy     bool   `json:"Healthy"`
-			StableSince string `json:"StableSince"`
-		} `json:"Servers"`
-	}
-
-	if err := json.Unmarshal(body, &apiResult); err != nil {
-		return nil, fmt.Errorf("failed to parse autopilot health response: %w", err)
-	}
 
 	result := &AutopilotHealthResult{
-		Healthy:          apiResult.Healthy,
-		FailureTolerance: apiResult.FailureTolerance,
-		Servers:          make([]AutopilotServer, 0, len(apiResult.Servers)),
+		Healthy:          reply.Healthy,
+		FailureTolerance: reply.FailureTolerance,
+		Servers:          make([]AutopilotServer, 0, len(reply.Servers)),
 	}
 
 	voters := 0
-	for _, s := range apiResult.Servers {
+	for _, s := range reply.Servers {
 		if s.Voter {
 			voters++
 		}
 		result.Servers = append(result.Servers, AutopilotServer{
-			ID:          s.ID,
-			Name:        s.Name,
-			Address:     s.Address,
-			Leader:      s.Leader,
-			Voter:       s.Voter,
-			Healthy:     s.Healthy,
-			StableSince: s.StableSince,
-			LastContact: s.LastContact,
+			ID:      s.ID,
+			Name:    s.Name,
+			Address: s.Address,
+			Leader:  s.Leader,
+			Voter:   s.Voter,
+			Healthy: s.Healthy,
+			// The SDK parses these from the wire; format back to the
+			// string shapes the hand-rolled JSON previously passed
+			// through verbatim (RFC3339 timestamp, Go duration string).
+			StableSince: s.StableSince.Format(time.RFC3339),
+			LastContact: s.LastContact.String(),
 		})
 	}
 	result.Voters = voters
@@ -514,372 +421,6 @@ host_volume "*" {
   policy = "read"
 }
 `
-
-// OIDCDefaultPolicyRules is the default Nomad ACL policy applied to the nomad-admins group
-// when no explicit binding rules are specified in spec.oidc.bindingRules.
-const OIDCDefaultPolicyRules = `
-namespace "default" {
-  capabilities = ["list-jobs", "read-job", "submit-job"]
-}
-operator {
-  policy = "read"
-}
-`
-
-// ACLAuthMethodConfig is the JSON configuration body for a Nomad OIDC auth method.
-type ACLAuthMethodConfig struct {
-	OIDCDiscoveryURL    string            `json:"OIDCDiscoveryURL"`
-	DiscoveryCAPem      []string          `json:"DiscoveryCAPem,omitempty"`
-	OIDCClientID        string            `json:"OIDCClientID"`
-	OIDCClientSecret    string            `json:"OIDCClientSecret"`
-	OIDCEnablePKCE      bool              `json:"OIDCEnablePKCE"`
-	BoundAudiences      []string          `json:"BoundAudiences"`
-	AllowedRedirectURIs []string          `json:"AllowedRedirectURIs"`
-	OIDCScopes          []string          `json:"OIDCScopes"`
-	ListClaimMappings   map[string]string `json:"ListClaimMappings"`
-}
-
-// ACLBindingRuleStub is a summary of an ACL binding rule returned from the list API.
-type ACLBindingRuleStub struct {
-	ID         string
-	AuthMethod string
-	Selector   string
-	BindType   string
-	BindName   string
-}
-
-// UpsertACLAuthMethod creates or updates an OIDC auth method in Nomad.
-func (c *Client) UpsertACLAuthMethod(
-	authToken, name, methodType, maxTokenTTL string,
-	config ACLAuthMethodConfig,
-) error {
-	addr := c.api.Address()
-
-	// Check if the auth method already exists
-	checkReq, err := http.NewRequest("GET", addr+"/v1/acl/auth-method/"+name, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create auth method check request: %w", err)
-	}
-	checkReq.Header.Set("X-Nomad-Token", authToken)
-
-	checkResp, err := c.httpClient.Do(checkReq)
-	if err != nil {
-		return fmt.Errorf("failed to check auth method: %w", err)
-	}
-	_ = checkResp.Body.Close()
-
-	httpMethod := http.MethodPost
-	url := addr + "/v1/acl/auth-method"
-	if checkResp.StatusCode == http.StatusOK {
-		httpMethod = http.MethodPut
-		url = addr + "/v1/acl/auth-method/" + name
-	}
-
-	body := map[string]interface{}{
-		"Name":          name,
-		"Type":          methodType,
-		"MaxTokenTTL":   maxTokenTTL,
-		"TokenLocality": "local",
-		"Default":       true,
-		"Config":        config,
-	}
-
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("failed to marshal auth method: %w", err)
-	}
-
-	req, err := http.NewRequest(httpMethod, url, strings.NewReader(string(bodyJSON)))
-	if err != nil {
-		return fmt.Errorf("failed to create auth method request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to upsert auth method: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("auth method upsert failed (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
-
-// ListACLBindingRules lists all ACL binding rules for the given auth method.
-func (c *Client) ListACLBindingRules(authToken, authMethodName string) ([]ACLBindingRuleStub, error) {
-	addr := c.api.Address()
-
-	req, err := http.NewRequest("GET", addr+"/v1/acl/binding-rules?auth_method="+authMethodName, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create binding rules list request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list binding rules: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read binding rules response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("binding rules list failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var rules []ACLBindingRuleStub
-	if err := json.Unmarshal(body, &rules); err != nil {
-		return nil, fmt.Errorf("failed to parse binding rules response: %w", err)
-	}
-	if rules == nil {
-		rules = []ACLBindingRuleStub{}
-	}
-
-	return rules, nil
-}
-
-// UpsertACLRole creates or updates an ACL role in Nomad and returns the role ID.
-func (c *Client) UpsertACLRole(authToken, name string, policyNames []string) (string, error) {
-	addr := c.api.Address()
-
-	// Check if the role already exists by listing and matching by name
-	existingID, err := c.findACLRoleIDByName(authToken, name)
-	if err != nil {
-		return "", fmt.Errorf("failed to look up existing ACL role: %w", err)
-	}
-
-	policies := make([]map[string]string, 0, len(policyNames))
-	for _, p := range policyNames {
-		policies = append(policies, map[string]string{"Name": p})
-	}
-
-	body := map[string]interface{}{
-		"Name":     name,
-		"Policies": policies,
-	}
-
-	url := addr + "/v1/acl/role"
-	if existingID != "" {
-		body["ID"] = existingID
-		url = addr + "/v1/acl/role/" + existingID
-	}
-
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal ACL role: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(bodyJSON)))
-	if err != nil {
-		return "", fmt.Errorf("failed to create ACL role request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to upsert ACL role: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read ACL role response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ACL role upsert failed (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		ID string `json:"ID"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("failed to parse ACL role response: %w", err)
-	}
-
-	return result.ID, nil
-}
-
-func (c *Client) findACLRoleIDByName(authToken, name string) (string, error) {
-	addr := c.api.Address()
-
-	req, err := http.NewRequest("GET", addr+"/v1/acl/roles", nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create ACL roles list request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to list ACL roles: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read ACL roles response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ACL roles list failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var roles []struct {
-		ID   string `json:"ID"`
-		Name string `json:"Name"`
-	}
-	if err := json.Unmarshal(body, &roles); err != nil {
-		return "", fmt.Errorf("failed to parse ACL roles response: %w", err)
-	}
-
-	for _, r := range roles {
-		if r.Name == name {
-			return r.ID, nil
-		}
-	}
-
-	return "", nil
-}
-
-// UpsertACLBindingRule creates or updates an ACL binding rule in Nomad and returns the rule ID.
-func (c *Client) UpsertACLBindingRule(authToken string, rule ACLBindingRuleStub) (string, error) {
-	// Check for existing rule with the same auth method and bind name
-	existing, err := c.ListACLBindingRules(authToken, rule.AuthMethod)
-	if err != nil {
-		return "", fmt.Errorf("failed to list existing binding rules: %w", err)
-	}
-	for _, r := range existing {
-		if r.BindName == rule.BindName && r.BindType == rule.BindType {
-			return r.ID, nil
-		}
-	}
-
-	addr := c.api.Address()
-
-	body := map[string]interface{}{
-		"AuthMethod": rule.AuthMethod,
-		"Selector":   rule.Selector,
-		"BindType":   rule.BindType,
-		"BindName":   rule.BindName,
-	}
-
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal binding rule: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, addr+"/v1/acl/binding-rule", strings.NewReader(string(bodyJSON)))
-	if err != nil {
-		return "", fmt.Errorf("failed to create binding rule request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to upsert binding rule: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read binding rule response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("binding rule upsert failed (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		ID string `json:"ID"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("failed to parse binding rule response: %w", err)
-	}
-
-	return result.ID, nil
-}
-
-// DeleteACLAuthMethod deletes an ACL auth method by name. Non-error on 404.
-func (c *Client) DeleteACLAuthMethod(authToken, name string) error {
-	addr := c.api.Address()
-
-	req, err := http.NewRequest("DELETE", addr+"/v1/acl/auth-method/"+name, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create auth method delete request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to delete auth method: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("auth method delete failed (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
-
-// DeleteACLRole deletes an ACL role by ID. Non-error on 404.
-func (c *Client) DeleteACLRole(authToken, id string) error {
-	addr := c.api.Address()
-
-	req, err := http.NewRequest("DELETE", addr+"/v1/acl/role/"+id, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create ACL role delete request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to delete ACL role: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ACL role delete failed (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
-
-// DeleteACLBindingRule deletes an ACL binding rule by ID. Non-error on 404.
-func (c *Client) DeleteACLBindingRule(authToken, id string) error {
-	addr := c.api.Address()
-
-	req, err := http.NewRequest("DELETE", addr+"/v1/acl/binding-rule/"+id, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create binding rule delete request: %w", err)
-	}
-	req.Header.Set("X-Nomad-Token", authToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to delete binding rule: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("binding rule delete failed (status %d): %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
 
 // InternalServiceAddress returns the internal K8s service address for a Nomad cluster.
 // This address is only resolvable from within the Kubernetes cluster.

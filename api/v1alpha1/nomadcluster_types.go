@@ -50,6 +50,13 @@ type NomadClusterSpec struct {
 	// +optional
 	OpenShift OpenShiftSpec `json:"openshift,omitempty"`
 
+	// Monitoring configures ServiceMonitor and PrometheusRule creation.
+	// Resources are created when enabled AND the Prometheus Operator CRDs
+	// are installed — independent of openshift.enabled, so vanilla
+	// Kubernetes clusters running Prometheus Operator get monitoring too.
+	// +optional
+	Monitoring MonitoringSpec `json:"monitoring,omitempty"`
+
 	// Server configuration options
 	// +optional
 	Server ServerSpec `json:"server,omitempty"`
@@ -61,10 +68,6 @@ type NomadClusterSpec struct {
 	// Resources defines CPU and memory requests/limits
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// Affinity configuration for pod scheduling
-	// +optional
-	Affinity *AffinitySpec `json:"affinity,omitempty"`
 
 	// TopologySpreadConstraints for distributing pods
 	// +optional
@@ -81,10 +84,6 @@ type NomadClusterSpec struct {
 	// ImagePullSecrets for private registries
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
-
-	// OIDC configures OIDC authentication via Keycloak.
-	// +optional
-	OIDC *OIDCSpec `json:"oidc,omitempty"`
 }
 
 // ImageSpec defines container image configuration
@@ -119,14 +118,10 @@ type ImageSpec struct {
 // +kubebuilder:validation:XValidation:rule="!((has(self.secretName) && size(self.secretName) > 0) && (has(self.value) && size(self.value) > 0))",message="secretName and value are mutually exclusive"
 type LicenseSpec struct {
 	// SecretName is the name of an existing secret containing the license.
-	// Mutually exclusive with Value.
+	// The license must be stored under the key "license" (the key name is
+	// operator-owned per ADR 0003). Mutually exclusive with Value.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
-
-	// SecretKey is the key within the secret (default: "license")
-	// Only used when SecretName is specified.
-	// +kubebuilder:default="license"
-	SecretKey string `json:"secretKey,omitempty"`
 
 	// Value is the license content provided directly.
 	// The operator will create and manage a secret from this value.
@@ -148,13 +143,11 @@ type TopologySpec struct {
 
 // GossipSpec defines gossip encryption configuration
 type GossipSpec struct {
-	// SecretName is the name of secret containing gossip key (auto-created if empty)
+	// SecretName is the name of secret containing gossip key (auto-created
+	// if empty). The key must be stored under "gossip-key" (the key name
+	// is operator-owned per ADR 0003).
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
-
-	// SecretKey is the key within the secret
-	// +kubebuilder:default="gossip-key"
-	SecretKey string `json:"secretKey,omitempty"`
 }
 
 // ServicesSpec defines Kubernetes Service configuration
@@ -183,17 +176,13 @@ type ExternalServiceSpec struct {
 // OpenShiftSpec defines OpenShift-specific configuration
 type OpenShiftSpec struct {
 	// Enabled determines if OpenShift-specific resources are created.
-	// Set to true to create Routes and ServiceMonitors.
+	// Set to true to create Routes.
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Route configuration for OpenShift Route
 	// +optional
 	Route RouteSpec `json:"route,omitempty"`
-
-	// Monitoring configuration for ServiceMonitor and PrometheusRule
-	// +optional
-	Monitoring MonitoringSpec `json:"monitoring,omitempty"`
 }
 
 // RouteSpec defines OpenShift Route configuration
@@ -224,7 +213,13 @@ type RouteTLSSpec struct {
 	// +optional
 	CertificateSecretName string `json:"certificateSecretName,omitempty"`
 
-	// SecretKeys allows overriding the key names within the certificate Secret.
+	// SecretKeys allows overriding the key names within the certificate
+	// Secret, for Secrets populated by tooling (ESO, VSO) that does not
+	// follow the kubernetes.io/tls key convention. The {} default makes
+	// admission materialise the nested tls.crt/tls.key defaults even when
+	// secretKeys is omitted — kubebuilder nested defaults only apply
+	// inside objects that are present in the stored JSON.
+	// +kubebuilder:default={}
 	// +optional
 	SecretKeys CertificateSecretKeys `json:"secretKeys,omitempty"`
 }
@@ -240,30 +235,22 @@ type CertificateSecretKeys struct {
 	PrivateKey string `json:"privateKey,omitempty"`
 }
 
-// MonitoringSpec defines Prometheus monitoring configuration
+// MonitoringSpec defines Prometheus monitoring configuration. Scrape
+// interval (30s) and timeout (10s) are operator-owned per ADR 0003;
+// advanced scrape tuning belongs in Prometheus, not this CR.
 type MonitoringSpec struct {
 	// Enabled determines if monitoring resources are created
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
-
-	// ScrapeInterval for metrics collection (simplified from serviceMonitor.interval)
-	// +kubebuilder:default="30s"
-	ScrapeInterval string `json:"scrapeInterval,omitempty"`
-
-	// ScrapeTimeout for metric collection (simplified from serviceMonitor.scrapeTimeout)
-	// +kubebuilder:default="10s"
-	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
-
-	// AdditionalLabels to add to ServiceMonitor
-	// +optional
-	AdditionalLabels map[string]string `json:"additionalLabels,omitempty"`
 
 	// PrometheusRulesEnabled determines if PrometheusRule is created
 	// +kubebuilder:default=false
 	PrometheusRulesEnabled bool `json:"prometheusRulesEnabled,omitempty"`
 }
 
-// ServerSpec defines Nomad server configuration
+// ServerSpec defines Nomad server configuration. Autopilot tuning is
+// operator-owned per ADR 0003 (cleanup_dead_servers=true, 200ms last
+// contact, 250 trailing logs, 10s stabilization — Nomad's defaults).
 type ServerSpec struct {
 	// ACL configuration
 	// +optional
@@ -273,28 +260,17 @@ type ServerSpec struct {
 	// +optional
 	TLS TLSSpec `json:"tls,omitempty"`
 
-	// Autopilot configuration
-	// +optional
-	Autopilot AutopilotSpec `json:"autopilot,omitempty"`
-
 	// Audit logging configuration
 	// +optional
 	Audit AuditSpec `json:"audit,omitempty"`
-
-	// ExtraConfig is raw HCL to append to server configuration
-	// +optional
-	ExtraConfig string `json:"extraConfig,omitempty"`
 }
 
-// ACLSpec defines ACL configuration
+// ACLSpec defines ACL configuration. The bootstrap token Secret name is
+// operator-owned per ADR 0003: always `<cluster>-acl-bootstrap`.
 type ACLSpec struct {
 	// Enabled determines if ACLs are enabled (defaults to true for security)
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
-
-	// BootstrapSecretName is the secret to store bootstrap token (auto-created)
-	// +optional
-	BootstrapSecretName string `json:"bootstrapSecretName,omitempty"`
 }
 
 // TLSSpec defines TLS configuration for the Nomad cluster.
@@ -317,7 +293,13 @@ type CASpec struct {
 	// and private key. Expected keys: tls.crt (certificate), tls.key (private key).
 	SecretName string `json:"secretName"`
 
-	// SecretKeys allows overriding the key names within the CA secret.
+	// SecretKeys allows overriding the key names within the CA secret,
+	// for Secrets populated by tooling (ESO, VSO) that does not follow
+	// the kubernetes.io/tls key convention. The {} default makes
+	// admission materialise the nested tls.crt/tls.key defaults even when
+	// secretKeys is omitted — kubebuilder nested defaults only apply
+	// inside objects that are present in the stored JSON.
+	// +kubebuilder:default={}
 	// +optional
 	SecretKeys CASecretKeys `json:"secretKeys,omitempty"`
 }
@@ -333,51 +315,15 @@ type CASecretKeys struct {
 	PrivateKey string `json:"privateKey,omitempty"`
 }
 
-// AutopilotSpec defines Autopilot configuration
-type AutopilotSpec struct {
-	// CleanupDeadServers enables automatic removal of dead servers
-	// +kubebuilder:default=true
-	CleanupDeadServers bool `json:"cleanupDeadServers,omitempty"`
-
-	// LastContactThreshold before marking server unhealthy
-	// +kubebuilder:default="200ms"
-	LastContactThreshold string `json:"lastContactThreshold,omitempty"`
-
-	// MaxTrailingLogs before server is considered unhealthy
-	// +kubebuilder:default=250
-	MaxTrailingLogs int `json:"maxTrailingLogs,omitempty"`
-
-	// ServerStabilizationTime before becoming voter
-	// +kubebuilder:default="10s"
-	ServerStabilizationTime string `json:"serverStabilizationTime,omitempty"`
-}
-
-// AuditSpec defines audit logging configuration
+// AuditSpec defines audit logging configuration. Delivery guarantee
+// (enforced), format (json), and rotation (24h × 15 files) are
+// operator-owned per ADR 0003 — users needing different log shipping
+// should ship via sidecar, not rotation tuning.
 type AuditSpec struct {
 	// Enabled determines if audit logging is enabled.
 	// When enabled, an audit volume is automatically created.
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
-
-	// DeliveryGuarantee determines behavior when audit logging fails.
-	// "enforced" blocks requests if audit fails (recommended for production).
-	// "best-effort" allows requests even if audit fails (useful for development).
-	// +kubebuilder:validation:Enum=enforced;best-effort
-	// +kubebuilder:default="enforced"
-	DeliveryGuarantee string `json:"deliveryGuarantee,omitempty"`
-
-	// Format of audit logs (json or log)
-	// +kubebuilder:validation:Enum=json;log
-	// +kubebuilder:default="json"
-	Format string `json:"format,omitempty"`
-
-	// RotateDuration for log rotation
-	// +kubebuilder:default="24h"
-	RotateDuration string `json:"rotateDuration,omitempty"`
-
-	// RotateMaxFiles to retain
-	// +kubebuilder:default=15
-	RotateMaxFiles int `json:"rotateMaxFiles,omitempty"`
 
 	// Size of the audit volume (created automatically when audit is enabled)
 	// +kubebuilder:default="5Gi"
@@ -398,117 +344,24 @@ type PersistenceSpec struct {
 	// Set to empty string to disable persistence (use emptyDir).
 	// +kubebuilder:default="10Gi"
 	Size string `json:"size,omitempty"`
+
+	// ReclaimPolicy controls what happens to the data PVCs when the
+	// NomadCluster is deleted. Retain (the default) leaves the PVCs in
+	// place so Raft state survives accidental CR deletion and can be
+	// re-adopted by a recreated cluster of the same name; Delete removes
+	// them with the cluster. The value in effect at deletion time wins —
+	// earlier values are not remembered.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Retain
+	// +optional
+	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
 }
 
-// AffinitySpec defines pod affinity configuration
-type AffinitySpec struct {
-	// PodAntiAffinity configuration
-	// +optional
-	PodAntiAffinity PodAntiAffinitySpec `json:"podAntiAffinity,omitempty"`
-}
-
-// PodAntiAffinitySpec defines pod anti-affinity
-type PodAntiAffinitySpec struct {
-	// Enabled determines if pod anti-affinity is configured
-	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
-	// Type: preferred or required
-	// +kubebuilder:validation:Enum=preferred;required
-	// +kubebuilder:default="preferred"
-	Type string `json:"type,omitempty"`
-
-	// Weight for preferred anti-affinity (1-100)
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=100
-	Weight int32 `json:"weight,omitempty"`
-
-	// TopologyKey for anti-affinity
-	// +kubebuilder:default="kubernetes.io/hostname"
-	TopologyKey string `json:"topologyKey,omitempty"`
-}
-
-// OIDCSpec configures OIDC authentication for the Nomad cluster via Keycloak.
-// Requires the Keycloak operator to be installed in the same namespace and a
-// healthy Keycloak CR referenced by KeycloakRef.
-type OIDCSpec struct {
-	// Enabled controls whether OIDC authentication is configured.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// KeycloakRef references the Keycloak CR that the realm import targets.
-	// Must be in the same namespace as the NomadCluster.
-	KeycloakRef corev1.LocalObjectReference `json:"keycloakRef"`
-
-	// Realm is the name of the Keycloak realm to create. Defaults to the NomadCluster name.
-	// +optional
-	Realm string `json:"realm,omitempty"`
-
-	// DiscoveryCA references a Secret containing the CA certificate used to
-	// verify the Keycloak OIDC discovery endpoint. Required when the Keycloak
-	// hostname is served behind a TLS certificate not in the system trust store
-	// (e.g. OpenShift ingress with a private CA).
-	// +optional
-	DiscoveryCA *OIDCDiscoveryCASpec `json:"discoveryCA,omitempty"`
-
-	// BindingRules defines how Keycloak groups map to Nomad ACL roles.
-	// If empty, a default rule mapping the "nomad-admins" group to a
-	// management-equivalent role is created.
-	// +optional
-	BindingRules []OIDCBindingRule `json:"bindingRules,omitempty"`
-}
-
-// OIDCDiscoveryCASpec references a Secret containing the CA certificate for
-// OIDC discovery endpoint verification.
-type OIDCDiscoveryCASpec struct {
-	// SecretName is the name of the Secret containing the CA certificate.
-	SecretName string `json:"secretName"`
-
-	// SecretKey is the key within the Secret that holds the PEM-encoded CA certificate.
-	// +kubebuilder:default="tls.crt"
-	SecretKey string `json:"secretKey,omitempty"`
-}
-
-// RealmName returns the configured realm name, defaulting to the cluster name.
-func (o *OIDCSpec) RealmName(clusterName string) string {
-	if o.Realm != "" {
-		return o.Realm
-	}
-	return clusterName
-}
-
-// OIDCBindingRule maps a Keycloak group to a Nomad ACL role.
-type OIDCBindingRule struct {
-	// KeycloakGroup is the Keycloak group path, including leading slash (e.g. "/nomad-admins").
-	KeycloakGroup string `json:"keycloakGroup"`
-
-	// NomadRole is the name of the Nomad ACL role to bind to this group.
-	NomadRole string `json:"nomadRole"`
-
-	// PolicyRules is the HCL policy document granted to this role.
-	PolicyRules string `json:"policyRules"`
-}
-
-// OIDCStatus tracks the state of the OIDC integration.
-type OIDCStatus struct {
-	// RealmImportName is the name of the managed KeycloakRealmImport CR.
-	// +optional
-	RealmImportName string `json:"realmImportName,omitempty"`
-
-	// ClientSecretName is the name of the Secret containing the OIDC client secret.
-	// +optional
-	ClientSecretName string `json:"clientSecretName,omitempty"`
-
-	// AuthMethodName is the name of the Nomad ACL auth method created.
-	// +optional
-	AuthMethodName string `json:"authMethodName,omitempty"`
-
-	// Ready indicates that the realm import is complete and Nomad has been
-	// configured with the auth method, policies, roles, and binding rules.
-	// +optional
-	Ready bool `json:"ready,omitempty"`
-}
+// Valid spec.persistence.reclaimPolicy values.
+const (
+	ReclaimPolicyRetain = "Retain"
+	ReclaimPolicyDelete = "Delete"
+)
 
 // ClusterPhase represents the phase of the NomadCluster
 type ClusterPhase string
@@ -702,10 +555,6 @@ type NomadClusterStatus struct {
 	// CertificateAuthority contains information about the CA in use.
 	// +optional
 	CertificateAuthority *CertificateAuthorityStatus `json:"certificateAuthority,omitempty"`
-
-	// OIDC contains the observed state of the OIDC integration.
-	// +optional
-	OIDC OIDCStatus `json:"oidc,omitempty"`
 
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

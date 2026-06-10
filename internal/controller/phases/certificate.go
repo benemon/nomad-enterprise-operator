@@ -34,8 +34,6 @@ import (
 const (
 	certWarningWindow = tlspkg.CertWarningWindow
 	serverCertTTL     = tlspkg.ServerCertTTL
-	defaultTLSCertKey = "tls.crt"
-	defaultTLSKeyKey  = "tls.key"
 )
 
 // CertificatePhase ensures all TLS certificates exist, are valid, and are not
@@ -91,14 +89,12 @@ func (p *CertificatePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 func (p *CertificatePhase) loadUserCA(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (PhaseResult, *tlspkg.CABundle) {
 	caSpec := cluster.Spec.Server.TLS.CA
 
+	// Key names are guaranteed non-empty by kubebuilder defaulting
+	// (+kubebuilder:default={} on SecretKeys + nested field defaults).
+	// Overridable for ESO/VSO-populated Secrets that don't follow the
+	// kubernetes.io/tls key convention.
 	certKey := caSpec.SecretKeys.Certificate
-	if certKey == "" {
-		certKey = defaultTLSCertKey
-	}
 	keyKey := caSpec.SecretKeys.PrivateKey
-	if keyKey == "" {
-		keyKey = defaultTLSKeyKey
-	}
 
 	secret := &corev1.Secret{}
 	err := p.Client.Get(ctx, types.NamespacedName{
