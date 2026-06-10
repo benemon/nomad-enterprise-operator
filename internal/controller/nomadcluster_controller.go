@@ -122,6 +122,14 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	// Snapshot the cluster at the top of Reconcile so phase-internal
+	// status mutations (e.g. CertificatePhase.updateCAStatus) are captured
+	// in the final Status().Patch diff. Snapshotting only inside
+	// updateFinalStatus misses anything a phase wrote before it ran —
+	// previously caught silently because envtest happy-path didn't assert
+	// on phase-written status fields, exposed by e2e.
+	reconcileStartSnapshot := cluster.DeepCopy()
+
 	// Create phase context
 	phaseCtx := phases.NewPhaseContext(r.Client, r.Scheme, log, r.RESTConfig)
 	phaseCtx.Recorder = r.Recorder
@@ -172,7 +180,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// All phases completed successfully - update final status
-	if err := r.updateFinalStatus(ctx, cluster, phaseCtx); err != nil {
+	if err := r.updateFinalStatus(ctx, cluster, phaseCtx, reconcileStartSnapshot); err != nil {
 		log.Error(err, "Failed to update final status")
 		return ctrl.Result{}, err
 	}
@@ -343,16 +351,21 @@ func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Cont
 	return nil
 }
 
-func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, phaseCtx *phases.PhaseContext) error {
-	// Snapshot the full pre-mutation object for two purposes:
+func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, phaseCtx *phases.PhaseContext, reconcileStartSnapshot *nomadv1alpha1.NomadCluster) error {
+	// Use the top-of-Reconcile snapshot so phase-internal mutations
+	// (e.g. CertificatePhase.updateCAStatus) are captured in the patch
+	// diff alongside everything updateFinalStatus writes below.
+	//
+	// Two purposes:
 	//   (1) client.MergeFrom(patchBase) — the merge patch sent to the
-	//       server contains only the status fields we change here, so
-	//       concurrent reconciles or external mutations to other fields
-	//       do not race on resourceVersion (A3 / design review §5.5).
-	//   (2) The .Status sub-copy feeds AC-2.8.4's lastReconcileTime gate:
-	//       only advance the field when something other than itself
-	//       changed, or when the heartbeat threshold has elapsed.
-	patchBase := cluster.DeepCopy()
+	//       server contains only the status fields changed during this
+	//       reconcile, so concurrent reconciles or external mutations
+	//       to other fields do not race on resourceVersion
+	//       (A3 / design review §5.5).
+	//   (2) The .Status sub-copy feeds AC-2.8.4's lastReconcileTime
+	//       gate: only advance the field when something other than
+	//       itself changed, or when the heartbeat threshold has elapsed.
+	patchBase := reconcileStartSnapshot
 	statusSnapshot := &patchBase.Status
 
 	// Get StatefulSet status
