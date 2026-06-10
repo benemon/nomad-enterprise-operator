@@ -1,6 +1,14 @@
-# Mount the webhook TLS Secret and expose the webhook port on the manager
-# Deployment. The Secret is provisioned at startup by internal/webhook/bootstrap.go
+# Expose the webhook port and provide a writable cert dir on the manager
+# Deployment. The cert files are written by internal/webhook/bootstrap.go
 # (Tree 1 in the operator's two-cert-tree model) — no cert-manager required.
+#
+# An emptyDir (NOT a Secret mount) is intentional: the bootstrap is the
+# producer of the cert files. The Secret exists for cross-pod consistency
+# and rotation discovery, but the pod's local cert files are written by
+# the bootstrap into the writable dir. A read-only Secret mount would
+# (a) be empty on first install before the bootstrap creates the Secret,
+# and (b) prevent the bootstrap from seeding certwatcher synchronously.
+#
 # POD_NAMESPACE is already set in config/manager/manager.yaml.
 apiVersion: apps/v1
 kind: Deployment
@@ -19,9 +27,6 @@ spec:
           volumeMounts:
             - name: webhook-tls
               mountPath: /tmp/k8s-webhook-server/serving-certs
-              readOnly: true
       volumes:
         - name: webhook-tls
-          secret:
-            secretName: nomad-enterprise-operator-webhook-tls
-            optional: true
+          emptyDir: {}

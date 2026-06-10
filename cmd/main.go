@@ -125,6 +125,33 @@ func main() {
 	// Initial webhook TLS options
 	webhookTLSOpts := tlsOpts
 
+	// Webhook cert provisioning order is load-bearing: certwatcher.New below
+	// opens the cert files at startup, so the F3 bootstrap MUST ensure the
+	// Secret exists and the files are on disk first. The continuous rotation
+	// Runnable is registered with the manager further down and handles
+	// renewal once the cache is up.
+	webhookCfg := webhookbootstrap.Config{
+		Namespace: webhookbootstrap.NamespaceFromEnv(),
+		CertDir:   webhookCertPath,
+	}
+	if len(webhookCertPath) > 0 {
+		directCfg := ctrl.GetConfigOrDie()
+		directClient, err := client.New(directCfg, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create direct client for webhook bootstrap")
+			os.Exit(1)
+		}
+		webhookBootstrap := webhookbootstrap.NewBootstrap(directClient, webhookCfg)
+		if err := webhookBootstrap.EnsureSecret(context.Background()); err != nil {
+			setupLog.Error(err, "unable to ensure webhook TLS secret")
+			os.Exit(1)
+		}
+		if err := webhookBootstrap.WriteCertsToDir(context.Background()); err != nil {
+			setupLog.Error(err, "unable to write webhook certs to disk")
+			os.Exit(1)
+		}
+	}
+
 	if len(webhookCertPath) > 0 {
 		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
 			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
@@ -246,30 +273,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Provision the webhook TLS Secret BEFORE the manager starts so the
-	// webhook server has a cert to load. We use a direct client (not the
-	// cached one) because the manager's cache only starts inside mgr.Start.
-	webhookCfg := webhookbootstrap.Config{
-		Namespace: webhookbootstrap.NamespaceFromEnv(),
-		CertDir:   webhookCertPath,
-	}
-	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
-	if err != nil {
-		setupLog.Error(err, "unable to create direct client for webhook bootstrap")
-		os.Exit(1)
-	}
-	webhookBootstrap := webhookbootstrap.NewBootstrap(directClient, webhookCfg)
-	if err := webhookBootstrap.EnsureSecret(context.Background()); err != nil {
-		setupLog.Error(err, "unable to ensure webhook TLS secret")
-		os.Exit(1)
-	}
-	if err := webhookBootstrap.WriteCertsToDir(context.Background()); err != nil {
-		setupLog.Error(err, "unable to write webhook certs to disk")
-		os.Exit(1)
-	}
-
 	// Register the bootstrap as a continuous Runnable for rotation + caBundle
 	// upkeep. It uses the cached manager client and runs under leader election.
+	// The initial cert provisioning (EnsureSecret + WriteCertsToDir) ran
+	// above, before certwatcher.New, so the webhook server already has its
+	// files on disk by the time we reach here.
 	managedBootstrap := webhookbootstrap.NewBootstrap(mgr.GetClient(), webhookCfg)
 	if err := mgr.Add(managedBootstrap); err != nil {
 		setupLog.Error(err, "unable to register webhook bootstrap with manager")

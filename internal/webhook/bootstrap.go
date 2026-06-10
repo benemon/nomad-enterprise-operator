@@ -78,6 +78,13 @@ const (
 	// is applied.
 	DefaultValidatingWebhookName = "nomad-enterprise-operator-validating-webhook-configuration"
 
+	// DefaultMutatingWebhookName is the MutatingWebhookConfiguration the
+	// bootstrap also patches. kubebuilder's WithDefaulter() registers a
+	// mutating webhook alongside the validating one even if Default() is
+	// a no-op — both have to trust the same CA or the apiserver will
+	// reject create/update requests on TLS verification.
+	DefaultMutatingWebhookName = "nomad-enterprise-operator-mutating-webhook-configuration"
+
 	// DefaultNamespace is the fallback used when POD_NAMESPACE is unset
 	// (e.g. running locally). Matches config/default/kustomization.yaml's
 	// namespace.
@@ -105,9 +112,11 @@ const (
 var log = logf.Log.WithName("webhook-bootstrap")
 
 // RBAC for the bootstrap reconciler: it manages the operator's own webhook
-// TLS Secret and patches caBundle into the ValidatingWebhookConfiguration.
+// TLS Secret and patches caBundle into both the Validating and Mutating
+// WebhookConfigurations (kubebuilder's WithDefaulter registers both).
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations,verbs=get;list;watch;update;patch
 
 // Config configures the webhook TLS bootstrap.
 type Config struct {
@@ -115,11 +124,12 @@ type Config struct {
 	// a fallback to DefaultNamespace if NamespaceFromEnv is called.
 	Namespace string
 
-	// SecretName, ServiceName, ValidatingWebhookName, CertDir all default
-	// to their Default* counterparts if empty.
+	// SecretName, ServiceName, ValidatingWebhookName, MutatingWebhookName,
+	// CertDir all default to their Default* counterparts if empty.
 	SecretName            string
 	ServiceName           string
 	ValidatingWebhookName string
+	MutatingWebhookName   string
 	CertDir               string
 }
 
@@ -136,6 +146,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ValidatingWebhookName == "" {
 		c.ValidatingWebhookName = DefaultValidatingWebhookName
+	}
+	if c.MutatingWebhookName == "" {
+		c.MutatingWebhookName = DefaultMutatingWebhookName
 	}
 	if c.CertDir == "" {
 		c.CertDir = DefaultCertDir
@@ -348,12 +361,24 @@ func (b *Bootstrap) reissueLeaf(ctx context.Context, secret *corev1.Secret, dnsS
 	return nil
 }
 
-// patchCABundle updates clientConfig.caBundle on every webhook entry in the
-// ValidatingWebhookConfiguration. It is a no-op if the bundle already matches.
+// patchCABundle updates clientConfig.caBundle on every webhook entry in
+// both the Validating and Mutating WebhookConfigurations. It is a no-op
+// if the bundle already matches. kubebuilder's WithDefaulter scaffolds a
+// mutating webhook alongside the validating one, even when Default() is
+// a no-op — both must trust the same CA or the apiserver rejects
+// create/update with "x509: certificate signed by unknown authority".
 func (b *Bootstrap) patchCABundle(ctx context.Context, caBundle []byte) error {
 	if len(caBundle) == 0 {
 		return fmt.Errorf("refusing to patch empty caBundle")
 	}
+
+	if err := b.patchValidatingCABundle(ctx, caBundle); err != nil {
+		return err
+	}
+	return b.patchMutatingCABundle(ctx, caBundle)
+}
+
+func (b *Bootstrap) patchValidatingCABundle(ctx context.Context, caBundle []byte) error {
 	vwc := &admissionregistrationv1.ValidatingWebhookConfiguration{}
 	if err := b.Client.Get(ctx, types.NamespacedName{Name: b.Config.ValidatingWebhookName}, vwc); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -379,6 +404,33 @@ func (b *Bootstrap) patchCABundle(ctx context.Context, caBundle []byte) error {
 	log.Info("patching ValidatingWebhookConfiguration caBundle", "name", b.Config.ValidatingWebhookName)
 	if err := b.Client.Update(ctx, vwc); err != nil {
 		return fmt.Errorf("failed to update ValidatingWebhookConfiguration: %w", err)
+	}
+	return nil
+}
+
+func (b *Bootstrap) patchMutatingCABundle(ctx context.Context, caBundle []byte) error {
+	mwc := &admissionregistrationv1.MutatingWebhookConfiguration{}
+	if err := b.Client.Get(ctx, types.NamespacedName{Name: b.Config.MutatingWebhookName}, mwc); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.V(1).Info("MutatingWebhookConfiguration not found, skipping caBundle patch", "name", b.Config.MutatingWebhookName)
+			return nil
+		}
+		return fmt.Errorf("failed to get MutatingWebhookConfiguration: %w", err)
+	}
+
+	changed := false
+	for i := range mwc.Webhooks {
+		if !equalBytes(mwc.Webhooks[i].ClientConfig.CABundle, caBundle) {
+			mwc.Webhooks[i].ClientConfig.CABundle = caBundle
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	log.Info("patching MutatingWebhookConfiguration caBundle", "name", b.Config.MutatingWebhookName)
+	if err := b.Client.Update(ctx, mwc); err != nil {
+		return fmt.Errorf("failed to update MutatingWebhookConfiguration: %w", err)
 	}
 	return nil
 }
