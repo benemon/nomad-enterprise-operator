@@ -24,6 +24,7 @@ import (
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -108,12 +109,21 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 				return Error(err, "Failed to clear status.scaleDown")
 			}
 		}
+		// D2e (neo-1ve.5): no operation in flight.
+		metrics.ScaleDownInProgress.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
 		return OK()
 	}
 
 	// Gap > 0 — we owe the user a scale-down.
 	gap := currentReplicas - desiredReplicas
 	p.Log.Info("ScaleDown: gap detected", "from", currentReplicas, "to", desiredReplicas, "gap", gap)
+
+	// D2e (neo-1ve.5): operation in flight. Set unconditionally on
+	// every gap-detected reconcile so an operator pod restart inherits
+	// the correct gauge value on its first reconcile (the in-process
+	// metric is lost on restart; status.scaleDown is the durable
+	// source of truth).
+	metrics.ScaleDownInProgress.WithLabelValues(cluster.Name, cluster.Namespace).Set(1)
 
 	token, err := p.getManagementToken(ctx, cluster)
 	if err != nil {
@@ -256,6 +266,8 @@ func (p *ScaleDownPhase) finalize(
 			return Error(err, "Failed to clear status.scaleDown at completion")
 		}
 	}
+	// D2e (neo-1ve.5): operation complete.
+	metrics.ScaleDownInProgress.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
 	return OK()
 }
 

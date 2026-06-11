@@ -22,8 +22,10 @@ import (
 	"testing"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
+	prometheustestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -506,6 +508,92 @@ func TestScaleDown_MidOpLeaderLossPausesSilently(t *testing.T) {
 		got.Status.ScaleDown.RemovedPeers[0] != idForOrdinal(4) {
 		t.Errorf("status.scaleDown should be preserved across silent pause, got %+v",
 			got.Status.ScaleDown)
+	}
+}
+
+// TestScaleDown_MetricLifecycle covers AC-8.1.6 (D2e / neo-1ve.5):
+// the nomad_operator_scale_down_in_progress gauge tracks the cluster's
+// scale-down state across the operation lifecycle. Set to 1 when a
+// gap exists (so operator restart inherits the right value on first
+// reconcile), set to 0 when the gap closes or finalisation clears
+// status.scaleDown.
+func TestScaleDown_MetricLifecycle(t *testing.T) {
+	// Unique namespace keeps the gauge's label set isolated from
+	// other tests (cluster name stays "nomad" so the synthetic peers
+	// from peersAtReplicas — which use "nomad-N" — map to the right
+	// ordinals).
+	cluster := newTestCluster("nomad", "metric-ns")
+	cluster.Spec.Replicas = 3
+	cluster.Spec.Server.ACL.Enabled = false
+
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "metric-ns"},
+		Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(int32(5))},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithRuntimeObjects(cluster, sts).
+		WithStatusSubresource(cluster).
+		Build()
+
+	mockNomad := mocks.NewMockNomadAPI(t)
+	phaseCtx := &PhaseContext{
+		Client: fakeClient,
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+		NomadClientFactory: func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+			return mockNomad, nil
+		},
+	}
+	phase := NewScaleDownPhase(phaseCtx)
+
+	gaugeFor := func() float64 {
+		return prometheustestutil.ToFloat64(
+			metrics.ScaleDownInProgress.WithLabelValues("nomad", "metric-ns"))
+	}
+
+	// Baseline: no scale-down ever observed for this label set → 0.
+	// (The package init() seeds the empty-label set, not per-cluster.)
+	if got := gaugeFor(); got != 0 {
+		t.Fatalf("baseline gauge = %v, want 0", got)
+	}
+
+	// Cycle 1: 5 -> 3, leader present, one peer removed. After this
+	// reconcile, gap is 1 (still scaling), gauge should be 1.
+	mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
+	mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(5), nil).Once()
+	mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(4)).Return(nil).Once()
+	mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(4), nil).Once()
+
+	if res := phase.Execute(context.Background(), cluster); res.Error != nil {
+		t.Fatalf("cycle 1 error = %v", res.Error)
+	}
+	if got := gaugeFor(); got != 1 {
+		t.Errorf("after cycle 1 gauge = %v, want 1 (operation in flight)", got)
+	}
+
+	// Cycle 2: peer 3 removed → gap closed → finalise → gauge → 0.
+	updated := &nomadv1alpha1.NomadCluster{}
+	if err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: "nomad", Namespace: "metric-ns"}, updated); err != nil {
+		t.Fatalf("Get(cluster) error = %v", err)
+	}
+	peersAfterFirst := []*nomad.RaftPeer{
+		{ID: idForOrdinal(0), Node: nodeForOrdinal(0), Address: "10.0.0.1:4647"},
+		{ID: idForOrdinal(1), Node: nodeForOrdinal(1), Address: "10.0.0.1:4647"},
+		{ID: idForOrdinal(2), Node: nodeForOrdinal(2), Address: "10.0.0.1:4647"},
+		{ID: idForOrdinal(3), Node: nodeForOrdinal(3), Address: "10.0.0.1:4647"},
+	}
+	mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAfterFirst, nil).Once()
+	mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(3)).Return(nil).Once()
+	mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(3), nil).Once()
+
+	if res := phase.Execute(context.Background(), updated); res.Error != nil {
+		t.Fatalf("cycle 2 error = %v", res.Error)
+	}
+	if got := gaugeFor(); got != 0 {
+		t.Errorf("after finalisation gauge = %v, want 0 (operation complete)", got)
 	}
 }
 
