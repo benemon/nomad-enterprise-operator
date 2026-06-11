@@ -332,11 +332,19 @@ spec:
 ACLs are enabled by default (`server.acl.enabled: true`). When the StatefulSet becomes ready, the operator:
 
 1. Bootstraps the Nomad ACL system and stores the bootstrap token in the `<cluster>-acl-bootstrap` Secret.
-2. Creates a dedicated least-privilege ACL policy with `operator:read` capabilities.
+2. Creates a dedicated least-privilege ACL policy with `operator:read` and `agent:read` capabilities (the latter for the agent-version probe).
 3. Creates a token bound to that policy and stores it in the `<cluster>-operator-status` Secret.
 4. Uses the operator status token (not the bootstrap token) for all subsequent Nomad API queries (autopilot health, license status, leader election).
 
 On cluster deletion, the operator revokes the operator status token and deletes the associated ACL policy from Nomad before removing Kubernetes resources.
+
+## Pod Disruption Budget
+
+For HA clusters (`spec.replicas ≥ 3`) the operator owns a `policy/v1` PodDisruptionBudget named after the cluster, with `maxUnavailable = replicas/2` (integer division: 1 for `N=3`, 2 for `N=5`). This bounds voluntary disruptions — node drains, upgrades, and rolling rollouts — so a Raft quorum is always preserved.
+
+For single-instance clusters (`spec.replicas = 1`) no PDB is created. Single-instance clusters are not HA, and a PDB with `maxUnavailable: 0` would block all voluntary disruption (preventing routine node maintenance) without providing any quorum benefit.
+
+The PDB is operator-owned with no spec field; scaling from `N=3` to `N=5` updates `maxUnavailable` in place, and scaling down to `N=1` deletes the PDB. Out-of-band PDB deletions are recreated on the next reconcile.
 
 ## OIDC Authentication
 
@@ -566,10 +574,11 @@ The NomadCluster controller reconciles through a sequential phase pipeline:
 7. **Secrets** — assembles the Nomad configuration secrets
 8. **ConfigMap** — renders the Nomad HCL server configuration
 9. **StatefulSet** — creates or updates the Nomad server StatefulSet
-10. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
-11. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
-12. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
-13. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
+10. **PDB** — creates or updates the PodDisruptionBudget for `spec.replicas ≥ 3` (skipped for `replicas = 1`)
+11. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
+12. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
+13. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
+14. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
 
 ## Development
 
