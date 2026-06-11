@@ -98,6 +98,11 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 
+.PHONY: generate-schema-snapshots
+generate-schema-snapshots: manifests ## Refresh test/schema-snapshots/ from rendered CRDs (F2b drift baseline).
+	@mkdir -p test/schema-snapshots
+	cp config/crd/bases/*.yaml test/schema-snapshots/
+
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
