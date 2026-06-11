@@ -587,6 +587,31 @@ type NomadClusterStatus struct {
 	// one-shot Events.
 	// +optional
 	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
+
+	// ScaleDown tracks an in-flight Raft scale-down operation
+	// (D2 / neo-1ve). Non-nil while peers are being removed from
+	// the Raft quorum; cleared to nil when the operation completes
+	// (i.e., the StatefulSet's replica count matches spec.replicas).
+	// Used by the resume path so a crashed operator never re-removes
+	// a peer (AC-2.3.7), by the admission gate that blocks concurrent
+	// spec.replicas edits during scale-down (AC-2.3.5a), and by the
+	// scale-down-in-progress metric (D2e).
+	// +optional
+	ScaleDown *ScaleDownStatus `json:"scaleDown,omitempty"`
+}
+
+// ScaleDownStatus tracks the in-flight Raft scale-down operation.
+// Owned by D2 (neo-1ve); the status field is established here in D2a
+// so D2b's reconcile loop and D2c's admission rule can both depend
+// on a stable shape.
+type ScaleDownStatus struct {
+	// RemovedPeers is the list of Raft server IDs (as returned by
+	// the autopilot API) the operator has already removed during the
+	// current operation. The reconcile loop appends one ID per
+	// successful RaftRemovePeer call and never re-removes an entry
+	// in this list across operator restarts.
+	// +optional
+	RemovedPeers []string `json:"removedPeers,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -595,6 +620,7 @@ type NomadClusterStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas"
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Advertise",type="string",JSONPath=".status.advertiseAddress"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 

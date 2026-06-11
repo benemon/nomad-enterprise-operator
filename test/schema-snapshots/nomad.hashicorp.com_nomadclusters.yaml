@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.replicas
       name: Desired
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
     - jsonPath: .status.advertiseAddress
       name: Advertise
       type: string
@@ -891,6 +894,28 @@ spec:
               routeHost:
                 description: RouteHost is the assigned Route hostname
                 type: string
+              scaleDown:
+                description: |-
+                  ScaleDown tracks an in-flight Raft scale-down operation
+                  (D2 / neo-1ve). Non-nil while peers are being removed from
+                  the Raft quorum; cleared to nil when the operation completes
+                  (i.e., the StatefulSet's replica count matches spec.replicas).
+                  Used by the resume path so a crashed operator never re-removes
+                  a peer (AC-2.3.7), by the admission gate that blocks concurrent
+                  spec.replicas edits during scale-down (AC-2.3.5a), and by the
+                  scale-down-in-progress metric (D2e).
+                properties:
+                  removedPeers:
+                    description: |-
+                      RemovedPeers is the list of Raft server IDs (as returned by
+                      the autopilot API) the operator has already removed during the
+                      current operation. The reconcile loop appends one ID per
+                      successful RaftRemovePeer call and never re-removes an entry
+                      in this list across operator restarts.
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
         type: object
     served: true
