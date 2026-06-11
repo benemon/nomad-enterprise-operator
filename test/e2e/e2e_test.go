@@ -348,6 +348,25 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(metricsOutput).To(ContainSubstring(
 				"controller_runtime_reconcile_total",
 			))
+
+			By("verifying domain-specific operator metrics are registered (F4 / neo-76n)")
+			// AC-F4.3: each nomad_operator_* family must emit HELP/TYPE on
+			// /metrics from startup, seeded by the empty-label children in
+			// internal/metrics/metrics.go init(). Live scrape against a
+			// real apiserver catches registration regressions that envtest
+			// can't (envtest doesn't run the metrics server).
+			for _, metricName := range []string{
+				"nomad_operator_phase_duration_seconds",
+				"nomad_operator_nomad_api_requests_total",
+				"nomad_operator_cert_expiry_timestamp_seconds",
+				"nomad_operator_license_expiry_timestamp_seconds",
+				"nomad_operator_acl_bootstrap_failures_total",
+				"nomad_operator_scale_down_in_progress",
+				"nomad_operator_nomad_version_info",
+			} {
+				Expect(metricsOutput).To(ContainSubstring(metricName),
+					"expected metric %q to appear in /metrics scrape output", metricName)
+			}
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
@@ -809,6 +828,34 @@ var _ = Describe("Manager", Ordered, func() {
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("1"), "currentReplicas should be 1")
+
+			By("verifying InitialReconcileComplete Event was emitted (F5 / neo-76n)")
+			// AC-F5.1: one-shot Event when the cluster first becomes
+			// Ready=True. The status flag is the debounce; both must be
+			// asserted to prove the wiring (flag set + Event landed).
+			// EventRecorder behaviour against a real apiserver is the part
+			// envtest can't exercise — its FakeRecorder is a different
+			// code path that doesn't reach the events API.
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.initialReconcileEventEmitted}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true"),
+					"initialReconcileEventEmitted should be true once Ready=True")
+			}).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "events", "-n", namespace,
+					"--field-selector",
+					fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=NomadCluster,reason=Reconciled",
+						testClusterName),
+					"-o", "jsonpath={.items[*].message}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("InitialReconcileComplete"),
+					"expected an InitialReconcileComplete Event on the cluster")
+			}).Should(Succeed())
 		})
 
 		It("should set the finalizer", func() {
@@ -1392,6 +1439,131 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("user-provided"))
 			}).Should(Succeed())
+		})
+	})
+
+	// B4 / neo-76n: openshift.enabled=true on a cluster without Route CRDs
+	// must emit a RouteCRDMissing Warning Event and skip Route creation
+	// instead of erroring. Kind has no Route CRDs installed, so this
+	// scenario falls out naturally. Envtest covers the helper
+	// (TestRouteDiscoveryGated); e2e is here to prove the integration:
+	// real REST mapper + real Event emission.
+	Context("NomadCluster with openshift.enabled on a non-OpenShift cluster", Ordered, func() {
+		const openshiftClusterName = "openshift-test"
+		openshiftClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: LoadBalancer
+      loadBalancerIP: "10.0.0.3"
+  openshift:
+    enabled: true
+    route:
+      enabled: true
+`, openshiftClusterName, namespace)
+
+		BeforeAll(func() {
+			By("applying the openshift-enabled NomadCluster CR")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(openshiftClusterCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply openshift-enabled NomadCluster CR")
+		})
+
+		AfterAll(func() {
+			By("deleting the openshift-enabled NomadCluster CR")
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", openshiftClusterName,
+				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should emit a RouteCRDMissing Warning Event and skip Route creation", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "events", "-n", namespace,
+					"--field-selector",
+					fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=NomadCluster,reason=RouteCRDMissing",
+						openshiftClusterName),
+					"-o", "jsonpath={.items[*].type}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("Warning"),
+					"expected a Warning RouteCRDMissing Event on the cluster")
+			}, 3*time.Minute).Should(Succeed())
+		})
+	})
+
+	// C1 / neo-76n: spec.persistence.reclaimPolicy=Delete must actually
+	// remove the data PVC when the cluster is deleted. Envtest's
+	// reclaimpolicy_test.go covers the controller's Delete call; e2e is
+	// here to prove the kubelet + KCM finalizer chain actually releases
+	// the PVC under a real apiserver. Audit and ACL are disabled to keep
+	// the cluster cheap — we only need the StatefulSet far enough along
+	// to provision the data PVC.
+	Context("NomadCluster with reclaimPolicy=Delete", Ordered, func() {
+		const reclaimClusterName = "reclaim-test"
+		reclaimClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "1.11-ent"
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: LoadBalancer
+      loadBalancerIP: "10.0.0.4"
+  persistence:
+    reclaimPolicy: Delete
+`, reclaimClusterName, namespace)
+		pvcName := "data-" + reclaimClusterName + "-0"
+
+		BeforeAll(func() {
+			By("applying the reclaimPolicy=Delete NomadCluster CR")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(reclaimClusterCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply reclaim-test NomadCluster CR")
+		})
+
+		It("should provision the data PVC then remove it on cluster delete", func() {
+			By("waiting for the data PVC to be provisioned by the StatefulSet")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
+					"-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(pvcName))
+			}, 5*time.Minute).Should(Succeed())
+
+			By("deleting the NomadCluster CR to trigger the finalizer's reclaim path")
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", reclaimClusterName,
+				"-n", namespace, "--wait=true", "--timeout=3m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "NomadCluster delete should complete within timeout")
+
+			By("verifying the data PVC has been deleted")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
+					"--ignore-not-found", "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(BeEmpty(), "PVC %q should be deleted with reclaimPolicy=Delete", pvcName)
+			}, 2*time.Minute).Should(Succeed())
 		})
 	})
 })
