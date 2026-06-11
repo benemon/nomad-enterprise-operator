@@ -293,7 +293,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	}
 
 	// Create the policy (upsert, idempotent)
-	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read)", nomad.OperatorStatusPolicyRules)
+	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read, agent:read)", nomad.OperatorStatusPolicyRules)
 	if err != nil && nomad.IsNetworkError(err) {
 		loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 		if loadBalancerAddress != "" {
@@ -302,7 +302,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 			if err != nil {
 				return Error(err, "Failed to create Nomad client for LoadBalancer")
 			}
-			err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read)", nomad.OperatorStatusPolicyRules)
+			err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read, agent:read)", nomad.OperatorStatusPolicyRules)
 		}
 	}
 	if err != nil {

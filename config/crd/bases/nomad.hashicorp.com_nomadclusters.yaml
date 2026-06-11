@@ -852,6 +852,14 @@ spec:
                 required:
                 - valid
                 type: object
+              nomadVersion:
+                description: |-
+                  NomadVersion is the agent version reported by /v1/agent/self
+                  (e.g. "1.11.0+ent"). Probed each reconcile while at least one
+                  pod is Ready; empty if the probe failed or has not yet run.
+                  The version probe is non-fatal — failure does not gate other
+                  status enrichment (C7 / AC-4.7.2).
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the last observed generation
                 format: int64

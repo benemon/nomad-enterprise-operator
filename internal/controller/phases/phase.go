@@ -135,6 +135,11 @@ type PhaseContext struct {
 	// AutopilotError contains any error from fetching autopilot info.
 	AutopilotError error
 
+	// NomadVersion is the agent-reported version from /v1/agent/self
+	// (populated by ClusterStatusPhase via C7 probe). Empty when the
+	// probe failed or has not yet run.
+	NomadVersion string
+
 	// CACert is the PEM-encoded CA certificate, populated by CertificatePhase.
 	// Used by RoutePhase for destinationCACertificate and by BuildClientConfig.
 	CACert []byte

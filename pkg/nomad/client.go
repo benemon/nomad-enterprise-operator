@@ -289,6 +289,42 @@ func (c *Client) GetLicense(ctx context.Context, token string) (*LicenseResult, 
 	}, nil
 }
 
+// AgentSelf queries /v1/agent/self for the Nomad agent's reported
+// version. Requires the client's configured token (SecretID) to hold
+// `agent:read` capability — see OperatorStatusPolicyRules.
+//
+// The Nomad SDK call (Agent().Self()) does not accept QueryOptions, so
+// the token cannot be overridden per-call here as it can for license
+// and autopilot probes.
+func (c *Client) AgentSelf(_ context.Context) (*AgentSelfResult, error) {
+	self, err := c.api.Agent().Self()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query agent self: %w", err)
+	}
+	if self == nil {
+		return nil, fmt.Errorf("agent self response was empty")
+	}
+	return &AgentSelfResult{Version: extractNomadVersion(self)}, nil
+}
+
+// extractNomadVersion pulls the agent version from the AgentSelf
+// response, trying the two well-known locations in the wire format:
+// `stats.nomad.version` (the values surfaced by the Nomad UI status
+// banner) and `member.tags.build` (the serf gossip tag). Returns "" if
+// neither is present; callers treat empty as a probe miss, not an
+// error, per AC-4.7.2.
+func extractNomadVersion(self *nomadapi.AgentSelf) string {
+	if nomadStats, ok := self.Stats["nomad"]; ok {
+		if v := nomadStats["version"]; v != "" {
+			return v
+		}
+	}
+	if v := self.Member.Tags["build"]; v != "" {
+		return v
+	}
+	return ""
+}
+
 // GetAutopilotHealth retrieves the Raft autopilot health information.
 // Requires an ACL token with operator:read capability.
 func (c *Client) GetAutopilotHealth(ctx context.Context, token string) (*AutopilotHealthResult, error) {
@@ -361,6 +397,14 @@ type LicenseResult struct {
 	Features        []string
 }
 
+// AgentSelfResult holds the fields the operator currently extracts from
+// /v1/agent/self. Only Version is populated for C7; the struct shape
+// matches the sibling result types so future agent fields can be added
+// without changing call-site signatures.
+type AgentSelfResult struct {
+	Version string
+}
+
 // AutopilotHealthResult contains Raft autopilot health information.
 type AutopilotHealthResult struct {
 	Healthy          bool
@@ -382,13 +426,22 @@ type AutopilotServer struct {
 }
 
 // OperatorStatusPolicyRules defines the minimal permissions required by the
-// operator for day-2 status API calls (autopilot health, license, leader).
-// operator:read covers all three endpoints used by ClusterStatusPhase.
-// /v1/status/leader requires no token at all; the others require operator:read.
-// No agent rule is needed. The bootstrap token is not used after initial ACL
-// bootstrap completes.
+// operator for day-2 status API calls (autopilot health, license, leader,
+// and the C7 agent-self version probe). operator:read covers autopilot,
+// license, and CheckHealth; /v1/status/leader needs no token; agent:read
+// is the new addition required by /v1/agent/self.
+//
+// Adding to this constant changes the policy on freshly bootstrapped
+// clusters only — clusters already past ACL bootstrap retain the old
+// policy because the bootstrap phase short-circuits when the
+// operator-status token already exists. Policy refresh on existing
+// clusters is a separate concern (file an issue if a use case appears).
 const OperatorStatusPolicyRules = `
 operator {
+  policy = "read"
+}
+
+agent {
   policy = "read"
 }
 `

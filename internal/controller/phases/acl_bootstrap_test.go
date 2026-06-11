@@ -58,7 +58,7 @@ func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 		CreateACLPolicy(
 			"test-bootstrap-token",
 			testOperatorStatusName,
-			"Operator day-2 status API access (operator:read)",
+			"Operator day-2 status API access (operator:read, agent:read)",
 			nomad.OperatorStatusPolicyRules,
 		).
 		Return(nil).

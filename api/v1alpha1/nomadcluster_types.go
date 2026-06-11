@@ -544,6 +544,14 @@ type NomadClusterStatus struct {
 	// +optional
 	RouteHost string `json:"routeHost,omitempty"`
 
+	// NomadVersion is the agent version reported by /v1/agent/self
+	// (e.g. "1.11.0+ent"). Probed each reconcile while at least one
+	// pod is Ready; empty if the probe failed or has not yet run.
+	// The version probe is non-fatal — failure does not gate other
+	// status enrichment (C7 / AC-4.7.2).
+	// +optional
+	NomadVersion string `json:"nomadVersion,omitempty"`
+
 	// License contains Nomad Enterprise license information
 	// +optional
 	License *LicenseStatus `json:"license,omitempty"`

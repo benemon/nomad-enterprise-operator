@@ -22,6 +22,64 @@ func (_m *MockNomadAPI) EXPECT() *MockNomadAPI_Expecter {
 	return &MockNomadAPI_Expecter{mock: &_m.Mock}
 }
 
+// AgentSelf provides a mock function with given fields: ctx
+func (_m *MockNomadAPI) AgentSelf(ctx context.Context) (*nomad.AgentSelfResult, error) {
+	ret := _m.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AgentSelf")
+	}
+
+	var r0 *nomad.AgentSelfResult
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context) (*nomad.AgentSelfResult, error)); ok {
+		return rf(ctx)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context) *nomad.AgentSelfResult); ok {
+		r0 = rf(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*nomad.AgentSelfResult)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = rf(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockNomadAPI_AgentSelf_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AgentSelf'
+type MockNomadAPI_AgentSelf_Call struct {
+	*mock.Call
+}
+
+// AgentSelf is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockNomadAPI_Expecter) AgentSelf(ctx interface{}) *MockNomadAPI_AgentSelf_Call {
+	return &MockNomadAPI_AgentSelf_Call{Call: _e.mock.On("AgentSelf", ctx)}
+}
+
+func (_c *MockNomadAPI_AgentSelf_Call) Run(run func(ctx context.Context)) *MockNomadAPI_AgentSelf_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context))
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_AgentSelf_Call) Return(_a0 *nomad.AgentSelfResult, _a1 error) *MockNomadAPI_AgentSelf_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockNomadAPI_AgentSelf_Call) RunAndReturn(run func(context.Context) (*nomad.AgentSelfResult, error)) *MockNomadAPI_AgentSelf_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // BootstrapACL provides a mock function with no fields
 func (_m *MockNomadAPI) BootstrapACL() (*nomad.ACLBootstrapResult, error) {
 	ret := _m.Called()

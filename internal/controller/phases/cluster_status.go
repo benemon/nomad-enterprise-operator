@@ -106,6 +106,18 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 		p.Log.V(1).Info("Got license info", "licenseId", license.LicenseID, "expiration", license.ExpirationTime)
 	}
 
+	// Get agent-reported Nomad version (C7 / AC-4.7.1). Non-fatal per
+	// AC-4.7.2 — failure is logged at V(1) and the field stays empty;
+	// downstream consumers (D4d's NomadVersionInfo gauge) treat empty
+	// as "version not yet observed".
+	self, err := nomadClient.AgentSelf(ctx)
+	if err != nil {
+		p.Log.V(1).Info("Failed to get agent self info", "error", err)
+	} else if self.Version != "" {
+		p.NomadVersion = self.Version
+		p.Log.V(1).Info("Got Nomad version", "version", self.Version)
+	}
+
 	// Get autopilot health information
 	autopilot, err := nomadClient.GetAutopilotHealth(ctx, aclToken)
 	if err != nil {

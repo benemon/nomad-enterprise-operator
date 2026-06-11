@@ -40,6 +40,12 @@ type NomadAPI interface {
 	CheckHealth() (*HealthResult, error)
 	GetLicense(ctx context.Context, token string) (*LicenseResult, error)
 	GetAutopilotHealth(ctx context.Context, token string) (*AutopilotHealthResult, error)
+	// AgentSelf queries /v1/agent/self for agent-reported runtime info
+	// (currently just the Nomad version). The SDK call does not accept
+	// per-request QueryOptions, so the auth token is taken from the
+	// client's configured SecretID; callers must construct the client
+	// with a token holding `agent:read` capability (C7 / AC-4.7.1).
+	AgentSelf(ctx context.Context) (*AgentSelfResult, error)
 }
 
 // Compile-time assertion that *Client satisfies NomadAPI.

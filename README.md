@@ -504,6 +504,7 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.certificateAuthority.source` | `operator-generated` or `user-provided` |
 | `status.certificateAuthority.expiryTime` | CA certificate expiry |
 | `status.certificateAuthority.subject` | CA certificate subject DN |
+| `status.nomadVersion` | Nomad agent version observed via `/v1/agent/self` (e.g. `1.11.0+ent`); empty until the first successful probe |
 | `status.license.valid` | Whether the Nomad license is valid |
 | `status.license.expirationTime` | License expiry time |
 | `status.license.features` | Licensed features |

@@ -448,6 +448,13 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 		cluster.Status.LeaderAddress = phaseCtx.LeaderAddress
 	}
 
+	// Update Nomad version from phase context (populated by C7 probe).
+	// Guarded on non-empty so a probe miss after a previous success
+	// preserves the last-known version rather than clobbering it.
+	if phaseCtx.NomadVersion != "" {
+		cluster.Status.NomadVersion = phaseCtx.NomadVersion
+	}
+
 	// Determine cluster phase and overall Ready condition
 	if cluster.Status.ReadyReplicas == cluster.Spec.Replicas && cluster.Status.ReadyReplicas > 0 {
 		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseRunning
