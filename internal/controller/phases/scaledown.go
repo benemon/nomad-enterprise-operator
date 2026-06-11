@@ -137,18 +137,32 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		return OK()
 	}
 
-	// AC-2.3.8 (pre-start, D2d / neo-1ve.4): when no scale-down is yet in
-	// flight, verify a Raft leader exists BEFORE initialising
-	// status.scaleDown. Without a leader, RaftRemovePeer would fail and
-	// the operation can't begin — surface that clearly via the Ready
-	// condition rather than silently spinning on retries.
+	// Pre-start gates: leader available, and (if scaling below 3) the
+	// user has opted in to degraded quorum via annotation. Both are
+	// only checked once per operation, before status.scaleDown is
+	// initialised; the gates surface via the Ready condition so the
+	// user sees what is blocking progress.
 	if cluster.Status.ScaleDown == nil {
+		// AC-2.3.8 (D2d / neo-1ve.4): leader probe.
 		leader, lerr := nomadClient.GetLeader()
 		if lerr != nil || leader == "" {
 			p.Log.Info("ScaleDown: blocked — no Raft leader; deferring",
 				"leader", leader, "error", lerr)
 			return RequeueWithReason(15*time.Second, "ScaleDownBlocked",
 				"Scale-down blocked: no Raft leader available")
+		}
+
+		// AC-2.3.5 / 2.3.6 (D2c / neo-1ve.3): degraded-quorum opt-in.
+		// Required when transitioning from >= 3 down to < 3 (clusters
+		// already below the floor are exempt — same shape the design
+		// doc's CEL rule had). Enforced operator-side because CRD CEL
+		// on K8s 1.36 cannot access metadata.annotations.
+		if desiredReplicas < 3 && currentReplicas >= 3 && !hasAcceptDegradedQuorumAnnotation(cluster) {
+			p.Log.Info("ScaleDown: blocked — degraded-quorum opt-in missing; deferring",
+				"target", desiredReplicas, "annotation", acceptDegradedQuorumAnnotation)
+			return RequeueWithReason(15*time.Second, "DegradedQuorumNotAccepted",
+				"Scale-down below 3 replicas requires annotation "+
+					acceptDegradedQuorumAnnotation+"=true")
 		}
 
 		patchBase := cluster.DeepCopy()
@@ -377,6 +391,18 @@ func (p *ScaleDownPhase) newNomadClientForScaleDown(
 // Rejected: empty, "(unknown)" (Nomad's not-yet-set sentinel), names
 // whose prefix does not match the cluster, names with a non-integer
 // ordinal segment.
+// acceptDegradedQuorumAnnotation is the opt-in signal users set on
+// the NomadCluster CR to authorise a scale-down below the 3-replica
+// quorum floor (AC-2.3.5 / 2.3.6). Enforced by ScaleDownPhase because
+// CRD CEL on K8s 1.36 cannot access metadata.annotations.
+const acceptDegradedQuorumAnnotation = "nomad.hashicorp.com/accept-degraded-quorum"
+
+// hasAcceptDegradedQuorumAnnotation returns true when the user has
+// set the degraded-quorum opt-in annotation to "true" on the cluster.
+func hasAcceptDegradedQuorumAnnotation(cluster *nomadv1alpha1.NomadCluster) bool {
+	return cluster.Annotations[acceptDegradedQuorumAnnotation] == "true"
+}
+
 // isNoLeaderError reports whether err names a transient
 // "no Raft leader" condition rather than a real failure. Nomad and
 // the SDK surface this as several distinct strings depending on which

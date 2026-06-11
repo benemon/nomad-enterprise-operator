@@ -623,6 +623,22 @@ type ScaleDownStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Advertise",type="string",JSONPath=".status.advertiseAddress"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// AC-2.3.5a (D2c / neo-1ve.3): spec.replicas cannot be modified while
+// a scale-down operation is in flight. Once the operator clears
+// status.scaleDown at completion, edits are accepted again. Defends
+// the resume contract (AC-2.3.7) — without this, a user who changes
+// spec.replicas mid-operation can desynchronise the gap calculation
+// from the recorded removed-peers list.
+//
+// Note on AC-2.3.5 / 2.3.6 (degraded-quorum opt-in): the design doc
+// expected CRD CEL to gate scale-down below 3 replicas on an
+// annotation. CRD validation rules on K8s 1.36 do NOT expose
+// metadata.annotations or metadata.labels to CEL — only structural
+// schema fields. AC-2.3.5 / 2.3.6 are therefore enforced by the
+// operator's ScaleDownPhase (see internal/controller/phases/scaledown.go)
+// via a ScaleDownBlocked-style Ready condition. The annotation
+// remains the public contract.
+// +kubebuilder:validation:XValidation:rule="self.spec.replicas == oldSelf.spec.replicas || !has(self.status) || !has(self.status.scaleDown) || !has(self.status.scaleDown.removedPeers) || size(self.status.scaleDown.removedPeers) == 0",message="spec.replicas cannot be modified while a scale-down operation is in progress; wait for status.scaleDown to clear"
 
 // NomadCluster is the Schema for the nomadclusters API.
 type NomadCluster struct {

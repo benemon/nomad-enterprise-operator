@@ -918,6 +918,12 @@ spec:
                 type: object
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec.replicas cannot be modified while a scale-down operation is
+            in progress; wait for status.scaleDown to clear
+          rule: self.spec.replicas == oldSelf.spec.replicas || !has(self.status) ||
+            !has(self.status.scaleDown) || !has(self.status.scaleDown.removedPeers)
+            || size(self.status.scaleDown.removedPeers) == 0
     served: true
     storage: true
     subresources:

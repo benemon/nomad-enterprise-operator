@@ -19,6 +19,7 @@ package phases
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -594,6 +595,118 @@ func TestScaleDown_MetricLifecycle(t *testing.T) {
 	}
 	if got := gaugeFor(); got != 0 {
 		t.Errorf("after finalisation gauge = %v, want 0 (operation complete)", got)
+	}
+}
+
+// TestScaleDown_DegradedQuorumOptInRequired covers AC-2.3.5 (D2c /
+// neo-1ve.3): scaling from >= 3 down to < 3 without the opt-in
+// annotation surfaces Reason=DegradedQuorumNotAccepted on the Ready
+// condition and does not initialise status.scaleDown.
+//
+// CRD CEL on K8s 1.36 cannot read metadata.annotations, so the gate
+// is enforced operator-side. The unit asserts the gate behaves like
+// the D2d leader probe: Requeue + Reason, no Event, no status mutation.
+func TestScaleDown_DegradedQuorumOptInRequired(t *testing.T) {
+	f := newScaleDownFixture(t, 3, 1) // 3 → 1, no annotation
+	// Pre-start: GetLeader runs first and must succeed before the
+	// annotation gate evaluates.
+	f.mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute error = %v", result.Error)
+	}
+	if !result.Requeue {
+		t.Error("Execute should request requeue when degraded-quorum opt-in is missing")
+	}
+	if result.Reason != "DegradedQuorumNotAccepted" {
+		t.Errorf("Reason = %q, want %q", result.Reason, "DegradedQuorumNotAccepted")
+	}
+	// The Requeue message must name the annotation so the user can fix it.
+	if !strings.Contains(result.Message, acceptDegradedQuorumAnnotation) {
+		t.Errorf("Message %q should name the opt-in annotation %q",
+			result.Message, acceptDegradedQuorumAnnotation)
+	}
+
+	got := fetchCluster(t, f)
+	if got.Status.ScaleDown != nil {
+		t.Errorf("status.scaleDown should not be initialised when the opt-in is missing, got %+v",
+			got.Status.ScaleDown)
+	}
+}
+
+// TestScaleDown_DegradedQuorumOptInPresent covers AC-2.3.6 (D2c): with
+// the annotation set, scale-down below 3 proceeds normally — the gate
+// has no effect and the loop runs through to peer removal.
+func TestScaleDown_DegradedQuorumOptInPresent(t *testing.T) {
+	f := newScaleDownFixture(t, 3, 1)
+	f.cluster.Annotations = map[string]string{acceptDegradedQuorumAnnotation: "true"}
+	if err := f.phase.Client.Update(context.Background(), f.cluster); err != nil {
+		t.Fatalf("seed annotation error = %v", err)
+	}
+	f.cluster = fetchCluster(t, f)
+
+	// Now the standard scale-down flow runs.
+	f.mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(3), nil).Once()
+	f.mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(2)).Return(nil).Once()
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(2), nil).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute error = %v", result.Error)
+	}
+	got := fetchCluster(t, f)
+	if got.Status.ScaleDown == nil ||
+		len(got.Status.ScaleDown.RemovedPeers) != 1 ||
+		got.Status.ScaleDown.RemovedPeers[0] != idForOrdinal(2) {
+		t.Errorf("with annotation, scale-down must record the removed peer; got %+v",
+			got.Status.ScaleDown)
+	}
+}
+
+// TestScaleDown_DegradedQuorumExemptForLegacyBelowFloor mirrors the
+// CEL rule's intended "oldSelf.spec.replicas < 3" exemption: clusters
+// whose current replica count is already below the floor are exempt
+// from re-validating the opt-in on every reconcile. Without this, a
+// 2-replica cluster could not be reduced to 1 without first
+// scaling up to 3 (operationally awkward).
+func TestScaleDown_DegradedQuorumExemptForLegacyBelowFloor(t *testing.T) {
+	// Current sts has 2 replicas (already below floor), target is 1.
+	f := newScaleDownFixture(t, 2, 1)
+	// No annotation set — but exempt because we're already below 3.
+
+	f.mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(2), nil).Once()
+	f.mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(1)).Return(nil).Once()
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(1), nil).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute error = %v", result.Error)
+	}
+	if result.Reason == "DegradedQuorumNotAccepted" {
+		t.Error("legacy below-floor cluster should not be gated on the annotation")
+	}
+}
+
+// TestScaleDown_DegradedQuorumNotRequiredForTargetAboveFloor covers
+// the symmetric case: scaling from 5 → 3 keeps the cluster at the
+// quorum floor and so doesn't need the annotation.
+func TestScaleDown_DegradedQuorumNotRequiredForTargetAboveFloor(t *testing.T) {
+	f := newScaleDownFixture(t, 5, 3)
+
+	f.mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(5), nil).Once()
+	f.mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(4)).Return(nil).Once()
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(4), nil).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute error = %v", result.Error)
+	}
+	if result.Reason == "DegradedQuorumNotAccepted" {
+		t.Error("scale-down to >= 3 should not be gated on the annotation")
 	}
 }
 
