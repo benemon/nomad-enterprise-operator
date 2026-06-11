@@ -113,6 +113,7 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 
 	// Gap > 0 — we owe the user a scale-down.
 	gap := currentReplicas - desiredReplicas
+	p.Log.Info("ScaleDown: gap detected", "from", currentReplicas, "to", desiredReplicas, "gap", gap)
 
 	if cluster.Status.ScaleDown == nil {
 		patchBase := cluster.DeepCopy()
@@ -129,35 +130,33 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 
 	token, err := p.getManagementToken(ctx, cluster)
 	if err != nil {
-		// No token available yet (e.g. ACL bootstrap hasn't completed).
-		// Defer silently — the next reconcile retries.
-		p.Log.V(1).Info("Management token not yet available for scale-down", "error", err)
+		p.Log.Info("ScaleDown: deferring — management token not yet available", "error", err)
 		return OK()
 	}
 
 	nomadClient, err := p.newNomadClientForScaleDown(cluster, token)
 	if err != nil {
-		p.Log.V(1).Info("Failed to construct Nomad client for scale-down", "error", err)
+		p.Log.Info("ScaleDown: deferring — failed to construct Nomad client", "error", err)
 		return OK()
 	}
 
 	peers, err := nomadClient.RaftListPeers(ctx, token)
 	if err != nil {
-		p.Log.V(1).Info("Failed to list Raft peers", "error", err)
+		p.Log.Info("ScaleDown: deferring — RaftListPeers failed", "error", err)
 		return OK()
 	}
+	peerNodes := make([]string, 0, len(peers))
+	for _, peer := range peers {
+		peerNodes = append(peerNodes, peer.Node)
+	}
+	p.Log.Info("ScaleDown: peer list from Nomad", "nodes", peerNodes)
 
 	candidate, err := p.pickNextPeer(cluster, peers, desiredReplicas)
 	if err != nil {
 		return Error(err, "Failed to pick next peer for removal")
 	}
 	if candidate == nil {
-		// No matching peer to remove this cycle. Possible causes:
-		// (a) peers report nodes that don't map to our cluster
-		// (we filter those out); (b) the target peer is already gone
-		// from Raft but we haven't recorded it (operator crash mid-op).
-		// Either way, nothing to do this cycle.
-		p.Log.V(1).Info("No Raft peer matches the scale-down target this cycle")
+		p.Log.Info("ScaleDown: deferring — no peer matches the scale-down target this cycle")
 		return OK()
 	}
 
@@ -329,13 +328,16 @@ func (p *ScaleDownPhase) newNomadClientForScaleDown(
 // HCL template (pkg/hcl/generator.go) sets advertise.rpc to the
 // cluster's LoadBalancer IP, which is shared across all replicas, so
 // the autopilot Address field cannot be used to distinguish peers.
-// The Node field carries the pod hostname (StatefulSet ordinal),
-// which IS per-replica.
+// The Node field carries the pod hostname suffixed with the region
+// (Nomad's convention), which is per-replica.
 //
-// Recognised input:  <cluster>-<integer>  (e.g. "scaledown-test-2")
+// Recognised input shapes:
+//   - <cluster>-<integer>             (e.g. "scaledown-test-2")
+//   - <cluster>-<integer>.<region>    (e.g. "scaledown-test-2.global" — Nomad's autopilot output)
+//
 // Rejected: empty, "(unknown)" (Nomad's not-yet-set sentinel), names
 // whose prefix does not match the cluster, names with a non-integer
-// ordinal suffix.
+// ordinal segment.
 func nodeNameToOrdinal(nodeName, clusterName string) (int, error) {
 	if nodeName == "" {
 		return 0, fmt.Errorf("peer node name is empty")
@@ -347,13 +349,17 @@ func nodeNameToOrdinal(nodeName, clusterName string) (int, error) {
 	if !strings.HasPrefix(nodeName, prefix) {
 		return 0, fmt.Errorf("peer node name %q does not match cluster %q", nodeName, clusterName)
 	}
-	ordinalStr := nodeName[len(prefix):]
-	if ordinalStr == "" {
+	ordinalSegment := nodeName[len(prefix):]
+	// Strip the ".<region>" suffix Nomad appends in autopilot output.
+	if dot := strings.Index(ordinalSegment, "."); dot >= 0 {
+		ordinalSegment = ordinalSegment[:dot]
+	}
+	if ordinalSegment == "" {
 		return 0, fmt.Errorf("peer node name %q has empty ordinal after cluster prefix", nodeName)
 	}
-	ordinal, err := strconv.Atoi(ordinalStr)
+	ordinal, err := strconv.Atoi(ordinalSegment)
 	if err != nil {
-		return 0, fmt.Errorf("peer node name %q ordinal %q is not an integer: %w", nodeName, ordinalStr, err)
+		return 0, fmt.Errorf("peer node name %q ordinal %q is not an integer: %w", nodeName, ordinalSegment, err)
 	}
 	return ordinal, nil
 }

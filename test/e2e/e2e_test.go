@@ -1624,17 +1624,7 @@ spec:
 			_, _ = utils.Run(cmd)
 		})
 
-		PIt("removes peers serially, patches the STS, and preserves PVCs (AC-2.3.4/4b/4c/7) — Pending neo-8oy", func() {
-			// PENDING: blocked by neo-8oy (P1 bug). 3-replica clusters
-			// undergo a self-inflicted rolling restart shortly after
-			// InitialReconcileComplete, triggered by a checksum drift on
-			// the StatefulSet pod template. The restart breaks Raft
-			// quorum before scale-down ever has a chance to run. The
-			// D2b reconcile loop itself is correct — unit tests at
-			// internal/controller/phases/scaledown_test.go cover the
-			// serial removal, resume idempotency, verify-failure
-			// safety, and ID-mapping table. Re-enable this spec once
-			// neo-8oy is closed.
+		It("removes peers serially, patches the STS, and preserves PVCs (AC-2.3.4/4b/4c/7)", func() {
 			By("waiting for autopilot to report healthy (3-server cluster fully formed)")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,

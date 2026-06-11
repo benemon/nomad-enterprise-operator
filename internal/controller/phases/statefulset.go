@@ -81,13 +81,13 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 	}
 
 	// Update StatefulSet if spec changed
-	if p.needsUpdate(existing, sts) {
+	if update, reason := p.needsUpdate(existing, sts); update {
 		// Preserve fields that shouldn't be updated
 		sts.Spec.VolumeClaimTemplates = existing.Spec.VolumeClaimTemplates
 
 		existing.Spec = sts.Spec
 		existing.Annotations = sts.Annotations
-		p.Log.Info("Updating StatefulSet", "name", sts.Name)
+		p.Log.Info("Updating StatefulSet", "name", sts.Name, "reason", reason)
 		if err := p.Client.Update(ctx, existing); err != nil {
 			return Error(err, "Failed to update StatefulSet")
 		}
@@ -186,19 +186,24 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		podSpec.TopologySpreadConstraints = cluster.Spec.TopologySpreadConstraints
 	}
 
-	// Get config checksum for pod annotation - include all config-affecting fields
-	// This ensures pods restart when any config changes
+	// Get config checksum for pod annotation - include only
+	// non-scale-dependent fields so spec.replicas changes do not trigger
+	// rolling restarts (AC-2.3.4f / D2f / neo-1ve.6). Scale-dependent
+	// HCL fields (bootstrap_expect, server_join.retry_join) DO change in
+	// the rendered ConfigMap but are startup-only in Nomad — the
+	// running servers ignore further mutations after initial bootstrap.
+	// Restarting pods on every scale is the bug pattern neo-8oy
+	// surfaced: 3-replica rolling restarts triggered by scale-down
+	// break Raft quorum before the operator can finish the operation.
 	configChecksum := ConfigChecksum(map[string]string{
-		"advertise":     p.AdvertiseAddress,
-		"gossip":        p.GossipKey,
-		"acl":           strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
-		"tls":           "true",
-		"audit":    strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
-		"replicas": strconv.Itoa(int(replicas)),
-		"region":        cluster.Spec.Topology.Region,
-		"datacenter":    cluster.Spec.Topology.Datacenter,
+		"advertise":  p.AdvertiseAddress,
+		"gossip":     p.GossipKey,
+		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
+		"tls":        "true",
+		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
+		"region":     cluster.Spec.Topology.Region,
+		"datacenter": cluster.Spec.Topology.Datacenter,
 	})
-
 	// Get secrets checksum for pod annotation - hash actual secret contents
 	// This ensures pods restart when referenced secrets change
 	secretsChecksum, err := p.computeSecretsChecksum(ctx, cluster)
@@ -459,30 +464,37 @@ func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity
 }
 
 
-func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) bool {
-	// Check replicas
+// needsUpdate reports whether the desired StatefulSet differs from
+// the existing one in any of the fields the phase manages. The
+// second return value is a human-readable summary of the drift, used
+// for log diagnostics — multi-replica rolling restarts triggered by
+// unexpected drift are extremely hard to debug without it (see
+// neo-8oy for the canonical case). Empty when no drift.
+func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (bool, string) {
 	if *existing.Spec.Replicas != *desired.Spec.Replicas {
-		return true
+		return true, fmt.Sprintf("replicas %d -> %d", *existing.Spec.Replicas, *desired.Spec.Replicas)
 	}
 
-	// Check container image
 	if len(existing.Spec.Template.Spec.Containers) > 0 && len(desired.Spec.Template.Spec.Containers) > 0 {
 		if existing.Spec.Template.Spec.Containers[0].Image != desired.Spec.Template.Spec.Containers[0].Image {
-			return true
+			return true, fmt.Sprintf("image %q -> %q",
+				existing.Spec.Template.Spec.Containers[0].Image,
+				desired.Spec.Template.Spec.Containers[0].Image)
 		}
 	}
 
-	// Check config checksum annotation
 	existingChecksum := existing.Spec.Template.Annotations["checksum/config"]
 	desiredChecksum := desired.Spec.Template.Annotations["checksum/config"]
 	if existingChecksum != desiredChecksum {
-		return true
+		return true, fmt.Sprintf("checksum/config %s -> %s", existingChecksum, desiredChecksum)
 	}
 
-	// Check secrets checksum annotation (triggers rolling restart when secrets change)
 	existingSecretsChecksum := existing.Spec.Template.Annotations["checksum/secrets"]
 	desiredSecretsChecksum := desired.Spec.Template.Annotations["checksum/secrets"]
-	return existingSecretsChecksum != desiredSecretsChecksum
+	if existingSecretsChecksum != desiredSecretsChecksum {
+		return true, fmt.Sprintf("checksum/secrets %s -> %s", existingSecretsChecksum, desiredSecretsChecksum)
+	}
+	return false, ""
 }
 
 // getResourcesWithDefaults returns resource requirements with sensible defaults applied.

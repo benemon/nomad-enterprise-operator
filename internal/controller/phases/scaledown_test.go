@@ -63,6 +63,16 @@ func TestNodeNameToOrdinal(t *testing.T) {
 			wantOrdinal: 4,
 		},
 		{
+			name:        "node name with .<region> suffix resolves (Nomad autopilot output)",
+			nodeName:    "nomad-4.global",
+			wantOrdinal: 4,
+		},
+		{
+			name:        "node name with a non-default region suffix resolves",
+			nodeName:    "nomad-2.us-west-1",
+			wantOrdinal: 2,
+		},
+		{
 			name:        "very large ordinal is accepted unchanged",
 			nodeName:    "nomad-9999",
 			wantOrdinal: 9999,
