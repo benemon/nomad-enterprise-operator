@@ -115,19 +115,6 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	gap := currentReplicas - desiredReplicas
 	p.Log.Info("ScaleDown: gap detected", "from", currentReplicas, "to", desiredReplicas, "gap", gap)
 
-	if cluster.Status.ScaleDown == nil {
-		patchBase := cluster.DeepCopy()
-		cluster.Status.ScaleDown = &nomadv1alpha1.ScaleDownStatus{RemovedPeers: []string{}}
-		if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
-			return Error(err, "Failed to initialise status.scaleDown")
-		}
-	}
-
-	// If every peer in the gap is already recorded, finalise.
-	if int32(len(cluster.Status.ScaleDown.RemovedPeers)) >= gap {
-		return p.finalize(ctx, cluster, sts, desiredReplicas)
-	}
-
 	token, err := p.getManagementToken(ctx, cluster)
 	if err != nil {
 		p.Log.Info("ScaleDown: deferring — management token not yet available", "error", err)
@@ -140,9 +127,43 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		return OK()
 	}
 
+	// AC-2.3.8 (pre-start, D2d / neo-1ve.4): when no scale-down is yet in
+	// flight, verify a Raft leader exists BEFORE initialising
+	// status.scaleDown. Without a leader, RaftRemovePeer would fail and
+	// the operation can't begin — surface that clearly via the Ready
+	// condition rather than silently spinning on retries.
+	if cluster.Status.ScaleDown == nil {
+		leader, lerr := nomadClient.GetLeader()
+		if lerr != nil || leader == "" {
+			p.Log.Info("ScaleDown: blocked — no Raft leader; deferring",
+				"leader", leader, "error", lerr)
+			return RequeueWithReason(15*time.Second, "ScaleDownBlocked",
+				"Scale-down blocked: no Raft leader available")
+		}
+
+		patchBase := cluster.DeepCopy()
+		cluster.Status.ScaleDown = &nomadv1alpha1.ScaleDownStatus{RemovedPeers: []string{}}
+		if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
+			return Error(err, "Failed to initialise status.scaleDown")
+		}
+	}
+
+	// If every peer in the gap is already recorded, finalise.
+	if int32(len(cluster.Status.ScaleDown.RemovedPeers)) >= gap {
+		return p.finalize(ctx, cluster, sts, desiredReplicas)
+	}
+
 	peers, err := nomadClient.RaftListPeers(ctx, token)
 	if err != nil {
-		p.Log.Info("ScaleDown: deferring — RaftListPeers failed", "error", err)
+		// AC-2.3.8a: on mid-op leader loss, pause silently — status is
+		// preserved, the next reconcile will retry and resume per
+		// AC-2.3.7's resume logic. Other transient errors get the same
+		// treatment (OK + log) so the reconciler keeps moving.
+		if isNoLeaderError(err) {
+			p.Log.Info("ScaleDown: leader lost mid-operation; silently pausing (AC-2.3.8a)", "error", err)
+		} else {
+			p.Log.Info("ScaleDown: deferring — RaftListPeers failed", "error", err)
+		}
 		return OK()
 	}
 	peerNodes := make([]string, 0, len(peers))
@@ -165,9 +186,15 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		"removedSoFar", len(cluster.Status.ScaleDown.RemovedPeers), "gap", gap)
 
 	if err := nomadClient.RaftRemovePeer(ctx, token, candidate.ID); err != nil {
-		// Most likely a transient leader-loss window (AC-2.3.8a refines
-		// this in D2d). Defer to next reconcile.
-		p.Log.V(1).Info("RaftRemovePeer failed (will retry)", "error", err, "id", candidate.ID)
+		// AC-2.3.8a: leader loss between the list and the remove is a
+		// transient Raft election. Pause silently — status.scaleDown
+		// is not cleared, the next reconcile resumes per AC-2.3.7.
+		if isNoLeaderError(err) {
+			p.Log.Info("ScaleDown: leader lost during RaftRemovePeer; silently pausing (AC-2.3.8a)",
+				"error", err, "id", candidate.ID)
+		} else {
+			p.Log.Info("ScaleDown: RaftRemovePeer failed (will retry)", "error", err, "id", candidate.ID)
+		}
 		return OK()
 	}
 
@@ -338,6 +365,34 @@ func (p *ScaleDownPhase) newNomadClientForScaleDown(
 // Rejected: empty, "(unknown)" (Nomad's not-yet-set sentinel), names
 // whose prefix does not match the cluster, names with a non-integer
 // ordinal segment.
+// isNoLeaderError reports whether err names a transient
+// "no Raft leader" condition rather than a real failure. Nomad and
+// the SDK surface this as several distinct strings depending on which
+// endpoint the call hit; substring match is the minimum sufficient
+// detection given the SDK does not export a typed sentinel.
+//
+// Used by AC-2.3.8a's silent-pause path. Conservative on purpose: a
+// false negative (real error mis-classified) just logs a generic
+// "deferring" message; a false positive (no-leader mis-classified as
+// real error) is harmless because both branches return OK and retry.
+func isNoLeaderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, marker := range []string{
+		"No cluster leader",
+		"no cluster leader",
+		"leader not found",
+		"no leader",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func nodeNameToOrdinal(nodeName, clusterName string) (int, error) {
 	if nodeName == "" {
 		return 0, fmt.Errorf("peer node name is empty")

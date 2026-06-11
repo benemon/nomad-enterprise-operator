@@ -64,6 +64,13 @@ type PhaseResult struct {
 
 	// Message is the message for status update.
 	Message string
+
+	// Reason overrides the default "Reconciling" reason on the Ready
+	// condition the controller sets when this phase requests requeue.
+	// Used by phases that need a specific reason surfaced on the CR
+	// (e.g. ScaleDownPhase's AC-2.3.8 "ScaleDownBlocked"). Empty
+	// preserves the default.
+	Reason string
 }
 
 // OK returns a successful result.
@@ -76,6 +83,18 @@ func Requeue(after time.Duration, message string) PhaseResult {
 	return PhaseResult{
 		Requeue:      true,
 		RequeueAfter: after,
+		Message:      message,
+	}
+}
+
+// RequeueWithReason returns a requeue result carrying a specific
+// Ready-condition reason. Used by phases that need the user-facing
+// condition to name the deferral cause (D2d / AC-2.3.8).
+func RequeueWithReason(after time.Duration, reason, message string) PhaseResult {
+	return PhaseResult{
+		Requeue:      true,
+		RequeueAfter: after,
+		Reason:       reason,
 		Message:      message,
 	}
 }

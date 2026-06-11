@@ -162,14 +162,19 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 
 		if result.Requeue {
-			log.Info("Phase requested requeue", "phase", phase.Name(), "after", result.RequeueAfter, "message", result.Message)
+			log.Info("Phase requested requeue", "phase", phase.Name(), "after", result.RequeueAfter, "message", result.Message, "reason", result.Reason)
+
+			reason := result.Reason
+			if reason == "" {
+				reason = "Reconciling"
+			}
 
 			patchBase := cluster.DeepCopy()
 			cluster.Status.Phase = nomadv1alpha1.ClusterPhaseCreating
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 				Type:    nomadv1alpha1.ConditionTypeReady,
 				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
+				Reason:  reason,
 				Message: result.Message,
 			})
 			if err := r.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {

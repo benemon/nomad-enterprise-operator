@@ -18,6 +18,7 @@ package phases
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -267,8 +268,10 @@ func itoa(i int) string {
 func TestScaleDown_RemovesHighestOrdinalFirst(t *testing.T) {
 	f := newScaleDownFixture(t, 5, 3) // gap of 2, expect ordinals 4 then 3
 
-	// Cycle 1: expect RaftListPeers (find candidates), RaftRemovePeer
-	// for id-4, RaftListPeers (verify), then status patch.
+	// Cycle 1: pre-start GetLeader (D2d), then RaftListPeers (find
+	// candidates), RaftRemovePeer for id-4, RaftListPeers (verify),
+	// then status patch.
+	f.mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
 	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(5), nil).Once()
 	f.mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(4)).Return(nil).Once()
 	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(4), nil).Once() // ordinal-4 gone
@@ -386,6 +389,7 @@ func TestScaleDown_NoOpWhenAlreadyAtTarget(t *testing.T) {
 func TestScaleDown_DefersWhenVerificationShowsPeerStillPresent(t *testing.T) {
 	f := newScaleDownFixture(t, 5, 3)
 
+	f.mockNomad.EXPECT().GetLeader().Return("10.0.0.5:4647", nil).Once()
 	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").Return(peersAtReplicas(5), nil).Once()
 	f.mockNomad.EXPECT().RaftRemovePeer(mock.Anything, "", idForOrdinal(4)).Return(nil).Once()
 	// Re-list shows the peer is still there (transient Raft state).
@@ -405,5 +409,128 @@ func TestScaleDown_DefersWhenVerificationShowsPeerStillPresent(t *testing.T) {
 	if len(got.Status.ScaleDown.RemovedPeers) != 0 {
 		t.Errorf("removedPeers = %v, want [] (verification failed; do not record)",
 			got.Status.ScaleDown.RemovedPeers)
+	}
+}
+
+// TestScaleDown_PreStartLeaderEmptyBlocks covers AC-2.3.8 (D2d /
+// neo-1ve.4): when the operator is about to start a scale-down but
+// GetLeader returns empty, the phase must return Requeue carrying
+// Reason="ScaleDownBlocked" and MUST NOT initialise
+// status.scaleDown. The reason is what the controller uses to set
+// Ready=False, surfacing the cause on the CR.
+func TestScaleDown_PreStartLeaderEmptyBlocks(t *testing.T) {
+	f := newScaleDownFixture(t, 5, 3)
+
+	// GetLeader returns the empty string (no error, no leader yet —
+	// the apiserver responded but Raft has no quorum-elected leader).
+	f.mockNomad.EXPECT().GetLeader().Return("", nil).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute error = %v", result.Error)
+	}
+	if !result.Requeue {
+		t.Error("Execute should request requeue when no leader is available")
+	}
+	if result.Reason != "ScaleDownBlocked" {
+		t.Errorf("Reason = %q, want %q", result.Reason, "ScaleDownBlocked")
+	}
+
+	got := fetchCluster(t, f)
+	if got.Status.ScaleDown != nil {
+		t.Errorf("status.scaleDown should not be initialised when blocked, got %+v",
+			got.Status.ScaleDown)
+	}
+}
+
+// TestScaleDown_PreStartLeaderErrorBlocks mirrors AC-2.3.8 for the
+// case where the GetLeader call itself errors (apiserver unreachable
+// or Status() returned a transport-level failure). Same handling:
+// surface the block, do not start the operation.
+func TestScaleDown_PreStartLeaderErrorBlocks(t *testing.T) {
+	f := newScaleDownFixture(t, 5, 3)
+	f.mockNomad.EXPECT().GetLeader().Return("", errors.New("connection refused")).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute error = %v", result.Error)
+	}
+	if !result.Requeue {
+		t.Error("Execute should request requeue when leader probe errors")
+	}
+	if result.Reason != "ScaleDownBlocked" {
+		t.Errorf("Reason = %q, want %q", result.Reason, "ScaleDownBlocked")
+	}
+}
+
+// TestScaleDown_MidOpLeaderLossPausesSilently covers AC-2.3.8a: when
+// a scale-down is already in progress (status.scaleDown.removedPeers
+// populated) and a subsequent Nomad call returns a "no leader" error,
+// the phase must pause silently — no Error, no Requeue with a
+// Reason (which would change the Ready condition), no Event. The
+// status.scaleDown field stays intact so the next reconcile resumes
+// per AC-2.3.7.
+func TestScaleDown_MidOpLeaderLossPausesSilently(t *testing.T) {
+	f := newScaleDownFixture(t, 5, 3)
+
+	// Seed the resume state: id-4 already removed in a prior cycle.
+	f.cluster.Status.ScaleDown = &nomadv1alpha1.ScaleDownStatus{
+		RemovedPeers: []string{idForOrdinal(4)},
+	}
+	if err := f.phase.Client.Status().Update(context.Background(), f.cluster); err != nil {
+		t.Fatalf("seed status error = %v", err)
+	}
+	f.cluster = fetchCluster(t, f)
+
+	// Pre-start gate does NOT run because status.scaleDown != nil
+	// (the resume path skips the leader probe — that's intentional,
+	// AC-2.3.8a's silent-pause owns the mid-op leader-loss case).
+	// RaftListPeers returns the canonical "No cluster leader" error.
+	f.mockNomad.EXPECT().RaftListPeers(mock.Anything, "").
+		Return(nil, errors.New("rpc error: No cluster leader")).Once()
+
+	result := f.phase.Execute(context.Background(), f.cluster)
+	if result.Error != nil {
+		t.Fatalf("Execute should not return an error on mid-op leader loss, got %v", result.Error)
+	}
+	if result.Requeue {
+		t.Errorf("Execute should NOT set Requeue on mid-op leader loss (would change Ready condition); got %+v", result)
+	}
+	if result.Reason != "" {
+		t.Errorf("Result.Reason should be empty on silent pause, got %q", result.Reason)
+	}
+
+	got := fetchCluster(t, f)
+	if got.Status.ScaleDown == nil ||
+		len(got.Status.ScaleDown.RemovedPeers) != 1 ||
+		got.Status.ScaleDown.RemovedPeers[0] != idForOrdinal(4) {
+		t.Errorf("status.scaleDown should be preserved across silent pause, got %+v",
+			got.Status.ScaleDown)
+	}
+}
+
+// TestIsNoLeaderError exercises the helper's substring matcher so a
+// future Nomad SDK reshuffle that changes the error text trips the
+// table here before silently breaking the silent-pause path.
+func TestIsNoLeaderError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"capitalised marker", errors.New("rpc error: No cluster leader"), true},
+		{"lowercase marker", errors.New("no cluster leader at this time"), true},
+		{"leader not found phrasing", errors.New("failed: leader not found"), true},
+		{"bare no leader phrasing", errors.New("rpc error: no leader available"), true},
+		{"unrelated transport error", errors.New("connection refused"), false},
+		{"unrelated permission error", errors.New("403 Forbidden"), false},
+		{"nil error", nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isNoLeaderError(c.err); got != c.want {
+				t.Errorf("isNoLeaderError(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
 	}
 }
