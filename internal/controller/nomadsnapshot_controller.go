@@ -62,7 +62,21 @@ type NomadSnapshotReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile handles NomadSnapshot reconciliation
+// Reconcile handles NomadSnapshot reconciliation.
+//
+// Status-write contract (audited under neo-4iu): every helper that mutates
+// snapshot.Status must also issue its own Status().Patch with a patchBase
+// snapshotted immediately before the mutation. The final patch at the
+// bottom of this function only captures the local mutations within its
+// own patchBase window — it does NOT serve as a catch-all for fields that
+// earlier helpers may have written. This is intentionally different from
+// the cluster controller's top-of-Reconcile snapshot pattern (neo-ilz) and
+// works here because the snapshot controller has no phase framework: every
+// status mutation is local to the function performing it. When adding a
+// new helper, follow the per-phase Patch pattern or add a Status().Patch
+// at the call site — relying on the final patch to capture mutations made
+// before its patchBase is the bug pattern neo-ilz fixed in the cluster
+// controller.
 func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
