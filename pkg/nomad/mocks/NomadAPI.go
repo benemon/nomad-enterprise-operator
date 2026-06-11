@@ -686,6 +686,113 @@ func (_c *MockNomadAPI_GetPeers_Call) RunAndReturn(run func() ([]string, error))
 	return _c
 }
 
+// RaftListPeers provides a mock function with given fields: ctx, token
+func (_m *MockNomadAPI) RaftListPeers(ctx context.Context, token string) ([]*nomad.RaftPeer, error) {
+	ret := _m.Called(ctx, token)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RaftListPeers")
+	}
+
+	var r0 []*nomad.RaftPeer
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) ([]*nomad.RaftPeer, error)); ok {
+		return rf(ctx, token)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string) []*nomad.RaftPeer); ok {
+		r0 = rf(ctx, token)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*nomad.RaftPeer)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, token)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockNomadAPI_RaftListPeers_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RaftListPeers'
+type MockNomadAPI_RaftListPeers_Call struct {
+	*mock.Call
+}
+
+// RaftListPeers is a helper method to define mock.On call
+//   - ctx context.Context
+//   - token string
+func (_e *MockNomadAPI_Expecter) RaftListPeers(ctx interface{}, token interface{}) *MockNomadAPI_RaftListPeers_Call {
+	return &MockNomadAPI_RaftListPeers_Call{Call: _e.mock.On("RaftListPeers", ctx, token)}
+}
+
+func (_c *MockNomadAPI_RaftListPeers_Call) Run(run func(ctx context.Context, token string)) *MockNomadAPI_RaftListPeers_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_RaftListPeers_Call) Return(_a0 []*nomad.RaftPeer, _a1 error) *MockNomadAPI_RaftListPeers_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockNomadAPI_RaftListPeers_Call) RunAndReturn(run func(context.Context, string) ([]*nomad.RaftPeer, error)) *MockNomadAPI_RaftListPeers_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RaftRemovePeer provides a mock function with given fields: ctx, token, id
+func (_m *MockNomadAPI) RaftRemovePeer(ctx context.Context, token string, id string) error {
+	ret := _m.Called(ctx, token, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RaftRemovePeer")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string) error); ok {
+		r0 = rf(ctx, token, id)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// MockNomadAPI_RaftRemovePeer_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RaftRemovePeer'
+type MockNomadAPI_RaftRemovePeer_Call struct {
+	*mock.Call
+}
+
+// RaftRemovePeer is a helper method to define mock.On call
+//   - ctx context.Context
+//   - token string
+//   - id string
+func (_e *MockNomadAPI_Expecter) RaftRemovePeer(ctx interface{}, token interface{}, id interface{}) *MockNomadAPI_RaftRemovePeer_Call {
+	return &MockNomadAPI_RaftRemovePeer_Call{Call: _e.mock.On("RaftRemovePeer", ctx, token, id)}
+}
+
+func (_c *MockNomadAPI_RaftRemovePeer_Call) Run(run func(ctx context.Context, token string, id string)) *MockNomadAPI_RaftRemovePeer_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string), args[2].(string))
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_RaftRemovePeer_Call) Return(_a0 error) *MockNomadAPI_RaftRemovePeer_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *MockNomadAPI_RaftRemovePeer_Call) RunAndReturn(run func(context.Context, string, string) error) *MockNomadAPI_RaftRemovePeer_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // NewMockNomadAPI creates a new instance of MockNomadAPI. It also registers a testing interface on the mock and a cleanup function to assert the mocks expectations.
 // The first argument is typically a *testing.T value.
 func NewMockNomadAPI(t interface {

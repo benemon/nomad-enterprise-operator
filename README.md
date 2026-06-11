@@ -346,6 +346,17 @@ For single-instance clusters (`spec.replicas = 1`) no PDB is created. Single-ins
 
 The PDB is operator-owned with no spec field; scaling from `N=3` to `N=5` updates `maxUnavailable` in place, and scaling down to `N=1` deletes the PDB. Out-of-band PDB deletions are recreated on the next reconcile.
 
+## Scaling down
+
+To scale a cluster down, patch `spec.replicas` to the desired count. The operator removes one Raft peer per reconcile (highest ordinal first), verifies the removal against the new peer list, records the removed server ID in `status.scaleDown.removedPeers`, and only patches `sts.spec.replicas` once every required peer has been removed. The recorded list persists across operator restarts so a crashed operator never re-removes a peer.
+
+PVCs for removed ordinals are **not deleted** by the operator. `spec.persistence.reclaimPolicy` governs cluster-*delete* behaviour only — scale-down preserves PVCs in every case so a subsequent scale-up can re-attach to existing data.
+
+Two operational rules:
+
+- **Do not `kubectl delete pod <cluster>-N` directly.** The operator's scale-down contract is "user adjusts `spec.replicas`." Out-of-band pod deletion does not trigger Raft peer removal; the dead Raft entry sits there until Nomad autopilot's `cleanupDeadServers` eventually removes it (if enabled).
+- **Serf gossip cleanup is delegated to autopilot.** The operator does not call `nomad server force-leave`. With the default `autopilot.cleanupDeadServers: true`, stale Serf members are removed within `autopilot.lastContactThreshold × N` intervals after the pod terminates. If you disable `cleanupDeadServers`, run `nomad server force-leave <name>` manually after a scale-down.
+
 ## OIDC Authentication
 
 The operator no longer reconciles OIDC authentication. Earlier versions
@@ -575,10 +586,11 @@ The NomadCluster controller reconciles through a sequential phase pipeline:
 8. **ConfigMap** — renders the Nomad HCL server configuration
 9. **StatefulSet** — creates or updates the Nomad server StatefulSet
 10. **PDB** — creates or updates the PodDisruptionBudget for `spec.replicas ≥ 3` (skipped for `replicas = 1`)
-11. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
-12. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
-13. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
-14. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
+11. **ScaleDown** — removes Raft peers when `sts.spec.replicas` exceeds `spec.replicas`, one peer per reconcile, before patching the StatefulSet (see "Scaling down" below)
+12. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
+13. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
+14. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
+15. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
 
 ## Development
 

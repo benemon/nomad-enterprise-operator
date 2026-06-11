@@ -46,6 +46,16 @@ type NomadAPI interface {
 	// client's configured SecretID; callers must construct the client
 	// with a token holding `agent:read` capability (C7 / AC-4.7.1).
 	AgentSelf(ctx context.Context) (*AgentSelfResult, error)
+
+	// Raft scale-down (D2 / neo-1ve)
+	// RaftListPeers returns the current Raft configuration. Requires a
+	// token with operator:read capability.
+	RaftListPeers(ctx context.Context, token string) ([]*RaftPeer, error)
+	// RaftRemovePeer removes a peer from the Raft quorum by server ID.
+	// Requires a token with operator:write capability — typically the
+	// bootstrap token until C4 (neo-ikf) provisions a long-lived
+	// management token.
+	RaftRemovePeer(ctx context.Context, token, id string) error
 }
 
 // Compile-time assertion that *Client satisfies NomadAPI.

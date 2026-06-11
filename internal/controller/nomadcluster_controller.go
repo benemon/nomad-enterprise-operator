@@ -201,7 +201,8 @@ func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.
 		phases.NewSecretsPhase(ctx),
 		phases.NewConfigMapPhase(ctx),
 		phases.NewStatefulSetPhase(ctx),
-		phases.NewPDBPhase(ctx), // After StatefulSet so PDB selector matches running pods (D1 / neo-fp3)
+		phases.NewPDBPhase(ctx),       // After StatefulSet so PDB selector matches running pods (D1 / neo-fp3)
+		phases.NewScaleDownPhase(ctx), // After StatefulSet so sts exists for replica gap detection (D2b / neo-1ve.2)
 		phases.NewRoutePhase(ctx),
 		phases.NewMonitoringPhase(ctx),
 		phases.NewACLBootstrapPhase(ctx),

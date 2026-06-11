@@ -65,6 +65,12 @@ jobs:
       # has to look like indented commented Go. This is a heuristic; tune
       # the regex if it produces false positives.
       RULE_COMMENTED_CODE_REGEX: '^[[:space:]]*//[[:space:]]*(if|for|switch|func|return|var|const|type|go|defer|select|range|case|default)[[:space:]].*[{};]?[[:space:]]*$|^[[:space:]]*//[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:?=|<-|\+\+|--)'
+      # Rule 4 — Serf force-leave is delegated to Nomad autopilot
+      # (AC-2.3.4e, D2 / neo-1ve.2). The operator must not call
+      # ForceLeave / force-leave / ForceLeaveNode under any circumstance;
+      # scale-down peer removal goes through RaftRemovePeer, and stale
+      # gossip members are cleaned up by autopilot.cleanupDeadServers.
+      RULE_FORCE_LEAVE_REGEX: 'ForceLeave|force-leave|ForceLeaveNode'
 
     steps:
       - name: Checkout
@@ -119,3 +125,19 @@ jobs:
             exit 1
           fi
           echo "OK — no commented-out Go code detected."
+
+      - name: "Rule 4 — no Serf force-leave in internal/, pkg/, api/ (AC-2.3.4e)"
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2086
+          # Exclude this workflow's own regex definition and the README
+          # which documents the user-facing manual-cleanup instruction.
+          matches=$(grep -RInE \
+            --include='*.go' \
+            "$RULE_FORCE_LEAVE_REGEX" $SCOPES || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Serf force-leave is delegated to Nomad autopilot (AC-2.3.4e). The operator must not call ForceLeave / force-leave / ForceLeaveNode. Scale-down peer removal goes through RaftRemovePeer; stale gossip members are cleaned up by autopilot.cleanupDeadServers."
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK — no Serf force-leave call sites in $SCOPES."

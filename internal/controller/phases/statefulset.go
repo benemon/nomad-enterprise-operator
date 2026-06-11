@@ -71,6 +71,15 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		return Error(err, "Failed to get StatefulSet")
 	}
 
+	// During an active scale-down, ScaleDownPhase (D2b / neo-1ve.2) is
+	// the authoritative writer for sts.spec.replicas — it patches the
+	// count only after the corresponding Raft peers have been removed.
+	// Preserve the existing replica count here so the two phases don't
+	// race; ScaleDownPhase clears the gate when the operation completes.
+	if existing.Spec.Replicas != nil && *existing.Spec.Replicas > cluster.Spec.Replicas {
+		sts.Spec.Replicas = existing.Spec.Replicas
+	}
+
 	// Update StatefulSet if spec changed
 	if p.needsUpdate(existing, sts) {
 		// Preserve fields that shouldn't be updated

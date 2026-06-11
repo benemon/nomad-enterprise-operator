@@ -405,6 +405,61 @@ type AgentSelfResult struct {
 	Version string
 }
 
+// RaftPeer is the projection of nomadapi.RaftServer used by the
+// operator's scale-down phase (D2 / neo-1ve). Fields are kept to what
+// the loop actually consumes today; expand with caution.
+//
+// Node carries the Nomad server's node name (the pod hostname for
+// StatefulSet-managed servers — e.g. "<cluster>-2"). This is the
+// per-replica identifier the scale-down loop uses to map peers to
+// ordinals; Address is shared across all replicas because the
+// operator's HCL template advertises the cluster's LoadBalancer IP
+// as advertise.rpc (see pkg/hcl/generator.go).
+type RaftPeer struct {
+	ID      string
+	Node    string
+	Address string
+	Leader  bool
+	Voter   bool
+}
+
+// RaftListPeers queries the current Raft configuration. Requires a
+// token with operator:read capability.
+func (c *Client) RaftListPeers(ctx context.Context, token string) ([]*RaftPeer, error) {
+	q := (&nomadapi.QueryOptions{AuthToken: token}).WithContext(ctx)
+	cfg, err := c.api.Operator().RaftGetConfiguration(q)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Raft configuration: %w", err)
+	}
+	if cfg == nil {
+		return nil, nil
+	}
+	peers := make([]*RaftPeer, 0, len(cfg.Servers))
+	for _, s := range cfg.Servers {
+		peers = append(peers, &RaftPeer{
+			ID:      s.ID,
+			Node:    s.Node,
+			Address: s.Address,
+			Leader:  s.Leader,
+			Voter:   s.Voter,
+		})
+	}
+	return peers, nil
+}
+
+// RaftRemovePeer removes a peer from the Raft quorum by server ID.
+// Requires a token with operator:write capability. Used by D2b's
+// scale-down loop; do not call from other code paths without
+// re-evaluating the safety story (peer removal is irreversible
+// within a single Raft generation).
+func (c *Client) RaftRemovePeer(ctx context.Context, token, id string) error {
+	w := (&nomadapi.WriteOptions{AuthToken: token}).WithContext(ctx)
+	if err := c.api.Operator().RaftRemovePeerByID(id, w); err != nil {
+		return fmt.Errorf("failed to remove Raft peer %s: %w", id, err)
+	}
+	return nil
+}
+
 // AutopilotHealthResult contains Raft autopilot health information.
 type AutopilotHealthResult struct {
 	Healthy          bool
