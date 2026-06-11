@@ -32,13 +32,11 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	routev1 "github.com/openshift/api/route/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -46,7 +44,6 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller"
 	operatormetrics "github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
-	webhookbootstrap "github.com/hashicorp/nomad-enterprise-operator/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -70,8 +67,6 @@ func init() {
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
-	var webhookPort int
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
@@ -85,17 +80,12 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", webhookbootstrap.DefaultCertDir,
-		"The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
-	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server binds to.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+		"If set, HTTP/2 will be enabled for the metrics server")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -119,63 +109,16 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Create watchers for metrics and webhooks certificates
-	var metricsCertWatcher, webhookCertWatcher *certwatcher.CertWatcher
+	// All validation rules live on the CRD schema as kubebuilder enum tags
+	// and CEL x-kubernetes-validations (replicas enum, license XOR, etc.).
+	// Cross-resource validation that previously would have been a webhook
+	// (license Secret existence, etc.) is surfaced via status conditions
+	// from the controller — admission-time cross-resource lookups race
+	// against object updates and are not the right shape for this operator.
+	// See neo-bqb for the decision to delete the webhook scaffolding.
 
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
-
-	// Webhook cert provisioning order is load-bearing: certwatcher.New below
-	// opens the cert files at startup, so the F3 bootstrap MUST ensure the
-	// Secret exists and the files are on disk first. The continuous rotation
-	// Runnable is registered with the manager further down and handles
-	// renewal once the cache is up.
-	webhookCfg := webhookbootstrap.Config{
-		Namespace: webhookbootstrap.NamespaceFromEnv(),
-		CertDir:   webhookCertPath,
-	}
-	if len(webhookCertPath) > 0 {
-		directCfg := ctrl.GetConfigOrDie()
-		directClient, err := client.New(directCfg, client.Options{Scheme: scheme})
-		if err != nil {
-			setupLog.Error(err, "unable to create direct client for webhook bootstrap")
-			os.Exit(1)
-		}
-		webhookBootstrap := webhookbootstrap.NewBootstrap(directClient, webhookCfg)
-		if err := webhookBootstrap.EnsureSecret(context.Background()); err != nil {
-			setupLog.Error(err, "unable to ensure webhook TLS secret")
-			os.Exit(1)
-		}
-		if err := webhookBootstrap.WriteCertsToDir(context.Background()); err != nil {
-			setupLog.Error(err, "unable to write webhook certs to disk")
-			os.Exit(1)
-		}
-	}
-
-	if len(webhookCertPath) > 0 {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
-
-		var err error
-		webhookCertWatcher, err = certwatcher.New(
-			filepath.Join(webhookCertPath, webhookCertName),
-			filepath.Join(webhookCertPath, webhookCertKey),
-		)
-		if err != nil {
-			setupLog.Error(err, "Failed to initialize webhook certificate watcher")
-			os.Exit(1)
-		}
-
-		webhookTLSOpts = append(webhookTLSOpts, func(config *tls.Config) {
-			config.GetCertificate = webhookCertWatcher.GetCertificate
-		})
-	}
-
-	webhookServer := webhook.NewServer(webhook.Options{
-		TLSOpts: webhookTLSOpts,
-		Port:    webhookPort,
-		CertDir: webhookCertPath,
-	})
+	// Create watcher for the metrics certificate.
+	var metricsCertWatcher *certwatcher.CertWatcher
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
@@ -225,7 +168,6 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "42388956.hashicorp.com",
@@ -265,29 +207,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Register the NomadCluster validating webhook (Tree 1: operator-singleton
-	// admission validation). TLS material is provisioned by webhookBootstrap
-	// below — see internal/webhook/bootstrap.go for the rotation flow.
-	if err := (&nomadv1alpha1.NomadCluster{}).SetupWebhookWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "NomadCluster")
-		os.Exit(1)
-	}
-
-	// Register the bootstrap as a continuous Runnable for rotation + caBundle
-	// upkeep. It uses the cached manager client and runs under leader election.
-	// The initial cert provisioning (EnsureSecret + WriteCertsToDir) ran
-	// above, before certwatcher.New, so the webhook server already has its
-	// files on disk by the time we reach here.
-	managedBootstrap := webhookbootstrap.NewBootstrap(mgr.GetClient(), webhookCfg)
-	if err := mgr.Add(managedBootstrap); err != nil {
-		setupLog.Error(err, "unable to register webhook bootstrap with manager")
-		os.Exit(1)
-	}
-
 	// Ensure the operator's own metrics ServiceMonitor once the cache is
 	// ready (AC-F4.4). No-op on clusters without Prometheus Operator CRDs.
+	operatorNamespace := namespaceFromEnv()
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if err := operatormetrics.EnsureOperatorServiceMonitor(ctx, mgr.GetClient(), webhookCfg.Namespace); err != nil {
+		if err := operatormetrics.EnsureOperatorServiceMonitor(ctx, mgr.GetClient(), operatorNamespace); err != nil {
 			setupLog.Error(err, "unable to ensure operator ServiceMonitor; continuing without it")
 		}
 		return nil
@@ -301,14 +225,6 @@ func main() {
 		setupLog.Info("Adding metrics certificate watcher to manager")
 		if err := mgr.Add(metricsCertWatcher); err != nil {
 			setupLog.Error(err, "unable to add metrics certificate watcher to manager")
-			os.Exit(1)
-		}
-	}
-
-	if webhookCertWatcher != nil {
-		setupLog.Info("Adding webhook certificate watcher to manager")
-		if err := mgr.Add(webhookCertWatcher); err != nil {
-			setupLog.Error(err, "unable to add webhook certificate watcher to manager")
 			os.Exit(1)
 		}
 	}
@@ -327,4 +243,15 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// namespaceFromEnv returns the operator's own namespace, resolved from the
+// downward-API POD_NAMESPACE env var with a fallback to the install-time
+// default. Used by the optional metrics-ServiceMonitor runnable so it
+// targets the operator's own service.
+func namespaceFromEnv() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "nomad-enterprise-operator-system"
 }

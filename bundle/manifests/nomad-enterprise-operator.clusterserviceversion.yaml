@@ -105,7 +105,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-06-10T21:41:11Z"
+    createdAt: "2026-06-11T06:55:37Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
@@ -171,16 +171,6 @@ spec:
           verbs:
           - create
           - patch
-        - apiGroups:
-          - admissionregistration.k8s.io
-          resources:
-          - validatingwebhookconfigurations
-          verbs:
-          - get
-          - list
-          - patch
-          - update
-          - watch
         - apiGroups:
           - apps
           resources:
@@ -323,10 +313,6 @@ spec:
                   initialDelaySeconds: 15
                   periodSeconds: 20
                 name: manager
-                ports:
-                - containerPort: 9443
-                  name: webhook-server
-                  protocol: TCP
                 readinessProbe:
                   httpGet:
                     path: /readyz
@@ -345,21 +331,12 @@ spec:
                   capabilities:
                     drop:
                     - ALL
-                volumeMounts:
-                - mountPath: /tmp/k8s-webhook-server/serving-certs
-                  name: webhook-tls
-                  readOnly: true
               securityContext:
                 runAsNonRoot: true
                 seccompProfile:
                   type: RuntimeDefault
               serviceAccountName: nomad-enterprise-operator-controller-manager
               terminationGracePeriodSeconds: 10
-              volumes:
-              - name: webhook-tls
-                secret:
-                  optional: true
-                  secretName: nomad-enterprise-operator-webhook-tls
       permissions:
       - rules:
         - apiGroups:
@@ -421,44 +398,3 @@ spec:
     name: benemon
     url: https://github.com/benemon
   version: 0.0.1
-  webhookdefinitions:
-  - admissionReviewVersions:
-    - v1
-    containerPort: 443
-    deploymentName: nomad-enterprise-operator-controller-manager
-    failurePolicy: Fail
-    generateName: mnomadcluster.kb.io
-    rules:
-    - apiGroups:
-      - nomad.hashicorp.com
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - nomadclusters
-    sideEffects: None
-    targetPort: 9443
-    type: MutatingAdmissionWebhook
-    webhookPath: /mutate-nomad-hashicorp-com-v1alpha1-nomadcluster
-  - admissionReviewVersions:
-    - v1
-    containerPort: 443
-    deploymentName: nomad-enterprise-operator-controller-manager
-    failurePolicy: Fail
-    generateName: vnomadcluster.kb.io
-    rules:
-    - apiGroups:
-      - nomad.hashicorp.com
-      apiVersions:
-      - v1alpha1
-      operations:
-      - CREATE
-      - UPDATE
-      resources:
-      - nomadclusters
-    sideEffects: None
-    targetPort: 9443
-    type: ValidatingAdmissionWebhook
-    webhookPath: /validate-nomad-hashicorp-com-v1alpha1-nomadcluster
