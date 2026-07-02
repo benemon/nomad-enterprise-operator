@@ -21,12 +21,15 @@ spec:
     - jsonPath: .spec.clusterRef.name
       name: Cluster
       type: string
+    - jsonPath: .status.operation
+      name: Operation
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
     - jsonPath: .spec.schedule.interval
       name: Interval
       type: string
-    - jsonPath: .spec.schedule.retain
-      name: Retain
-      type: integer
     - jsonPath: .status.lastSnapshot.time
       name: Last Snapshot
       type: date
@@ -36,7 +39,16 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: NomadSnapshot is the Schema for the nomadsnapshots API.
+        description: |-
+          NomadSnapshot is the Schema for the nomadsnapshots API.
+
+          AC-2.7.3a (D3 / neo-kk7): the XValidation transition rule below
+          blocks a mode switch — adding or removing spec.schedule — while a
+          one-shot snapshot Job is still running. Enforced as CRD CEL (the
+          design doc predates neo-bqb's webhook removal; same shape as the D2c
+          scale-down gate). Recurring-mode deployments are long-lived, so
+          switching away from them is always a steady-state edit and never
+          blocked.
         properties:
           apiVersion:
             description: |-
@@ -136,7 +148,14 @@ spec:
                     type: object
                 type: object
               schedule:
-                description: Schedule defines snapshot timing
+                description: |-
+                  Schedule defines recurring snapshot timing (D3 / AC-2.7.1–2).
+                  When set, the operator runs a long-lived snapshot-agent Deployment
+                  taking snapshots at the given interval. When omitted, the operator
+                  runs a one-shot Job that takes a single snapshot and exits.
+                  Adding or removing this field on an existing NomadSnapshot switches
+                  modes; the switch is blocked while a one-shot Job is still running
+                  (AC-2.7.3a, CEL-enforced).
                 properties:
                   interval:
                     default: 1h
@@ -307,7 +326,6 @@ spec:
                 type: array
             required:
             - clusterRef
-            - schedule
             - target
             type: object
             x-kubernetes-validations:
@@ -388,6 +406,10 @@ spec:
                   replicas
                 format: int32
                 type: integer
+              jobName:
+                description: JobName is the name of the one-shot snapshot Job (Job
+                  mode only)
+                type: string
               lastSnapshot:
                 description: LastSnapshot contains information about the most recent
                   snapshot
@@ -421,6 +443,29 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              operation:
+                description: |-
+                  Operation names the child workload currently reconciled for this
+                  NomadSnapshot: "Job" (one-shot, spec.schedule omitted) or
+                  "Deployment" (recurring, spec.schedule set). Status reflects the
+                  operation, not the storage artifact (D3 / AC-2.7.7).
+                enum:
+                - Job
+                - Deployment
+                type: string
+              phase:
+                description: |-
+                  Phase tracks the one-shot Job lifecycle: Pending, Running,
+                  Succeeded, or Failed. Empty in recurring (Deployment) mode, whose
+                  liveness is expressed via readyReplicas and the Ready condition.
+                  Also the AC-2.7.3a gate: adding/removing spec.schedule is rejected
+                  at admission while phase is Running.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                type: string
               policyName:
                 description: |-
                   PolicyName is the Nomad ACL policy created for the snapshot agent.
@@ -439,6 +484,11 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: mode switch (adding/removing spec.schedule) is blocked while a
+            one-shot snapshot Job is running; wait for it to complete
+          rule: (has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status)
+            || !has(self.status.phase) || self.status.phase != 'Running'
     served: true
     storage: true
     subresources:

@@ -476,7 +476,36 @@ operator-managed OIDC resources from existing clusters.
 
 ## NomadSnapshot CRD Reference
 
-A `NomadSnapshot` deploys a Nomad snapshot agent as a Deployment, targeting a `NomadCluster` in the same or different namespace. It supports local PVC, S3, GCS, and Azure Blob storage backends.
+A `NomadSnapshot` takes Raft snapshots of a `NomadCluster` in the same
+or different namespace, storing them in a local PVC, S3, GCS, or Azure
+Blob backend. It runs in one of two modes, selected by whether
+`spec.schedule` is present:
+
+- **Recurring** (`schedule` set): a long-lived snapshot-agent
+  Deployment takes a snapshot every `schedule.interval`.
+  `status.operation` is `Deployment`; `status.nextScheduled` projects
+  the next run.
+- **One-shot** (`schedule` omitted): a Job runs the agent once
+  (`interval = "0"`), takes a single snapshot, and exits.
+  `status.operation` is `Job` and `status.phase` walks
+  `Running → Succeeded|Failed`. One NomadSnapshot without a schedule
+  performs one snapshot; delete and recreate it (or toggle modes) for
+  another.
+
+Editing `spec.schedule` on/off switches modes: the operator deletes the
+old mode's workload and creates the new one. The switch is **rejected
+at admission while a one-shot Job is still running** (wait for
+`status.phase` to leave `Running`). Target configuration is identical
+across modes.
+
+Changing `spec.target` or `spec.schedule` on a recurring NomadSnapshot
+updates the agent config and rolls the Deployment automatically — the
+pod template carries a `checksum/config` annotation, so the agent
+always runs the current config. A failed one-shot Job sets the
+`Degraded` condition and emits a `SnapshotDegraded` Warning Event.
+
+For restoring from a snapshot, see
+[docs/runbooks/restore.md](docs/runbooks/restore.md).
 
 ### Spec
 
@@ -484,6 +513,7 @@ A `NomadSnapshot` deploys a Nomad snapshot agent as a Deployment, targeting a `N
 |-------|------|---------|-------------|
 | `clusterRef.name` | `string` | | Name of the target NomadCluster |
 | `clusterRef.namespace` | `string` | | Namespace of the target NomadCluster. Defaults to the NomadSnapshot's namespace |
+| `schedule` | `object` | | Optional. Present = recurring agent Deployment; omitted = one-shot Job |
 | `schedule.interval` | `string` | `1h` | Interval between snapshots (e.g. `1h`, `24h`) |
 | `schedule.retain` | `int` | `24` | Number of snapshots to retain (minimum 1) |
 | `schedule.stale` | `bool` | `false` | Allow reading from a non-leader for snapshots |

@@ -47,7 +47,7 @@ func newTestSnapshot(namespace, name, clusterName string) *nomadv1alpha1.NomadSn
 			ClusterRef: nomadv1alpha1.ClusterReference{
 				Name: clusterName,
 			},
-			Schedule: nomadv1alpha1.SnapshotSchedule{
+			Schedule: &nomadv1alpha1.SnapshotSchedule{
 				Interval: "1h",
 				Retain:   24,
 			},
@@ -453,7 +453,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 					ClusterRef: nomadv1alpha1.ClusterReference{
 						Name: "nomad",
 					},
-					Schedule: nomadv1alpha1.SnapshotSchedule{
+					Schedule: &nomadv1alpha1.SnapshotSchedule{
 						Interval: "24h",
 						Retain:   7,
 					},
@@ -517,7 +517,7 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 			reconciler := &NomadSnapshotReconciler{}
 			snapshot := &nomadv1alpha1.NomadSnapshot{
 				Spec: nomadv1alpha1.NomadSnapshotSpec{
-					Schedule: nomadv1alpha1.SnapshotSchedule{},
+					Schedule: &nomadv1alpha1.SnapshotSchedule{},
 					Target: nomadv1alpha1.SnapshotTarget{
 						Local: &nomadv1alpha1.SnapshotLocalConfig{},
 					},
@@ -537,7 +537,7 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 			reconciler := &NomadSnapshotReconciler{}
 			snapshot := &nomadv1alpha1.NomadSnapshot{
 				Spec: nomadv1alpha1.NomadSnapshotSpec{
-					Schedule: nomadv1alpha1.SnapshotSchedule{
+					Schedule: &nomadv1alpha1.SnapshotSchedule{
 						Interval: "6h",
 						Retain:   48,
 						Stale:    true,
@@ -569,7 +569,7 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 			reconciler := &NomadSnapshotReconciler{}
 			snapshot := &nomadv1alpha1.NomadSnapshot{
 				Spec: nomadv1alpha1.NomadSnapshotSpec{
-					Schedule: nomadv1alpha1.SnapshotSchedule{
+					Schedule: &nomadv1alpha1.SnapshotSchedule{
 						Interval: "24h",
 						Retain:   7,
 					},
@@ -591,7 +591,7 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 			reconciler := &NomadSnapshotReconciler{}
 			snapshot := &nomadv1alpha1.NomadSnapshot{
 				Spec: nomadv1alpha1.NomadSnapshotSpec{
-					Schedule: nomadv1alpha1.SnapshotSchedule{
+					Schedule: &nomadv1alpha1.SnapshotSchedule{
 						Interval: "12h",
 						Retain:   14,
 					},

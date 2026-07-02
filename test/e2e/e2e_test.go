@@ -1039,6 +1039,58 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 		})
 
+		// D3 (neo-kk7): one-shot mode smoke — spec.schedule omitted runs a
+		// Job that takes a single snapshot and reaches phase=Succeeded.
+		It("should complete a one-shot NomadSnapshot via a Job", func() {
+			By("applying a NomadSnapshot CR without a schedule")
+			oneShotCR := `apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: test-snapshot-oneshot
+  namespace: nomad-enterprise-operator-system
+spec:
+  clusterRef:
+    name: test-cluster
+  target:
+    local:
+      size: 1Gi
+`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(oneShotCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply one-shot NomadSnapshot CR")
+
+			By("verifying status reflects the Job operation")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadsnapshot", "test-snapshot-oneshot", "-n", namespace,
+					"-o", "jsonpath={.status.operation}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Job"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for phase=Succeeded")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadsnapshot", "test-snapshot-oneshot", "-n", namespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Succeeded"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying lastSnapshot records the success")
+			cmd = exec.Command("kubectl", "get", "nomadsnapshot", "test-snapshot-oneshot", "-n", namespace,
+				"-o", "jsonpath={.status.lastSnapshot.status}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("Success"))
+
+			By("cleaning up the one-shot NomadSnapshot")
+			cmd = exec.Command("kubectl", "delete", "nomadsnapshot", "test-snapshot-oneshot", "-n", namespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("should clean up resources on CR deletion", func() {
 			By("deleting the NomadCluster CR")
 			cmd := exec.Command("kubectl", "delete", "nomadcluster", testClusterName, "-n", namespace)

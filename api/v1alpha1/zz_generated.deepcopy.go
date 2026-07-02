@@ -473,7 +473,11 @@ func (in *NomadSnapshotList) DeepCopyObject() runtime.Object {
 func (in *NomadSnapshotSpec) DeepCopyInto(out *NomadSnapshotSpec) {
 	*out = *in
 	out.ClusterRef = in.ClusterRef
-	out.Schedule = in.Schedule
+	if in.Schedule != nil {
+		in, out := &in.Schedule, &out.Schedule
+		*out = new(SnapshotSchedule)
+		**out = **in
+	}
 	in.Target.DeepCopyInto(&out.Target)
 	in.Resources.DeepCopyInto(&out.Resources)
 	if in.NodeSelector != nil {

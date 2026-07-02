@@ -27,8 +27,15 @@ type NomadSnapshotSpec struct {
 	// ClusterRef references the NomadCluster to snapshot
 	ClusterRef ClusterReference `json:"clusterRef"`
 
-	// Schedule defines snapshot timing
-	Schedule SnapshotSchedule `json:"schedule"`
+	// Schedule defines recurring snapshot timing (D3 / AC-2.7.1–2).
+	// When set, the operator runs a long-lived snapshot-agent Deployment
+	// taking snapshots at the given interval. When omitted, the operator
+	// runs a one-shot Job that takes a single snapshot and exits.
+	// Adding or removing this field on an existing NomadSnapshot switches
+	// modes; the switch is blocked while a one-shot Job is still running
+	// (AC-2.7.3a, CEL-enforced).
+	// +optional
+	Schedule *SnapshotSchedule `json:"schedule,omitempty"`
 
 	// Target defines where to store snapshots
 	Target SnapshotTarget `json:"target"`
@@ -155,10 +162,45 @@ type SnapshotLocalConfig struct {
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
+// Valid status.operation values.
+const (
+	SnapshotOperationJob        = "Job"
+	SnapshotOperationDeployment = "Deployment"
+)
+
+// Valid status.phase values for the one-shot Job mode.
+const (
+	SnapshotPhasePending   = "Pending"
+	SnapshotPhaseRunning   = "Running"
+	SnapshotPhaseSucceeded = "Succeeded"
+	SnapshotPhaseFailed    = "Failed"
+)
+
 // NomadSnapshotStatus defines the observed state of NomadSnapshot.
 type NomadSnapshotStatus struct {
 	// Conditions represent the latest observations of the snapshot agent state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Operation names the child workload currently reconciled for this
+	// NomadSnapshot: "Job" (one-shot, spec.schedule omitted) or
+	// "Deployment" (recurring, spec.schedule set). Status reflects the
+	// operation, not the storage artifact (D3 / AC-2.7.7).
+	// +kubebuilder:validation:Enum=Job;Deployment
+	// +optional
+	Operation string `json:"operation,omitempty"`
+
+	// Phase tracks the one-shot Job lifecycle: Pending, Running,
+	// Succeeded, or Failed. Empty in recurring (Deployment) mode, whose
+	// liveness is expressed via readyReplicas and the Ready condition.
+	// Also the AC-2.7.3a gate: adding/removing spec.schedule is rejected
+	// at admission while phase is Running.
+	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// JobName is the name of the one-shot snapshot Job (Job mode only)
+	// +optional
+	JobName string `json:"jobName,omitempty"`
 
 	// TokenAccessorID is the Nomad ACL token accessor ID for cleanup
 	// +optional
@@ -226,16 +268,26 @@ type SnapshotInfo struct {
 	Error string `json:"error,omitempty"`
 }
 
+// NomadSnapshot is the Schema for the nomadsnapshots API.
+//
+// AC-2.7.3a (D3 / neo-kk7): the XValidation transition rule below
+// blocks a mode switch — adding or removing spec.schedule — while a
+// one-shot snapshot Job is still running. Enforced as CRD CEL (the
+// design doc predates neo-bqb's webhook removal; same shape as the D2c
+// scale-down gate). Recurring-mode deployments are long-lived, so
+// switching away from them is always a steady-state edit and never
+// blocked.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ns;snapshot
 // +kubebuilder:printcolumn:name="Cluster",type="string",JSONPath=".spec.clusterRef.name"
+// +kubebuilder:printcolumn:name="Operation",type="string",JSONPath=".status.operation"
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Interval",type="string",JSONPath=".spec.schedule.interval"
-// +kubebuilder:printcolumn:name="Retain",type="integer",JSONPath=".spec.schedule.retain"
 // +kubebuilder:printcolumn:name="Last Snapshot",type="date",JSONPath=".status.lastSnapshot.time"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-
-// NomadSnapshot is the Schema for the nomadsnapshots API.
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status) || !has(self.status.phase) || self.status.phase != 'Running'",message="mode switch (adding/removing spec.schedule) is blocked while a one-shot snapshot Job is running; wait for it to complete"
 type NomadSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

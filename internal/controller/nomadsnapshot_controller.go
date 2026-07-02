@@ -22,6 +22,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -61,6 +62,7 @@ type NomadSnapshotReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles NomadSnapshot reconciliation.
 //
@@ -217,27 +219,59 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
+	// Generate the agent config once; the ConfigMap stores it and the
+	// workload's pod template carries its checksum so config changes
+	// roll the agent (AC-2.7.6a).
+	agentConfig := r.generateSnapshotConfig(snapshot)
+	configChecksum := phases.ConfigChecksum(map[string]string{"snapshot.hcl": agentConfig})
+
 	// Create ConfigMap with snapshot agent config
-	if err := r.reconcileConfigMap(ctx, snapshot); err != nil {
+	if err := r.reconcileConfigMap(ctx, snapshot, agentConfig); err != nil {
 		log.Error(err, "Failed to reconcile ConfigMap")
 		return ctrl.Result{}, err
 	}
 
-	// Create Deployment for snapshot agent
-	// Always use internal address for the deployment since it runs inside the cluster
-	if err := r.reconcileDeployment(ctx, snapshot, cluster, internalAddr); err != nil {
+	// D3 (neo-kk7): branch on schedule presence. With a schedule the
+	// agent runs as a long-lived Deployment (recurring); without one it
+	// runs as a one-shot Job (interval = "0"). Mode switch deletes the
+	// other mode's workload (AC-2.7.3); switching away from a RUNNING
+	// one-shot Job is rejected at admission (AC-2.7.3a CEL rule).
+	if snapshot.Spec.Schedule != nil {
+		return r.reconcileRecurring(ctx, snapshot, cluster, internalAddr, configChecksum)
+	}
+	return r.reconcileOneShot(ctx, snapshot, cluster, internalAddr, configChecksum)
+}
+
+// reconcileRecurring runs the schedule-present mode: snapshot-agent
+// Deployment, status from Deployment observation (AC-2.7.2 / 2.7.6).
+func (r *NomadSnapshotReconciler) reconcileRecurring(
+	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
+	cluster *nomadv1alpha1.NomadCluster, internalAddr, configChecksum string,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Mode switch: remove a leftover one-shot Job.
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: snapshot.Name + "-snapshot", Namespace: snapshot.Namespace,
+	}}
+	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !k8serrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileDeployment(ctx, snapshot, cluster, internalAddr, configChecksum); err != nil {
 		log.Error(err, "Failed to reconcile Deployment")
 		return ctrl.Result{}, err
 	}
 
-	// Update status with deployment information
 	deploymentName := snapshot.Name + "-snapshot-agent"
-	configMapName := snapshot.Name + "-snapshot-config"
 
 	patchBase := snapshot.DeepCopy()
 	snapshot.Status.ObservedGeneration = snapshot.Generation
+	snapshot.Status.Operation = nomadv1alpha1.SnapshotOperationDeployment
+	snapshot.Status.Phase = ""
+	snapshot.Status.JobName = ""
 	snapshot.Status.DeploymentName = deploymentName
-	snapshot.Status.ConfigMapName = configMapName
+	snapshot.Status.ConfigMapName = snapshot.Name + "-snapshot-config"
 	snapshot.Status.NomadAddress = internalAddr
 
 	// Fetch deployment to get replica status
@@ -255,6 +289,17 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Reason:  "Deployed",
 			Message: "Snapshot agent deployment is running",
 		})
+
+		// AC-2.7.9: NextScheduled for recurring mode. The agent snapshots
+		// on its own clock which the operator cannot observe directly, so
+		// this is the operator's best projection: advanced by one interval
+		// whenever the previous projection lapses (at most one status
+		// write per interval, not per reconcile).
+		if interval, perr := time.ParseDuration(snapshot.Spec.Schedule.Interval); perr == nil {
+			if snapshot.Status.NextScheduled == nil || snapshot.Status.NextScheduled.Time.Before(time.Now()) {
+				snapshot.Status.NextScheduled = &metav1.Time{Time: time.Now().Add(interval)}
+			}
+		}
 	} else {
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
@@ -263,12 +308,149 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message: "Snapshot agent deployment is not yet ready",
 		})
 	}
+	r.setDegraded(snapshot, false, "OperationHealthy", "")
 
 	if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+// reconcileOneShot runs the schedule-absent mode: a single snapshot Job
+// (agent with interval = "0"), status from Job observation
+// (AC-2.7.1 / 2.7.5). One NomadSnapshot without a schedule performs one
+// snapshot operation; delete and recreate the CR (or switch modes) to
+// take another.
+func (r *NomadSnapshotReconciler) reconcileOneShot(
+	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
+	cluster *nomadv1alpha1.NomadCluster, internalAddr, configChecksum string,
+) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// Mode switch: remove a leftover recurring Deployment.
+	staleDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: snapshot.Name + "-snapshot-agent", Namespace: snapshot.Namespace,
+	}}
+	if err := r.Delete(ctx, staleDeploy, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !k8serrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	jobName := snapshot.Name + "-snapshot"
+	job := &batchv1.Job{}
+	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: snapshot.Namespace}, job)
+	if k8serrors.IsNotFound(err) {
+		if err := r.createSnapshotJob(ctx, snapshot, cluster, internalAddr, configChecksum, jobName); err != nil {
+			log.Error(err, "Failed to create snapshot Job")
+			return ctrl.Result{}, err
+		}
+		// Re-read for status observation below; NotFound just means the
+		// cache hasn't caught up — the requeue covers it.
+		if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: snapshot.Namespace}, job); err != nil && !k8serrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+	} else if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	patchBase := snapshot.DeepCopy()
+	snapshot.Status.ObservedGeneration = snapshot.Generation
+	snapshot.Status.Operation = nomadv1alpha1.SnapshotOperationJob
+	snapshot.Status.JobName = jobName
+	snapshot.Status.ConfigMapName = snapshot.Name + "-snapshot-config"
+	snapshot.Status.NomadAddress = internalAddr
+	snapshot.Status.DeploymentName = ""
+	snapshot.Status.NextScheduled = nil
+	snapshot.Status.DesiredReplicas = 0
+	snapshot.Status.ReadyReplicas = 0
+
+	// AC-2.7.5: phase from Job observation.
+	wasDegraded := meta.IsStatusConditionTrue(snapshot.Status.Conditions, "Degraded")
+	switch {
+	case job.Name == "":
+		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhasePending
+	case job.Status.Succeeded > 0:
+		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseSucceeded
+		snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
+			Time:   job.Status.CompletionTime,
+			Status: "Success",
+		}
+		r.setCondition(snapshot, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionTrue,
+			Reason:  "SnapshotSucceeded",
+			Message: "One-shot snapshot Job completed successfully",
+		})
+		r.setDegraded(snapshot, false, "OperationHealthy", "")
+	case jobFailed(job):
+		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseFailed
+		snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
+			Time:   &metav1.Time{Time: time.Now()},
+			Status: "Failed",
+			Error:  "snapshot Job exhausted its retries; see Job pod logs",
+		}
+		r.setCondition(snapshot, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "SnapshotFailed",
+			Message: "One-shot snapshot Job failed",
+		})
+		// AC-2.7.8: Degraded condition emits a Warning Event, once per
+		// transition into the degraded state.
+		r.setDegraded(snapshot, true, "SnapshotJobFailed",
+			fmt.Sprintf("Snapshot Job %s failed after exhausting retries", jobName))
+		if !wasDegraded && r.Recorder != nil {
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDegraded",
+				fmt.Sprintf("Snapshot Job %s failed after exhausting retries", jobName))
+		}
+	default:
+		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseRunning
+		r.setCondition(snapshot, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "SnapshotRunning",
+			Message: "One-shot snapshot Job is running",
+		})
+	}
+
+	if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Terminal phases need no requeue — the Job watch catches everything
+	// in between.
+	if snapshot.Status.Phase == nomadv1alpha1.SnapshotPhaseSucceeded ||
+		snapshot.Status.Phase == nomadv1alpha1.SnapshotPhaseFailed {
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
+}
+
+// jobFailed reports whether the Job has the terminal Failed condition.
+func jobFailed(job *batchv1.Job) bool {
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+// setDegraded maintains the Degraded condition (AC-2.7.8).
+func (r *NomadSnapshotReconciler) setDegraded(snapshot *nomadv1alpha1.NomadSnapshot, degraded bool, reason, message string) {
+	status := metav1.ConditionFalse
+	if degraded {
+		status = metav1.ConditionTrue
+	}
+	if message == "" {
+		message = "Snapshot operation is healthy"
+	}
+	r.setCondition(snapshot, metav1.Condition{
+		Type:    "Degraded",
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
 }
 
 // handleDeletion cleans up the Nomad ACL token and policy, then removes the finalizer.
@@ -461,11 +643,8 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 }
 
 // reconcileConfigMap creates or updates the snapshot agent ConfigMap
-func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot) error {
+func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, config string) error {
 	configMapName := snapshot.Name + "-snapshot-config"
-
-	// Generate HCL config
-	config := r.generateSnapshotConfig(snapshot)
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -484,24 +663,38 @@ func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapsh
 	return err
 }
 
-// generateSnapshotConfig generates the HCL config for the snapshot agent
+// generateSnapshotConfig generates the HCL config for the snapshot agent.
+// The target stanzas are identical across modes (AC-2.7.4); only the
+// snapshot block differs: interval = "0" runs the agent as a one-shot
+// process that takes a single snapshot and exits (Job mode), a real
+// interval runs it as a long-lived daemon (Deployment mode).
 func (r *NomadSnapshotReconciler) generateSnapshotConfig(snapshot *nomadv1alpha1.NomadSnapshot) string {
-	interval := snapshot.Spec.Schedule.Interval
-	if interval == "" {
-		interval = "1h"
-	}
-	retain := snapshot.Spec.Schedule.Retain
-	if retain == 0 {
-		retain = 24
-	}
+	var config string
+	if snapshot.Spec.Schedule == nil {
+		// One-shot: no retention pruning — a single explicit snapshot
+		// must never delete existing artifacts in the target.
+		config = `snapshot {
+  interval = "0"
+}
+`
+	} else {
+		interval := snapshot.Spec.Schedule.Interval
+		if interval == "" {
+			interval = "1h"
+		}
+		retain := snapshot.Spec.Schedule.Retain
+		if retain == 0 {
+			retain = 24
+		}
 
-	config := fmt.Sprintf(`snapshot {
+		config = fmt.Sprintf(`snapshot {
   interval         = "%s"
   retain           = %d
   stale            = %t
   deregister_after = "8h"
 }
 `, interval, retain, snapshot.Spec.Schedule.Stale)
+	}
 
 	// Add storage backend config
 	if snapshot.Spec.Target.S3 != nil {
@@ -579,121 +772,169 @@ func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snap
 	return err
 }
 
-// reconcileDeployment creates or updates the snapshot agent Deployment
-func (r *NomadSnapshotReconciler) reconcileDeployment(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster, nomadAddr string) error {
-	deploymentName := snapshot.Name + "-snapshot-agent"
+// snapshotAgentLabels returns the selector labels for the snapshot
+// agent workload (shared by the Deployment and Job pod templates).
+func snapshotAgentLabels(snapshot *nomadv1alpha1.NomadSnapshot) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       "nomad-snapshot-agent",
+		"app.kubernetes.io/instance":   snapshot.Name,
+		"app.kubernetes.io/managed-by": "nomad-enterprise-operator",
+	}
+}
+
+// buildAgentPodTemplate builds the snapshot agent pod template used by
+// BOTH modes (AC-2.7.4: consistent target handling across modes). The
+// config checksum annotation makes spec-derived config changes roll the
+// recurring Deployment (AC-2.7.6a); it is inert on the immutable Job.
+func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
+	snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster,
+	nomadAddr, configChecksum string,
+) corev1.PodTemplateSpec {
 	configMapName := snapshot.Name + "-snapshot-config"
 	tokenSecretName := snapshot.Name + "-snapshot-token"
 
 	// Image defaults set via kubebuilder tags on ImageSpec
 	image := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
 
+	template := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      snapshotAgentLabels(snapshot),
+			Annotations: map[string]string{"checksum/config": configChecksum},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "snapshot-agent",
+					Image: image,
+					Command: []string{
+						"nomad", "operator", "snapshot", "agent",
+						"/config/snapshot.hcl",
+					},
+					Env: []corev1.EnvVar{
+						{
+							Name:  "NOMAD_ADDR",
+							Value: nomadAddr,
+						},
+						{
+							Name:  "NOMAD_CACERT",
+							Value: "/tls/ca.crt",
+						},
+						{
+							Name: "NOMAD_TOKEN",
+							ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: tokenSecretName,
+									},
+									Key: "secret-id",
+								},
+							},
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "config",
+							MountPath: "/config",
+							ReadOnly:  true,
+						},
+						{
+							Name:      "tls",
+							MountPath: "/tls",
+							ReadOnly:  true,
+						},
+					},
+					Resources: snapshot.Spec.Resources,
+				},
+			},
+			Volumes: []corev1.Volume{
+				{
+					Name: "config",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: configMapName,
+							},
+						},
+					},
+				},
+				{
+					Name: "tls",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: cluster.Name + "-tls",
+						},
+					},
+				},
+			},
+			NodeSelector: snapshot.Spec.NodeSelector,
+			Tolerations:  snapshot.Spec.Tolerations,
+		},
+	}
+
+	// Add storage credentials if specified
+	r.addStorageCredentials(snapshot, &template.Spec)
+
+	// Add local PVC if specified
+	if snapshot.Spec.Target.Local != nil {
+		r.addLocalStorage(snapshot, &template.Spec)
+	}
+
+	return template
+}
+
+// reconcileDeployment creates or updates the snapshot agent Deployment
+func (r *NomadSnapshotReconciler) reconcileDeployment(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster, nomadAddr, configChecksum string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      deploymentName,
+			Name:      snapshot.Name + "-snapshot-agent",
 			Namespace: snapshot.Namespace,
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
-		labels := map[string]string{
-			"app.kubernetes.io/name":       "nomad-snapshot-agent",
-			"app.kubernetes.io/instance":   snapshot.Name,
-			"app.kubernetes.io/managed-by": "nomad-enterprise-operator",
-		}
-
 		deploy.Spec = appsv1.DeploymentSpec{
 			Replicas: ptr.To(int32(1)),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
+				MatchLabels: snapshotAgentLabels(snapshot),
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "snapshot-agent",
-							Image: image,
-							Command: []string{
-								"nomad", "operator", "snapshot", "agent",
-								"/config/snapshot.hcl",
-							},
-							Env: []corev1.EnvVar{
-								{
-									Name:  "NOMAD_ADDR",
-									Value: nomadAddr,
-								},
-								{
-									Name:  "NOMAD_CACERT",
-									Value: "/tls/ca.crt",
-								},
-								{
-									Name: "NOMAD_TOKEN",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{
-												Name: tokenSecretName,
-											},
-											Key: "secret-id",
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "config",
-									MountPath: "/config",
-									ReadOnly:  true,
-								},
-								{
-									Name:      "tls",
-									MountPath: "/tls",
-									ReadOnly:  true,
-								},
-							},
-							Resources: snapshot.Spec.Resources,
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: configMapName,
-									},
-								},
-							},
-						},
-						{
-							Name: "tls",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: cluster.Name + "-tls",
-								},
-							},
-						},
-					},
-					NodeSelector: snapshot.Spec.NodeSelector,
-					Tolerations:  snapshot.Spec.Tolerations,
-				},
-			},
+			Template: r.buildAgentPodTemplate(snapshot, cluster, nomadAddr, configChecksum),
 		}
-
-		// Add storage credentials if specified
-		r.addStorageCredentials(snapshot, &deploy.Spec.Template.Spec)
-
-		// Add local PVC if specified
-		if snapshot.Spec.Target.Local != nil {
-			r.addLocalStorage(snapshot, &deploy.Spec.Template.Spec)
-		}
-
 		return controllerutil.SetControllerReference(snapshot, deploy, r.Scheme)
 	})
 
 	return err
+}
+
+// createSnapshotJob creates the one-shot snapshot Job (AC-2.7.1). Jobs
+// are immutable, so this is create-only: the Job observed at call time
+// did not exist. RestartPolicy OnFailure + backoffLimit bound retries;
+// exhaustion surfaces as phase=Failed via jobFailed.
+func (r *NomadSnapshotReconciler) createSnapshotJob(
+	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
+	cluster *nomadv1alpha1.NomadCluster, nomadAddr, configChecksum, jobName string,
+) error {
+	template := r.buildAgentPodTemplate(snapshot, cluster, nomadAddr, configChecksum)
+	template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: snapshot.Namespace,
+			Labels:    snapshotAgentLabels(snapshot),
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: ptr.To(int32(3)),
+			Template:     template,
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(snapshot, job, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.Create(ctx, job); err != nil && !k8serrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
 }
 
 // addStorageCredentials adds environment variables from credentials secrets
@@ -843,6 +1084,7 @@ func (r *NomadSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&batchv1.Job{}).
 		Named("nomadsnapshot").
 		Complete(r)
 }
