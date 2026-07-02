@@ -373,38 +373,28 @@ const (
 	ClusterPhaseFailed   ClusterPhase = "Failed"
 )
 
-// Condition types for NomadCluster
-const (
-	// ConditionTypeReady indicates the cluster is ready
-	ConditionTypeReady = "Ready"
-
-	// ConditionTypeGossipKeyReady indicates gossip key is configured
-	ConditionTypeGossipKeyReady = "GossipKeyReady"
-
-	// ConditionTypeServicesReady indicates all services are ready
-	ConditionTypeServicesReady = "ServicesReady"
-
-	// ConditionTypeAdvertiseResolved indicates LoadBalancer IP is resolved
-	ConditionTypeAdvertiseResolved = "AdvertiseResolved"
-
-	// ConditionTypeStatefulSetReady indicates StatefulSet is ready
-	ConditionTypeStatefulSetReady = "StatefulSetReady"
-
-	// ConditionTypeACLBootstrapped indicates ACL bootstrap is complete
-	ConditionTypeACLBootstrapped = "ACLBootstrapped"
-
-	// ConditionTypeRouteReady indicates OpenShift Route is ready
-	ConditionTypeRouteReady = "RouteReady"
-
-	// ConditionTypeMonitoringReady indicates monitoring resources are ready
-	ConditionTypeMonitoringReady = "MonitoringReady"
-
-	// ConditionTypeLicenseValid indicates the Nomad Enterprise license status
-	ConditionTypeLicenseValid = "LicenseValid"
-
-	// ConditionTypeAutopilotHealthy indicates Raft autopilot health status
-	ConditionTypeAutopilotHealthy = "AutopilotHealthy"
-)
+// Condition contract (C9 / neo-jmq, design review §2.5): NomadCluster
+// exposes exactly ONE condition, type "Ready". Everything a legacy
+// condition used to say lives in a dedicated status sub-field instead
+// (readyReplicas, gossipKeySecretName, advertiseAddress,
+// aclBootstrapped, routeHost, license, autopilot, certificateAuthority,
+// scaleDown). Ready=True requires: StatefulSet at desired replicas AND
+// license valid AND autopilot healthy (AC-2.5.5; unknown probe state
+// does not fail Ready). Ready=False reasons (AC-2.5.6):
+//
+//	WaitingForReplicas        — StatefulSet below desired ready count
+//	LicenseExpired            — Nomad Enterprise license invalid
+//	AutopilotUnhealthy        — Raft autopilot reports unhealthy
+//	PhaseFailed               — a reconcile phase returned an error
+//	Reconciling               — generic requeue (phase asked to wait)
+//	ScaleDownBlocked          — scale-down waiting on a Raft leader (D2d)
+//	DegradedQuorumNotAccepted — scale-down below 3 lacks the opt-in annotation (D2c)
+//
+// The design doc also listed PreUpgradeSnapshotFailed (retracted with
+// B5 — the operator no longer snapshots before upgrades) and
+// CARenewalRequired (superseded by C5 — a Warning Event with Ready
+// staying True). Condition types are string literals at the emission
+// sites; there are deliberately no ConditionType* constants (AC-C9.5).
 
 // LicenseStatus represents the Nomad Enterprise license information
 type LicenseStatus struct {

@@ -46,6 +46,17 @@ func newFinalStatusFixture(t *testing.T, objs ...client.Object) (*NomadClusterRe
 	t.Helper()
 	_ = nomadv1alpha1.AddToScheme(scheme.Scheme)
 	builder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+	// Mirror the D5 field indexes SetupWithManager registers on the real
+	// cache, using the same shared extractors.
+	for key, extract := range secretRefIndexes {
+		extract := extract
+		builder = builder.WithIndex(&nomadv1alpha1.NomadCluster{}, key, func(obj client.Object) []string {
+			if name := extract(obj.(*nomadv1alpha1.NomadCluster)); name != "" {
+				return []string{name}
+			}
+			return nil
+		})
+	}
 	for _, o := range objs {
 		builder = builder.WithObjects(o)
 		if c, ok := o.(*nomadv1alpha1.NomadCluster); ok {
@@ -64,23 +75,30 @@ func condition(cluster *nomadv1alpha1.NomadCluster, condType string) *metav1.Con
 	return meta.FindStatusCondition(cluster.Status.Conditions, condType)
 }
 
-// TestUpdateFinalStatusReadyPath drives the full status-update family
-// with a ready StatefulSet and a fully-populated phase context, and
-// pins the one-shot InitialReconcileComplete Event debounce.
-func TestUpdateFinalStatusReadyPath(t *testing.T) {
+// TestReadyTruePrecondition covers C9 / AC-2.5.5: Ready=True requires
+// StatefulSet at desired replicas AND a valid license AND healthy
+// autopilot — and when it holds, status.conditions contains EXACTLY one
+// entry (AC-2.5.4), with legacy pre-C9 types pruned. Also pins the
+// one-shot InitialReconcileComplete Event debounce.
+func TestReadyTruePrecondition(t *testing.T) {
 	cluster := newTestCluster("fs-ns", "fs-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
+	// Simulate a cluster upgraded from a pre-C9 operator: legacy
+	// condition types linger on status until pruned.
+	legacyStamp := metav1.NewTime(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	cluster.Status.Conditions = []metav1.Condition{
+		{Type: "LicenseValid", Status: metav1.ConditionTrue, Reason: "LicenseActive", LastTransitionTime: legacyStamp},
+		{Type: "StatefulSetReady", Status: metav1.ConditionTrue, Reason: "AllReplicasReady", LastTransitionTime: legacyStamp},
+	}
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster", Namespace: "fs-ns"},
 		Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))},
 		Status:     appsv1.StatefulSetStatus{ReadyReplicas: 3, CurrentReplicas: 3},
 	}
-	internalSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster-internal", Namespace: "fs-ns"}}
-	externalSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster-external", Namespace: "fs-ns"}}
 	bootstrapSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster-acl-bootstrap", Namespace: "fs-ns"}}
 
-	r, recorder := newFinalStatusFixture(t, cluster, sts, internalSvc, externalSvc, bootstrapSecret)
+	r, recorder := newFinalStatusFixture(t, cluster, sts, bootstrapSecret)
 
 	phaseCtx := &phases.PhaseContext{
 		AdvertiseAddress: "10.0.0.9",
@@ -102,6 +120,15 @@ func TestUpdateFinalStatusReadyPath(t *testing.T) {
 	}
 	drive()
 
+	// AC-2.5.4: exactly one condition, type Ready.
+	if len(cluster.Status.Conditions) != 1 || cluster.Status.Conditions[0].Type != "Ready" {
+		t.Fatalf("conditions = %+v, want exactly one Ready entry", cluster.Status.Conditions)
+	}
+	if c := cluster.Status.Conditions[0]; c.Status != metav1.ConditionTrue || c.Reason != "ClusterReady" {
+		t.Errorf("Ready = %s/%s, want True/ClusterReady", c.Status, c.Reason)
+	}
+
+	// AC-2.5.7: sub-fields are the source of truth.
 	if cluster.Status.Phase != nomadv1alpha1.ClusterPhaseRunning {
 		t.Errorf("phase = %q, want Running", cluster.Status.Phase)
 	}
@@ -117,14 +144,11 @@ func TestUpdateFinalStatusReadyPath(t *testing.T) {
 	if !cluster.Status.ACLBootstrapped {
 		t.Error("aclBootstrapped not set despite bootstrap secret present")
 	}
-	for _, want := range []struct{ condType, reason string }{
-		{nomadv1alpha1.ConditionTypeReady, "ClusterReady"},
-		{nomadv1alpha1.ConditionTypeLicenseValid, "LicenseActive"},
-	} {
-		c := condition(cluster, want.condType)
-		if c == nil || c.Status != metav1.ConditionTrue || c.Reason != want.reason {
-			t.Errorf("condition %s = %+v, want True/%s", want.condType, c, want.reason)
-		}
+	if cluster.Status.License == nil || !cluster.Status.License.Valid {
+		t.Error("license sub-field not populated")
+	}
+	if cluster.Status.Autopilot == nil || !cluster.Status.Autopilot.Healthy {
+		t.Error("autopilot sub-field not populated")
 	}
 
 	// One-shot InitialReconcileComplete: emitted on first Ready, marker
@@ -145,45 +169,89 @@ func TestUpdateFinalStatusReadyPath(t *testing.T) {
 	}
 }
 
-// TestUpdateFinalStatusDegradedPaths covers the not-ready branches:
-// missing StatefulSet, missing services, expired license, license
-// probe failure, unhealthy autopilot.
-func TestUpdateFinalStatusDegradedPaths(t *testing.T) {
-	cluster := newTestCluster("fs-deg-ns", "fs-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
-	r, _ := newFinalStatusFixture(t, cluster)
-
-	phaseCtx := &phases.PhaseContext{
-		License:   &nomadv1alpha1.LicenseStatus{Valid: false},
-		Autopilot: &nomadv1alpha1.AutopilotStatus{Healthy: false},
-	}
-	snapshot := cluster.DeepCopy()
-	if err := r.updateFinalStatus(context.Background(), cluster, phaseCtx, snapshot); err != nil {
-		t.Fatalf("updateFinalStatus() error = %v", err)
+// TestReadyReasonMapping covers C9 / AC-2.5.6: each degraded sub-state
+// maps to its documented Ready=False Reason; an unknown probe state
+// (nil license/autopilot) does not fail Ready.
+func TestReadyReasonMapping(t *testing.T) {
+	readySTS := func() *appsv1.StatefulSet {
+		return &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster", Namespace: "fs-map-ns"},
+			Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(int32(3))},
+			Status:     appsv1.StatefulSetStatus{ReadyReplicas: 3, CurrentReplicas: 3},
+		}
 	}
 
-	if cluster.Status.Phase != nomadv1alpha1.ClusterPhaseCreating {
-		t.Errorf("phase = %q, want Creating with no StatefulSet", cluster.Status.Phase)
-	}
-	if c := condition(cluster, nomadv1alpha1.ConditionTypeReady); c == nil || c.Status != metav1.ConditionFalse {
-		t.Errorf("Ready = %+v, want False", c)
-	}
-	if c := condition(cluster, nomadv1alpha1.ConditionTypeLicenseValid); c == nil || c.Reason != "LicenseExpired" {
-		t.Errorf("LicenseValid = %+v, want LicenseExpired", c)
-	}
-	if cluster.Status.ACLBootstrapped {
-		t.Error("aclBootstrapped set without bootstrap secret")
+	cases := []struct {
+		name       string
+		sts        *appsv1.StatefulSet // nil = no StatefulSet
+		phaseCtx   *phases.PhaseContext
+		wantStatus metav1.ConditionStatus
+		wantReason string
+		wantPhase  nomadv1alpha1.ClusterPhase
+	}{
+		{
+			name:       "no ready replicas -> WaitingForReplicas",
+			sts:        nil,
+			phaseCtx:   &phases.PhaseContext{},
+			wantStatus: metav1.ConditionFalse,
+			wantReason: "WaitingForReplicas",
+			wantPhase:  nomadv1alpha1.ClusterPhaseCreating,
+		},
+		{
+			name: "invalid license -> LicenseExpired",
+			sts:  readySTS(),
+			phaseCtx: &phases.PhaseContext{
+				License: &nomadv1alpha1.LicenseStatus{Valid: false},
+			},
+			wantStatus: metav1.ConditionFalse,
+			wantReason: "LicenseExpired",
+			wantPhase:  nomadv1alpha1.ClusterPhaseRunning,
+		},
+		{
+			name: "unhealthy autopilot -> AutopilotUnhealthy",
+			sts:  readySTS(),
+			phaseCtx: &phases.PhaseContext{
+				License:   &nomadv1alpha1.LicenseStatus{Valid: true},
+				Autopilot: &nomadv1alpha1.AutopilotStatus{Healthy: false},
+			},
+			wantStatus: metav1.ConditionFalse,
+			wantReason: "AutopilotUnhealthy",
+			wantPhase:  nomadv1alpha1.ClusterPhaseRunning,
+		},
+		{
+			name:       "unknown probe state does not fail Ready",
+			sts:        readySTS(),
+			phaseCtx:   &phases.PhaseContext{LicenseError: context.DeadlineExceeded},
+			wantStatus: metav1.ConditionTrue,
+			wantReason: "ClusterReady",
+			wantPhase:  nomadv1alpha1.ClusterPhaseRunning,
+		},
 	}
 
-	// License probe failure → Unknown.
-	cluster2 := newTestCluster("fs-deg-ns", "fs-cluster2")
-	r2, _ := newFinalStatusFixture(t, cluster2)
-	phaseCtx2 := &phases.PhaseContext{LicenseError: context.DeadlineExceeded}
-	if err := r2.updateFinalStatus(context.Background(), cluster2, phaseCtx2, cluster2.DeepCopy()); err != nil {
-		t.Fatalf("updateFinalStatus() error = %v", err)
-	}
-	if c := condition(cluster2, nomadv1alpha1.ConditionTypeLicenseValid); c == nil || c.Status != metav1.ConditionUnknown {
-		t.Errorf("LicenseValid = %+v, want Unknown on probe failure", c)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := newTestCluster("fs-map-ns", "fs-cluster")
+			objs := []client.Object{cluster}
+			if tc.sts != nil {
+				objs = append(objs, tc.sts)
+			}
+			r, _ := newFinalStatusFixture(t, objs...)
+
+			if err := r.updateFinalStatus(context.Background(), cluster, tc.phaseCtx, cluster.DeepCopy()); err != nil {
+				t.Fatalf("updateFinalStatus() error = %v", err)
+			}
+
+			if len(cluster.Status.Conditions) != 1 {
+				t.Fatalf("conditions = %+v, want exactly one (AC-2.5.4)", cluster.Status.Conditions)
+			}
+			c := cluster.Status.Conditions[0]
+			if c.Type != "Ready" || c.Status != tc.wantStatus || c.Reason != tc.wantReason {
+				t.Errorf("Ready = %s/%s/%s, want Ready/%s/%s", c.Type, c.Status, c.Reason, tc.wantStatus, tc.wantReason)
+			}
+			if cluster.Status.Phase != tc.wantPhase {
+				t.Errorf("phase = %q, want %q", cluster.Status.Phase, tc.wantPhase)
+			}
+		})
 	}
 }
 

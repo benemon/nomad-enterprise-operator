@@ -653,12 +653,19 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("True"))
 
-			By("verifying StatefulSetReady condition is True")
+			By("verifying Ready is the ONLY condition type (C9 / AC-2.5.4)")
 			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
-				`-o`, `jsonpath={.status.conditions[?(@.type=="StatefulSetReady")].status}`)
+				`-o`, `jsonpath={.status.conditions[*].type}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("True"))
+			Expect(output).To(Equal("Ready"), "status.conditions must contain exactly the single Ready type")
+
+			By("verifying replica counters in status sub-fields")
+			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+				`-o`, `jsonpath={.status.readyReplicas}`)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "readyReplicas should be set")
 
 			By("verifying observedGeneration is set")
 			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
@@ -675,22 +682,21 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).NotTo(BeEmpty(), "lastReconcileTime should be set")
 		})
 
-		It("should set infrastructure status conditions", func() {
-			type conditionCheck struct {
-				condType string
-				expected string
+		It("should expose infrastructure state in status sub-fields (C9 / AC-2.5.7)", func() {
+			type fieldCheck struct {
+				jsonPath string
+				desc     string
 			}
-			checks := []conditionCheck{
-				{"GossipKeyReady", "True"},
-				{"ServicesReady", "True"},
-				{"AdvertiseResolved", "True"},
+			checks := []fieldCheck{
+				{`{.status.gossipKeySecretName}`, "gossip key secret name"},
+				{`{.status.advertiseAddress}`, "advertise address"},
 			}
 			for _, c := range checks {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
-					"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].status}`, c.condType))
+					"-o", "jsonpath="+c.jsonPath)
 				output, err := utils.Run(cmd)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(output).To(Equal(c.expected), "condition %s should be %s", c.condType, c.expected)
+				Expect(output).NotTo(BeEmpty(), "%s should be set", c.desc)
 			}
 
 			By("verifying gossip key secret name in status")
@@ -711,10 +717,10 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should bootstrap ACL and store token", func() {
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
-					`-o`, `jsonpath={.status.conditions[?(@.type=="ACLBootstrapped")].status}`)
+					`-o`, `jsonpath={.status.aclBootstrapped}`)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"), "ACL not yet bootstrapped")
+				g.Expect(output).To(Equal("true"), "ACL not yet bootstrapped")
 			}, 5*time.Minute).Should(Succeed())
 
 			By("verifying ACL bootstrap status fields")
@@ -783,10 +789,10 @@ var _ = Describe("Manager", Ordered, func() {
 			By("waiting for license status to be populated")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
-					`-o`, `jsonpath={.status.conditions[?(@.type=="LicenseValid")].status}`)
+					`-o`, `jsonpath={.status.license.valid}`)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"), "LicenseValid condition not yet True")
+				g.Expect(output).To(Equal("true"), "status.license.valid not yet true")
 			}, 5*time.Minute).Should(Succeed())
 
 			By("verifying license fields are populated")
@@ -805,12 +811,10 @@ var _ = Describe("Manager", Ordered, func() {
 			By("waiting for autopilot status to be populated")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
-					`-o`, `jsonpath={.status.conditions[?(@.type=="AutopilotHealthy")].reason}`)
+					`-o`, `jsonpath={.status.autopilot.healthy}`)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				// With replicas=1, autopilot reports NoFailureTolerance (healthy but no redundancy)
-				g.Expect(output).To(BeElementOf("QuorumHealthy", "NoFailureTolerance"),
-					"AutopilotHealthy condition not yet set")
+				g.Expect(output).To(Equal("true"), "status.autopilot.healthy not yet true")
 			}, 5*time.Minute).Should(Succeed())
 
 			By("verifying autopilot fields are populated")
@@ -1703,11 +1707,11 @@ spec:
 			By("waiting for autopilot to report healthy (3-server cluster fully formed)")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,
-					"-o", `jsonpath={.status.conditions[?(@.type=="AutopilotHealthy")].status}`)
+					"-o", `jsonpath={.status.autopilot.healthy}`)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"),
-					"AutopilotHealthy must be True before scale-down can proceed")
+				g.Expect(output).To(Equal("true"),
+					"status.autopilot.healthy must be true before scale-down can proceed")
 			}, 10*time.Minute).Should(Succeed())
 
 			By("verifying initial state: STS has 3 replicas, status.scaleDown is nil")

@@ -366,7 +366,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			Expect(updatedCluster.Status.Conditions).NotTo(BeEmpty())
 			foundCAError := false
 			for _, cond := range updatedCluster.Status.Conditions {
-				if cond.Type == nomadv1alpha1.ConditionTypeReady && cond.Status == metav1.ConditionFalse {
+				if cond.Type == "Ready" && cond.Status == metav1.ConditionFalse {
 					if containsIgnoreCase(cond.Message, "CA") || containsIgnoreCase(cond.Message, "Certificate") {
 						foundCAError = true
 						break

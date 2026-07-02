@@ -672,18 +672,25 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 
 ### Conditions
 
-| Condition | Description |
-|-----------|-------------|
-| `Ready` | Overall cluster readiness |
-| `GossipKeyReady` | Gossip encryption key is configured |
-| `ServicesReady` | All Kubernetes Services are ready |
-| `AdvertiseResolved` | LoadBalancer IP has been resolved |
-| `StatefulSetReady` | StatefulSet has desired ready replicas |
-| `ACLBootstrapped` | ACL bootstrap has completed |
-| `RouteReady` | OpenShift Route is created |
-| `MonitoringReady` | ServiceMonitor/PrometheusRule are created |
-| `LicenseValid` | Nomad Enterprise license is valid |
-| `AutopilotHealthy` | Raft autopilot reports healthy |
+`status.conditions[]` contains exactly **one** condition, type `Ready`.
+Everything a per-resource condition used to say lives in the status
+sub-fields above — the condition tells you *whether* the cluster is
+healthy; the sub-fields tell you *why*. `Ready=True` requires the
+StatefulSet at its desired ready replica count, a valid license, and
+healthy autopilot (an unreachable probe does not fail Ready — the
+sub-field keeps its last-known value).
+
+`Ready=False` reasons:
+
+| Reason | Meaning |
+|--------|---------|
+| `WaitingForReplicas` | StatefulSet below its desired ready count |
+| `LicenseExpired` | Nomad Enterprise license invalid — see `status.license` |
+| `AutopilotUnhealthy` | Raft autopilot reports unhealthy — see `status.autopilot` |
+| `PhaseFailed` | A reconcile phase errored; the message names the phase |
+| `Reconciling` | A phase requested requeue (generic wait) |
+| `ScaleDownBlocked` | Scale-down waiting on a Raft leader |
+| `DegradedQuorumNotAccepted` | Scale-down below 3 replicas lacks the [opt-in annotation](#scaling-down) |
 
 ### Operator Metrics
 

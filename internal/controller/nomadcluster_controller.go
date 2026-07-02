@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
@@ -43,7 +42,6 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
-	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 
@@ -169,7 +167,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			patchBase := cluster.DeepCopy()
 			cluster.Status.Phase = nomadv1alpha1.ClusterPhaseFailed
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeReady,
+				Type:    "Ready",
 				Status:  metav1.ConditionFalse,
 				Reason:  "PhaseFailed",
 				Message: fmt.Sprintf("%s: %s", phase.Name(), result.Message),
@@ -192,7 +190,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			patchBase := cluster.DeepCopy()
 			cluster.Status.Phase = nomadv1alpha1.ClusterPhaseCreating
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeReady,
+				Type:    "Ready",
 				Status:  metav1.ConditionFalse,
 				Reason:  reason,
 				Message: result.Message,
@@ -427,77 +425,33 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 	// Get StatefulSet status
 	r.updateStatefulSetStatus(ctx, cluster)
 
-	// Update advertise address from phase context and set condition
+	// C9 (neo-jmq / AC-2.5.7): sub-resource state lives in dedicated
+	// status sub-fields; the single Ready condition computed below is
+	// the only condition. See the contract comment on the api package.
 	if phaseCtx.AdvertiseAddress != "" {
 		cluster.Status.AdvertiseAddress = phaseCtx.AdvertiseAddress
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeAdvertiseResolved,
-			Status:  metav1.ConditionTrue,
-			Reason:  "AddressResolved",
-			Message: fmt.Sprintf("Advertise address resolved: %s", phaseCtx.AdvertiseAddress),
-		})
-	} else {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeAdvertiseResolved,
-			Status:  metav1.ConditionFalse,
-			Reason:  "WaitingForLoadBalancer",
-			Message: "Waiting for LoadBalancer IP to be assigned",
-		})
 	}
 
-	// Determine gossip key secret name and check condition
 	gossipSecretName := cluster.Name + "-gossip"
 	if cluster.Spec.Gossip.SecretName != "" {
 		gossipSecretName = cluster.Spec.Gossip.SecretName
 	}
 	cluster.Status.GossipKeySecretName = gossipSecretName
 
-	gossipSecret := &corev1.Secret{}
-	if err := r.Get(ctx, client.ObjectKey{Name: gossipSecretName, Namespace: cluster.Namespace}, gossipSecret); err == nil {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeGossipKeyReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "GossipKeyExists",
-			Message: fmt.Sprintf("Gossip encryption key configured in secret %s", gossipSecretName),
-		})
-	} else {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeGossipKeyReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "GossipKeyNotFound",
-			Message: fmt.Sprintf("Gossip key secret %s not found", gossipSecretName),
-		})
-	}
-
-	// Check services condition
-	r.updateServicesStatus(ctx, cluster)
-
 	// Check ACL bootstrap status
 	r.updateACLBootstrapStatus(ctx, cluster)
 
-	// Get Route host if enabled and set condition
+	// Get Route host if enabled
 	r.updateRouteStatus(ctx, cluster)
 
-	// Check monitoring condition. Mirrors the MonitoringPhase gate:
-	// spec.monitoring.enabled AND Prometheus Operator CRDs installed,
-	// independent of openshift.enabled (B4 / AC-2.2.4).
-	if cluster.Spec.Monitoring.Enabled &&
-		discovery.HasGVK(r.RESTMapper(), schema.GroupVersionKind{
-			Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor",
-		}) {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeMonitoringReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "MonitoringConfigured",
-			Message: "ServiceMonitor and PrometheusRule resources configured",
-		})
+	// License and autopilot sub-fields from phase context (populated by
+	// ClusterStatusPhase; nil on probe miss preserves last-known state)
+	if phaseCtx.License != nil {
+		cluster.Status.License = phaseCtx.License
 	}
-
-	// Update license status from phase context (populated by ClusterStatusPhase)
-	r.updateLicenseStatus(cluster, phaseCtx)
-
-	// Update autopilot status from phase context (populated by ClusterStatusPhase)
-	r.updateAutopilotStatus(cluster, phaseCtx)
+	if phaseCtx.Autopilot != nil {
+		cluster.Status.Autopilot = phaseCtx.Autopilot
+	}
 
 	// Update leader info from phase context (populated by ClusterStatusPhase)
 	if phaseCtx.LeaderAddress != "" {
@@ -511,35 +465,59 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 		cluster.Status.NomadVersion = phaseCtx.NomadVersion
 	}
 
-	// Determine cluster phase and overall Ready condition
-	if cluster.Status.ReadyReplicas == cluster.Spec.Replicas && cluster.Status.ReadyReplicas > 0 {
-		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseRunning
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "ClusterReady",
-			Message: fmt.Sprintf("Nomad cluster is running with %d/%d replicas", cluster.Status.ReadyReplicas, cluster.Spec.Replicas),
-		})
+	// Prune legacy condition types left behind by pre-C9 operators so
+	// AC-2.5.4 ("exactly one condition") holds on upgraded clusters too.
+	for _, legacy := range []string{
+		"GossipKeyReady", "ServicesReady", "AdvertiseResolved",
+		"StatefulSetReady", "ACLBootstrapped", "RouteReady",
+		"MonitoringReady", "LicenseValid", "AutopilotHealthy",
+	} {
+		meta.RemoveStatusCondition(&cluster.Status.Conditions, legacy)
+	}
 
-		// One-shot Event: emit the first time we observe Ready=True for this
-		// cluster. The debounce field on Status survives operator restart so
-		// we never re-emit. Downstream issues (B6 audit migration, etc.) use
-		// the same status-field pattern for their per-cluster one-shots.
-		// The flag mutation falls within updateFinalStatus's existing
-		// patchBase/Status().Patch window, so it lands in the merge patch.
-		if !cluster.Status.InitialReconcileEventEmitted && r.Recorder != nil {
-			r.Recorder.Event(cluster, corev1.EventTypeNormal, "Reconciled",
-				"InitialReconcileComplete")
-			cluster.Status.InitialReconcileEventEmitted = true
-		}
-	} else {
+	// Single Ready condition (AC-2.5.5 precondition, AC-2.5.6 reasons).
+	// Order is deterministic: infrastructure first (replicas), then
+	// Nomad-side health (license, autopilot). Unknown probe state (nil
+	// sub-field) does not fail Ready.
+	ready := metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionTrue,
+		Reason:  "ClusterReady",
+		Message: fmt.Sprintf("Nomad cluster is running with %d/%d replicas", cluster.Status.ReadyReplicas, cluster.Spec.Replicas),
+	}
+	switch {
+	case cluster.Status.ReadyReplicas != cluster.Spec.Replicas || cluster.Status.ReadyReplicas == 0:
 		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseCreating
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "WaitingForReplicas",
-			Message: fmt.Sprintf("Waiting for replicas: %d/%d ready", cluster.Status.ReadyReplicas, cluster.Spec.Replicas),
-		})
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "WaitingForReplicas"
+		ready.Message = fmt.Sprintf("Waiting for replicas: %d/%d ready", cluster.Status.ReadyReplicas, cluster.Spec.Replicas)
+	case cluster.Status.License != nil && !cluster.Status.License.Valid:
+		// Pods are up (phase stays Running); the cluster is degraded.
+		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseRunning
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "LicenseExpired"
+		ready.Message = "Nomad Enterprise license has expired; see status.license"
+	case cluster.Status.Autopilot != nil && !cluster.Status.Autopilot.Healthy:
+		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseRunning
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "AutopilotUnhealthy"
+		ready.Message = "Raft autopilot reports unhealthy servers; see status.autopilot"
+	default:
+		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseRunning
+	}
+	meta.SetStatusCondition(&cluster.Status.Conditions, ready)
+
+	// One-shot Event: emit the first time we observe Ready=True for this
+	// cluster. The debounce field on Status survives operator restart so
+	// we never re-emit. Downstream issues (B6 audit migration, etc.) use
+	// the same status-field pattern for their per-cluster one-shots.
+	// The flag mutation falls within updateFinalStatus's existing
+	// patchBase/Status().Patch window, so it lands in the merge patch.
+	if ready.Status == metav1.ConditionTrue &&
+		!cluster.Status.InitialReconcileEventEmitted && r.Recorder != nil {
+		r.Recorder.Event(cluster, corev1.EventTypeNormal, "Reconciled",
+			"InitialReconcileComplete")
+		cluster.Status.InitialReconcileEventEmitted = true
 	}
 
 	// Update observed generation. ObservedGeneration is gated separately
@@ -588,75 +566,21 @@ func (r *NomadClusterReconciler) maybeAdvanceLastReconcileTime(cluster *nomadv1a
 	// server-side write is a no-op.
 }
 
-// updateStatefulSetStatus updates the cluster status based on StatefulSet state.
+// updateStatefulSetStatus mirrors the StatefulSet replica counters into
+// status sub-fields (C9: no per-resource condition — readiness feeds
+// the single Ready condition in updateFinalStatus).
 func (r *NomadClusterReconciler) updateStatefulSetStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
 	sts := &appsv1.StatefulSet{}
 	if err := r.Get(ctx, client.ObjectKey{Name: cluster.Name, Namespace: cluster.Namespace}, sts); err != nil {
-		if !k8serrors.IsNotFound(err) {
-			return
-		}
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeStatefulSetReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "StatefulSetNotFound",
-			Message: "StatefulSet has not been created yet",
-		})
 		return
 	}
 
 	cluster.Status.ReadyReplicas = sts.Status.ReadyReplicas
 	cluster.Status.CurrentReplicas = sts.Status.CurrentReplicas
-
-	if sts.Status.ReadyReplicas == *sts.Spec.Replicas && sts.Status.ReadyReplicas > 0 {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeStatefulSetReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "AllReplicasReady",
-			Message: fmt.Sprintf("StatefulSet has %d/%d replicas ready", sts.Status.ReadyReplicas, *sts.Spec.Replicas),
-		})
-	} else {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeStatefulSetReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "ReplicasNotReady",
-			Message: fmt.Sprintf("StatefulSet has %d/%d replicas ready", sts.Status.ReadyReplicas, *sts.Spec.Replicas),
-		})
-	}
 }
 
-// updateServicesStatus updates the cluster status based on service availability.
-func (r *NomadClusterReconciler) updateServicesStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
-	internalSvc := &corev1.Service{}
-	externalSvc := &corev1.Service{}
-	internalExists := r.Get(ctx, client.ObjectKey{Name: cluster.Name + "-internal", Namespace: cluster.Namespace}, internalSvc) == nil
-	externalExists := r.Get(ctx, client.ObjectKey{Name: cluster.Name + "-external", Namespace: cluster.Namespace}, externalSvc) == nil
-
-	if internalExists && externalExists {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeServicesReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "ServicesCreated",
-			Message: "All required services have been created",
-		})
-		return
-	}
-
-	var missing []string
-	if !internalExists {
-		missing = append(missing, cluster.Name+"-internal")
-	}
-	if !externalExists {
-		missing = append(missing, cluster.Name+"-external")
-	}
-	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-		Type:    nomadv1alpha1.ConditionTypeServicesReady,
-		Status:  metav1.ConditionFalse,
-		Reason:  "ServicesMissing",
-		Message: fmt.Sprintf("Missing services: %v", missing),
-	})
-}
-
-// updateACLBootstrapStatus updates the cluster status based on ACL bootstrap state.
+// updateACLBootstrapStatus mirrors ACL bootstrap completion into status
+// sub-fields.
 func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
 	if !cluster.Spec.Server.ACL.Enabled {
 		return
@@ -668,23 +592,11 @@ func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, c
 	if err := r.Get(ctx, client.ObjectKey{Name: bootstrapSecretName, Namespace: cluster.Namespace}, secret); err == nil {
 		cluster.Status.ACLBootstrapped = true
 		cluster.Status.ACLBootstrapSecretName = bootstrapSecretName
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeACLBootstrapped,
-			Status:  metav1.ConditionTrue,
-			Reason:  "ACLBootstrapComplete",
-			Message: fmt.Sprintf("ACL bootstrap token stored in secret %s", bootstrapSecretName),
-		})
-	} else {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeACLBootstrapped,
-			Status:  metav1.ConditionFalse,
-			Reason:  "ACLBootstrapPending",
-			Message: "ACL bootstrap has not completed yet",
-		})
 	}
 }
 
-// updateRouteStatus updates the cluster status based on OpenShift Route state.
+// updateRouteStatus mirrors the admitted OpenShift Route host into
+// status.routeHost.
 func (r *NomadClusterReconciler) updateRouteStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
 	if !cluster.Spec.OpenShift.Enabled || !cluster.Spec.OpenShift.Route.Enabled {
 		return
@@ -692,115 +604,51 @@ func (r *NomadClusterReconciler) updateRouteStatus(ctx context.Context, cluster 
 
 	route := &routev1.Route{}
 	if err := r.Get(ctx, client.ObjectKey{Name: "console", Namespace: cluster.Namespace}, route); err != nil {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeRouteReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "RouteNotFound",
-			Message: "OpenShift Route has not been created yet",
-		})
 		return
 	}
 
 	if len(route.Status.Ingress) > 0 && route.Status.Ingress[0].Host != "" {
 		cluster.Status.RouteHost = route.Status.Ingress[0].Host
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeRouteReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  "RouteAdmitted",
-			Message: fmt.Sprintf("Route available at %s", route.Status.Ingress[0].Host),
-		})
-	} else {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeRouteReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  "RouteNotAdmitted",
-			Message: "Route created but not yet admitted by router",
-		})
-	}
-}
-
-// updateLicenseStatus updates the cluster status based on license information.
-func (r *NomadClusterReconciler) updateLicenseStatus(cluster *nomadv1alpha1.NomadCluster, phaseCtx *phases.PhaseContext) {
-	if phaseCtx.License != nil {
-		cluster.Status.License = phaseCtx.License
-		if !phaseCtx.License.Valid {
-			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeLicenseValid,
-				Status:  metav1.ConditionFalse,
-				Reason:  "LicenseExpired",
-				Message: "Nomad Enterprise license has expired",
-			})
-			return
-		}
-
-		// Parse expiration time to check if expiring soon
-		expirationTime, err := time.Parse(time.RFC3339, phaseCtx.License.ExpirationTime)
-		if err == nil && time.Until(expirationTime) < 30*24*time.Hour {
-			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeLicenseValid,
-				Status:  metav1.ConditionTrue,
-				Reason:  "LicenseExpiringSoon",
-				Message: fmt.Sprintf("License expires at %s (within 30 days)", phaseCtx.License.ExpirationTime),
-			})
-		} else {
-			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeLicenseValid,
-				Status:  metav1.ConditionTrue,
-				Reason:  "LicenseActive",
-				Message: fmt.Sprintf("License is valid, expires at %s", phaseCtx.License.ExpirationTime),
-			})
-		}
-	} else if phaseCtx.LicenseError != nil {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeLicenseValid,
-			Status:  metav1.ConditionUnknown,
-			Reason:  "LicenseCheckFailed",
-			Message: fmt.Sprintf("Unable to retrieve license info: %v", phaseCtx.LicenseError),
-		})
-	}
-}
-
-// updateAutopilotStatus updates the cluster status based on autopilot health.
-func (r *NomadClusterReconciler) updateAutopilotStatus(cluster *nomadv1alpha1.NomadCluster, phaseCtx *phases.PhaseContext) {
-	if phaseCtx.Autopilot != nil {
-		cluster.Status.Autopilot = phaseCtx.Autopilot
-		if !phaseCtx.Autopilot.Healthy {
-			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeAutopilotHealthy,
-				Status:  metav1.ConditionFalse,
-				Reason:  "QuorumUnhealthy",
-				Message: "Raft autopilot reports unhealthy quorum",
-			})
-			return
-		}
-
-		if phaseCtx.Autopilot.FailureTolerance == 0 {
-			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeAutopilotHealthy,
-				Status:  metav1.ConditionFalse,
-				Reason:  "NoFailureTolerance",
-				Message: "Raft quorum is healthy but has no failure tolerance",
-			})
-		} else {
-			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-				Type:    nomadv1alpha1.ConditionTypeAutopilotHealthy,
-				Status:  metav1.ConditionTrue,
-				Reason:  "QuorumHealthy",
-				Message: fmt.Sprintf("Raft quorum is healthy with failure tolerance of %d", phaseCtx.Autopilot.FailureTolerance),
-			})
-		}
-	} else if phaseCtx.AutopilotError != nil {
-		meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
-			Type:    nomadv1alpha1.ConditionTypeAutopilotHealthy,
-			Status:  metav1.ConditionUnknown,
-			Reason:  "AutopilotCheckFailed",
-			Message: fmt.Sprintf("Unable to retrieve autopilot health: %v", phaseCtx.AutopilotError),
-		})
 	}
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// secretRefIndexes maps a field-index key to the extractor pulling that
+// Secret reference out of a NomadCluster spec (D5 / neo-380). Shared by
+// SetupWithManager (real manager cache) and unit tests (fake client
+// WithIndex) so the two cannot drift.
+var secretRefIndexes = map[string]func(*nomadv1alpha1.NomadCluster) string{
+	"spec.license.secretName": func(c *nomadv1alpha1.NomadCluster) string {
+		return c.Spec.License.SecretName
+	},
+	"spec.server.tls.ca.secretName": func(c *nomadv1alpha1.NomadCluster) string {
+		if c.Spec.Server.TLS.CA == nil {
+			return ""
+		}
+		return c.Spec.Server.TLS.CA.SecretName
+	},
+	"spec.gossip.secretName": func(c *nomadv1alpha1.NomadCluster) string {
+		return c.Spec.Gossip.SecretName
+	},
+}
+
 func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// D5 (neo-380): index the spec fields that can reference external
+	// Secrets so findClustersReferencingSecret is an indexed lookup, not
+	// a namespace-wide list+filter on every Secret event.
+	for key, extract := range secretRefIndexes {
+		extract := extract
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &nomadv1alpha1.NomadCluster{}, key,
+			func(obj client.Object) []string {
+				if name := extract(obj.(*nomadv1alpha1.NomadCluster)); name != "" {
+					return []string{name}
+				}
+				return nil
+			}); err != nil {
+			return fmt.Errorf("failed to register field index %s: %w", key, err)
+		}
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadCluster{}).
 		Owns(&corev1.ServiceAccount{}).
@@ -810,7 +658,23 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&appsv1.StatefulSet{}).
-		// Watch external secrets (not owned by NomadCluster) for rolling restarts
+		// Watch external secrets (not owned by NomadCluster) for rolling restarts.
+		//
+		// D5 (neo-380) deliberately does NOT add a cache.Options.ByObject
+		// filter for Secrets, deviating from the design doc's AC-D5.2.
+		// The filter needs union semantics — operator-labelled OR
+		// named-per-convention OR dynamically user-referenced (license/CA/
+		// gossip Secrets with arbitrary names, possibly cross-namespace) —
+		// and controller-runtime selectors are static: they cannot express
+		// "referenced by some NomadCluster". A label-only filter would
+		// silently break both the phases' Get calls for unlabelled user
+		// Secrets (cache-backed reads return NotFound for uncached
+		// objects) and this rolling-restart watch. The reconcile-storm
+		// concern is already solved by the field-indexed map function
+		// (zero requests for unreferenced Secrets); what remains is
+		// informer memory, acceptable at the documented ≤200-cluster
+		// scale. Revisit only with a mechanism like operator-applied
+		// reference labels plus an APIReader migration for user Secrets.
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findClustersReferencingSecret),
@@ -834,44 +698,29 @@ func (r *NomadClusterReconciler) findClustersReferencingSecret(ctx context.Conte
 		}
 	}
 
-	// List all NomadClusters in the same namespace
-	clusterList := &nomadv1alpha1.NomadClusterList{}
-	if err := r.List(ctx, clusterList, client.InNamespace(secret.Namespace)); err != nil {
-		return nil
-	}
-
+	// D5 (neo-380): indexed lookups against the secretRefIndexes fields
+	// instead of listing every NomadCluster in the namespace. A cluster
+	// can match more than one index (e.g. the same Secret named for both
+	// license and gossip), so requests are deduplicated.
+	seen := map[types.NamespacedName]bool{}
 	var requests []reconcile.Request
-	for _, cluster := range clusterList.Items {
-		// Check if this cluster references the secret
-		if r.clusterReferencesSecret(&cluster, secret.Name) {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      cluster.Name,
-					Namespace: cluster.Namespace,
-				},
-			})
+	for key := range secretRefIndexes {
+		clusterList := &nomadv1alpha1.NomadClusterList{}
+		if err := r.List(ctx, clusterList,
+			client.InNamespace(secret.Namespace),
+			client.MatchingFields{key: secret.Name},
+		); err != nil {
+			continue
+		}
+		for _, cluster := range clusterList.Items {
+			name := types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			requests = append(requests, reconcile.Request{NamespacedName: name})
 		}
 	}
 
 	return requests
-}
-
-// clusterReferencesSecret checks if a NomadCluster references the given secret name.
-func (r *NomadClusterReconciler) clusterReferencesSecret(cluster *nomadv1alpha1.NomadCluster, secretName string) bool {
-	// Check license secret (external reference only - inline creates a managed secret)
-	if cluster.Spec.License.SecretName == secretName {
-		return true
-	}
-
-	// Check user-provided CA secret
-	if cluster.Spec.Server.TLS.CA != nil && cluster.Spec.Server.TLS.CA.SecretName == secretName {
-		return true
-	}
-
-	// Check gossip secret (external reference)
-	if cluster.Spec.Gossip.SecretName == secretName {
-		return true
-	}
-
-	return false
 }
