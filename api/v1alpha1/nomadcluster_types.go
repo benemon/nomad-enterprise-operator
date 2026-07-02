@@ -458,6 +458,20 @@ type CertificateAuthorityStatus struct {
 	// Subject is the CA certificate's subject distinguished name.
 	// +optional
 	Subject string `json:"subject,omitempty"`
+
+	// RenewalRequiredBy is the deadline by which the CA should be
+	// renewed (expiry minus the renewal warning window). Crossing it
+	// surfaces a one-shot Warning Event with reason CARenewalRequired;
+	// Ready stays True (C5 / AC-2.4.10 — informational, not failure).
+	// +optional
+	RenewalRequiredBy string `json:"renewalRequiredBy,omitempty"`
+
+	// RenewalWarningEmitted debounces the CARenewalRequired Event: set
+	// when the Event fires, carried forward while the same CA remains in
+	// place, reset when the CA rotates. Same per-cluster status-field
+	// debounce pattern as InitialReconcileEventEmitted.
+	// +optional
+	RenewalWarningEmitted bool `json:"renewalWarningEmitted,omitempty"`
 }
 
 // ServerStatus represents the status of a single Nomad server in the cluster
@@ -587,6 +601,15 @@ type NomadClusterStatus struct {
 	// one-shot Events.
 	// +optional
 	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
+
+	// AuditPVCMigrated records whether the operator has observed the
+	// audit PVC Bound and emitted the one-shot "AuditPVCCreated" Event
+	// for this cluster (B6 / AC-4.5.4). Same per-cluster debounce
+	// pattern as InitialReconcileEventEmitted: the flag survives
+	// operator restarts so the Event fires exactly once across the
+	// cluster's lifetime.
+	// +optional
+	AuditPVCMigrated bool `json:"auditPVCMigrated,omitempty"`
 
 	// ScaleDown tracks an in-flight Raft scale-down operation
 	// (D2 / neo-1ve). Non-nil while peers are being removed from

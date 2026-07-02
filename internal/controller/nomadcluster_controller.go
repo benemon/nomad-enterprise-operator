@@ -221,7 +221,10 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 	if controllerutil.ContainsFinalizer(cluster, nomadClusterFinalizer) {
 		log.Info("Handling NomadCluster deletion")
 
-		// Attempt to clean up Nomad-side ACL resources
+		// Attempt to clean up Nomad-side ACL resources. The bootstrap
+		// Secret is read here (AC-2.4.2), before anything deletes it —
+		// it carries no ownerReference (C3), precisely so this cleanup
+		// can still authenticate against Nomad during deletion.
 		// Non-fatal — Kubernetes-owned resources are cleaned up via owner references
 		if cluster.Status.OperatorStatusPolicyName != "" {
 			if err := r.cleanupOperatorStatusResources(ctx, cluster); err != nil {
@@ -243,6 +246,20 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		} else {
 			log.Info("Retaining PVCs per spec.persistence.reclaimPolicy",
 				"reclaimPolicy", cluster.Spec.Persistence.ReclaimPolicy)
+		}
+
+		// AC-2.4.3: delete the bootstrap Secret last. It has no
+		// ownerReference (C3), so without this explicit delete it would
+		// leak on every cluster deletion. Nomad-side cleanup above is
+		// best-effort; the Secret is removed regardless of its outcome.
+		bootstrapSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      phases.BootstrapSecretName(cluster.Name),
+				Namespace: cluster.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, bootstrapSecret); err != nil && !k8serrors.IsNotFound(err) {
+			return ctrl.Result{}, err
 		}
 
 		// Remove finalizer

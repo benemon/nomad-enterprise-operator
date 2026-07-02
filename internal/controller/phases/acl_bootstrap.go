@@ -36,6 +36,32 @@ import (
 // ID is stored in Kubernetes Secrets owned by this operator.
 const SecretKeyAccessorID = "accessor-id"
 
+// Operator-owned ACL policy names and descriptions. The description is
+// part of the desired state compared by reconcileOperatorPolicies, so
+// it must be defined once and shared by every write site.
+const (
+	anonymousPolicyName             = "anonymous"
+	anonymousPolicyDescription      = "Allow anonymous read access for cluster visibility"
+	operatorStatusPolicyDescription = "Operator day-2 status API access (operator:read, agent:read)"
+)
+
+// BootstrapSecretClusterLabel marks the bootstrap-token Secret with its
+// owning cluster (C3 / AC-2.4.1). The Secret deliberately has no
+// ownerReference — see bootstrapSecretLabels — so this label is the only
+// machine-readable link back to the NomadCluster, used for the orphan
+// cleanup documented in the README threat model.
+const BootstrapSecretClusterLabel = "nomad.hashicorp.com/cluster"
+
+// bootstrapSecretLabels returns the labels for the bootstrap-token
+// Secret: the standard set plus the cluster back-link label. Shared by
+// the token-store and external-bootstrap-marker creation sites and the
+// pre-C3 retrofit so the label set cannot drift between them.
+func bootstrapSecretLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
+	labels := GetLabels(cluster)
+	labels[BootstrapSecretClusterLabel] = cluster.Name
+	return labels
+}
+
 // ACLBootstrapPhase automates ACL bootstrap using the Nomad API client.
 type ACLBootstrapPhase struct {
 	*PhaseContext
@@ -67,6 +93,14 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 		Namespace: cluster.Namespace,
 	}, existingSecret)
 	if err == nil {
+		// C3 / AC-2.4.1 retrofit: clusters bootstrapped before C3 carry an
+		// ownerReference on the bootstrap Secret (GC would delete it with
+		// the cluster, racing the finalizer's Nomad-side cleanup) and lack
+		// the cluster label. Fix once; no-op thereafter.
+		if err := p.ensureBootstrapSecretOwnership(ctx, cluster, existingSecret); err != nil {
+			p.Log.Error(err, "Failed to update bootstrap secret ownership, continuing")
+		}
+
 		// Already bootstrapped — still ensure the operator status token exists.
 		// This handles clusters bootstrapped before the operator status token
 		// feature was deployed. ensureOperatorStatusToken is idempotent.
@@ -74,6 +108,12 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 		if bootstrapToken != "" {
 			if phaseResult := p.ensureOperatorStatusToken(ctx, cluster, bootstrapToken); phaseResult.Error != nil {
 				p.Log.Error(phaseResult.Error, "Failed to create operator status token, continuing")
+			}
+			// C2 (AC-2.5.1–3): reconcile the operator-owned policies via
+			// GET-then-write-on-diff each reconcile, so manual edits are
+			// reverted. Non-fatal, consistent with the surrounding calls.
+			if err := p.reconcileOperatorPolicies(cluster, bootstrapToken); err != nil {
+				p.Log.Error(err, "Failed to reconcile operator ACL policies, continuing")
 			}
 		} else {
 			p.Log.V(1).Info("ACL bootstrap secret exists but has no secret-id, skipping operator status token")
@@ -106,12 +146,12 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 		return Error(err, "Failed to execute ACL bootstrap")
 	}
 
-	// Create anonymous policy for basic cluster visibility
-	if err := p.createAnonymousPolicy(cluster, result.SecretID); err != nil {
-		p.Log.Error(err, "Failed to create anonymous policy, continuing with bootstrap")
-		// Don't fail bootstrap if anonymous policy creation fails
-	} else {
-		p.Log.Info("Created anonymous policy for cluster visibility")
+	// Create the operator-owned policies (anonymous for basic cluster
+	// visibility; operator-status ahead of its token below). First
+	// reconcile after bootstrap, so both GETs miss and both are written.
+	if err := p.reconcileOperatorPolicies(cluster, result.SecretID); err != nil {
+		p.Log.Error(err, "Failed to create operator ACL policies, continuing with bootstrap")
+		// Don't fail bootstrap if policy creation fails
 	}
 
 	// Store token in secret
@@ -131,6 +171,38 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 
 func (p *ACLBootstrapPhase) getBootstrapSecretName(cluster *nomadv1alpha1.NomadCluster) string {
 	return BootstrapSecretName(cluster.Name)
+}
+
+// ensureBootstrapSecretOwnership migrates a pre-C3 bootstrap Secret to
+// the C3 shape (AC-2.4.1): drops any ownerReference pointing at the
+// cluster and adds the cluster label. Idempotent; writes only on drift.
+func (p *ACLBootstrapPhase) ensureBootstrapSecretOwnership(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secret *corev1.Secret) error {
+	changed := false
+
+	kept := secret.OwnerReferences[:0]
+	for _, ref := range secret.OwnerReferences {
+		if ref.UID == cluster.UID {
+			changed = true
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	secret.OwnerReferences = kept
+
+	if secret.Labels[BootstrapSecretClusterLabel] != cluster.Name {
+		if secret.Labels == nil {
+			secret.Labels = map[string]string{}
+		}
+		secret.Labels[BootstrapSecretClusterLabel] = cluster.Name
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	p.Log.Info("Migrating bootstrap secret to C3 shape (no ownerReference, cluster label)",
+		"secret", secret.Name)
+	return p.Client.Update(ctx, secret)
 }
 
 func (p *ACLBootstrapPhase) executeBootstrap(cluster *nomadv1alpha1.NomadCluster) (*nomad.ACLBootstrapResult, error) {
@@ -208,18 +280,18 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 		secretData["expiration-time"] = result.ExpirationTime.Format(time.RFC3339)
 	}
 
+	// C3 / AC-2.4.1: intentionally NO ownerReference. The bootstrap token
+	// must outlive Kubernetes GC so the deletion finalizer can use it for
+	// Nomad-side ACL cleanup; handleDeletion deletes this Secret
+	// explicitly, last. The cluster label is the link back to the owner.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: cluster.Namespace,
-			Labels:    GetLabels(cluster),
+			Labels:    bootstrapSecretLabels(cluster),
 		},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: secretData,
-	}
-
-	if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
-		return Error(err, "Failed to set owner reference on bootstrap secret")
 	}
 
 	p.Log.Info("Creating ACL bootstrap secret", "name", secretName)
@@ -230,7 +302,25 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 	return OK()
 }
 
-func (p *ACLBootstrapPhase) createAnonymousPolicy(cluster *nomadv1alpha1.NomadCluster, token string) error {
+// reconcileOperatorPolicies enforces observed-state diff semantics
+// (C2 / AC-2.5.1–3) for the operator-owned ACL policies: GET each
+// policy and write only when it is missing or its description/rules
+// have drifted from desired. Manual edits are reverted on the next
+// reconcile; when observed matches desired, no write call is made.
+func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.NomadCluster, token string) error {
+	desired := []nomad.ACLPolicyResult{
+		{
+			Name:        anonymousPolicyName,
+			Description: anonymousPolicyDescription,
+			Rules:       nomad.AnonymousPolicyRules,
+		},
+		{
+			Name:        cluster.Name + "-operator-status",
+			Description: operatorStatusPolicyDescription,
+			Rules:       nomad.OperatorStatusPolicyRules,
+		},
+	}
+
 	cfg := p.BuildClientConfig(cluster, 30*time.Second, token)
 
 	// Try internal service first, fall back to LoadBalancer
@@ -241,23 +331,36 @@ func (p *ACLBootstrapPhase) createAnonymousPolicy(cluster *nomadv1alpha1.NomadCl
 		return fmt.Errorf("failed to create Nomad client: %w", err)
 	}
 
-	err = nomadClient.CreateACLPolicy(token, "anonymous", "Allow anonymous read access for cluster visibility", nomad.AnonymousPolicyRules)
-	if err != nil && !nomad.IsNetworkError(err) {
-		return err
-	}
-
-	// If internal service failed with network error, try LoadBalancer
-	loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
-	if err != nil && loadBalancerAddress != "" {
-		cfg.Address = loadBalancerAddress
-		nomadClient, err = p.NewNomadClient(cfg)
+	for _, want := range desired {
+		observed, err := nomadClient.GetACLPolicy(token, want.Name)
 		if err != nil {
-			return fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", err)
+			// If internal service failed with network error, try LoadBalancer
+			loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
+			if !nomad.IsNetworkError(err) || loadBalancerAddress == "" {
+				return err
+			}
+			cfg.Address = loadBalancerAddress
+			if nomadClient, err = p.NewNomadClient(cfg); err != nil {
+				return fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", err)
+			}
+			if observed, err = nomadClient.GetACLPolicy(token, want.Name); err != nil {
+				return err
+			}
 		}
-		return nomadClient.CreateACLPolicy(token, "anonymous", "Allow anonymous read access for cluster visibility", nomad.AnonymousPolicyRules)
+
+		// AC-2.5.1: observed matches desired — no write.
+		if observed != nil && observed.Description == want.Description && observed.Rules == want.Rules {
+			continue
+		}
+
+		// AC-2.5.2 / 2.5.3: missing or drifted — upsert back to desired.
+		if err := nomadClient.CreateACLPolicy(token, want.Name, want.Description, want.Rules); err != nil {
+			return err
+		}
+		p.Log.Info("Reconciled operator ACL policy", "policy", want.Name, "created", observed == nil)
 	}
 
-	return err
+	return nil
 }
 
 func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
@@ -293,7 +396,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	}
 
 	// Create the policy (upsert, idempotent)
-	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read, agent:read)", nomad.OperatorStatusPolicyRules)
+	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, operatorStatusPolicyDescription, nomad.OperatorStatusPolicyRules)
 	if err != nil && nomad.IsNetworkError(err) {
 		loadBalancerAddress := nomad.LoadBalancerAddress(p.AdvertiseAddress, true)
 		if loadBalancerAddress != "" {
@@ -302,7 +405,7 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 			if err != nil {
 				return Error(err, "Failed to create Nomad client for LoadBalancer")
 			}
-			err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Operator day-2 status API access (operator:read, agent:read)", nomad.OperatorStatusPolicyRules)
+			err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, operatorStatusPolicyDescription, nomad.OperatorStatusPolicyRules)
 		}
 	}
 	if err != nil {
@@ -374,11 +477,13 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 }
 
 func (p *ACLBootstrapPhase) createMarkerSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretName string) PhaseResult {
+	// Same C3 treatment as the token-bearing bootstrap Secret: no
+	// ownerReference, cluster label; deleted explicitly by the finalizer.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: cluster.Namespace,
-			Labels:    GetLabels(cluster),
+			Labels:    bootstrapSecretLabels(cluster),
 			Annotations: map[string]string{
 				"nomad.hashicorp.com/bootstrap-external": "true",
 			},
@@ -387,10 +492,6 @@ func (p *ACLBootstrapPhase) createMarkerSecret(ctx context.Context, cluster *nom
 		StringData: map[string]string{
 			"note": "ACL was bootstrapped externally. This secret is a marker to prevent re-bootstrap attempts.",
 		},
-	}
-
-	if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
-		return Error(err, "Failed to set owner reference on marker secret")
 	}
 
 	if err := p.Client.Create(ctx, secret); err != nil && !k8serrors.IsAlreadyExists(err) {

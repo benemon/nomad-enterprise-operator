@@ -653,6 +653,15 @@ spec:
               advertiseAddress:
                 description: AdvertiseAddress is the resolved LoadBalancer address
                 type: string
+              auditPVCMigrated:
+                description: |-
+                  AuditPVCMigrated records whether the operator has observed the
+                  audit PVC Bound and emitted the one-shot "AuditPVCCreated" Event
+                  for this cluster (B6 / AC-4.5.4). Same per-cluster debounce
+                  pattern as InitialReconcileEventEmitted: the flag survives
+                  operator restarts so the Event fires exactly once across the
+                  cluster's lifetime.
+                type: boolean
               autopilot:
                 description: Autopilot contains Raft autopilot health information
                 properties:
@@ -721,6 +730,20 @@ spec:
                   expiryTime:
                     description: ExpiryTime is when the CA certificate expires.
                     type: string
+                  renewalRequiredBy:
+                    description: |-
+                      RenewalRequiredBy is the deadline by which the CA should be
+                      renewed (expiry minus the renewal warning window). Crossing it
+                      surfaces a one-shot Warning Event with reason CARenewalRequired;
+                      Ready stays True (C5 / AC-2.4.10 — informational, not failure).
+                    type: string
+                  renewalWarningEmitted:
+                    description: |-
+                      RenewalWarningEmitted debounces the CARenewalRequired Event: set
+                      when the Event fires, carried forward while the same CA remains in
+                      place, reset when the CA rotates. Same per-cluster status-field
+                      debounce pattern as InitialReconcileEventEmitted.
+                    type: boolean
                   source:
                     description: |-
                       Source indicates how the CA was provisioned.

@@ -178,8 +178,14 @@ func (p *CertificatePhase) ensureGeneratedCA(ctx context.Context, cluster *nomad
 	return OK(), ca
 }
 
-// updateCAStatus updates the CertificateAuthorityStatus on the cluster.
+// updateCAStatus updates the CertificateAuthorityStatus on the cluster,
+// including the C5 renewal signal (AC-2.4.9 / AC-2.4.10): expiry and
+// renewal deadline are always populated, and crossing the deadline
+// emits a one-shot Warning Event. Ready is untouched — a CA due for
+// renewal is an operator obligation, not a cluster failure.
 func (p *CertificatePhase) updateCAStatus(cluster *nomadv1alpha1.NomadCluster, source string, ca *tlspkg.CABundle) {
+	prev := cluster.Status.CertificateAuthority
+
 	status := &nomadv1alpha1.CertificateAuthorityStatus{
 		Source: source,
 	}
@@ -188,6 +194,24 @@ func (p *CertificatePhase) updateCAStatus(cluster *nomadv1alpha1.NomadCluster, s
 	if err == nil {
 		status.ExpiryTime = cert.NotAfter.Format(time.RFC3339)
 		status.Subject = cert.Subject.String()
+
+		renewalRequiredBy := cert.NotAfter.Add(-certWarningWindow)
+		status.RenewalRequiredBy = renewalRequiredBy.Format(time.RFC3339)
+
+		// Debounce once per crossing: carry the marker forward while the
+		// same CA (matching expiry) is in place; a rotated CA starts with
+		// a fresh struct, so the marker — and the Event — reset naturally.
+		if prev != nil && prev.ExpiryTime == status.ExpiryTime {
+			status.RenewalWarningEmitted = prev.RenewalWarningEmitted
+		}
+		if time.Now().After(renewalRequiredBy) && !status.RenewalWarningEmitted {
+			if p.Recorder != nil {
+				p.Recorder.Event(cluster, corev1.EventTypeWarning, "CARenewalRequired",
+					fmt.Sprintf("CA certificate (source: %s) expires at %s; renew before %s",
+						source, status.ExpiryTime, status.RenewalRequiredBy))
+			}
+			status.RenewalWarningEmitted = true
+		}
 	}
 
 	cluster.Status.CertificateAuthority = status

@@ -31,6 +31,33 @@ For environments with CISO-gated container-image requirements (signed images, SB
 
 The operator's runtime is compatible with any image that exposes the same entrypoint and binary contract, so this fork-and-sign workflow does not require code changes. See the design review's §4.6 and platform-engineer review's §3.8 / §3.3 for the full discussion of this deferral.
 
+### Bootstrap token Secret lifecycle
+
+The ACL bootstrap token Secret (`<cluster>-acl-bootstrap`) deliberately
+has **no ownerReference** to its NomadCluster. If it did, Kubernetes
+garbage collection could remove it during cluster deletion before the
+operator's finalizer has used the token for Nomad-side ACL cleanup.
+Instead the Secret carries the label
+`nomad.hashicorp.com/cluster: <cluster>` and the finalizer deletes it
+explicitly — last, after the (best-effort) Nomad-side cleanup.
+
+The consequence: if the finalizer never completes — operator
+uninstalled before the cluster was deleted, namespace force-deleted
+with the finalizer stripped, etc. — the bootstrap Secret is orphaned
+with **no garbage collection**. It contains a Nomad management token,
+so orphans are worth sweeping for. List all bootstrap Secrets and
+cross-reference against live clusters:
+
+```sh
+kubectl get secrets -A -l nomad.hashicorp.com/cluster
+kubectl get nomadclusters -A
+```
+
+Any Secret whose `nomad.hashicorp.com/cluster` label names a cluster
+that no longer exists can be deleted (the token it holds died with the
+cluster). The operator does not scan for orphans itself — that would
+require a periodic cluster-wide sweep, which is out of scope.
+
 ## Prerequisites
 
 - Go v1.25.0+ (development only)
@@ -201,9 +228,17 @@ Delivery guarantee (`enforced`), format (`json`), and rotation
 (`24h` × 15 files) are operator-owned per ADR 0003. Ship logs with a
 sidecar if you need different retention.
 
+Audit storage is independent of data storage: when audit is enabled the
+StatefulSet always carries a dedicated audit PVC sized per
+`server.audit.size`, even when `spec.persistence.size` is empty and
+Raft data runs on `emptyDir`. Audit logs survive pod restarts in every
+configuration. The operator emits a one-shot `AuditPVCCreated` Event
+(debounced via `status.auditPVCMigrated`) the first time the audit PVC
+binds.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `server.audit.enabled` | `bool` | `true` | Enable audit logging. Auto-creates an audit volume |
+| `server.audit.enabled` | `bool` | `true` | Enable audit logging. Auto-creates a dedicated audit PVC (independent of `spec.persistence`); requires `server.audit.size` |
 | `server.audit.size` | `string` | `5Gi` | Audit volume size |
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
 
@@ -254,6 +289,38 @@ Pod anti-affinity is operator-owned per ADR 0003: preferred scheduling,
 weight 100, `kubernetes.io/hostname` topology, applied when
 `replicas >= 3`. For multi-zone distribution use the standard
 `spec.topologySpreadConstraints` field.
+
+### Spec invariants
+
+The operator ships **no admission webhook** — every invariant is either
+CRD-native (enum, pattern, default, or CEL `x-kubernetes-validations`
+rule, all enforced by the API server at admission) or enforced by the
+operator at reconcile time and surfaced on the `Ready` condition.
+
+Rejected at admission (API server, no operator involvement):
+
+| Invariant | Mechanism |
+|-----------|-----------|
+| `spec.replicas` must be 1, 3, or 5 | enum |
+| Exactly one of `spec.license.secretName` / `spec.license.value` is set | CEL (two rules: at least one, mutually exclusive) |
+| `spec.replicas` cannot change while a scale-down is in progress (`status.scaleDown.removedPeers` non-empty) | CEL transition rule |
+| `spec.image.tag` matches `^[A-Za-z0-9._-]+$` | pattern |
+| `spec.image.pullPolicy` ∈ Always/IfNotPresent/Never; `spec.services.*.type` ∈ LoadBalancer/NodePort; `spec.persistence.reclaimPolicy` ∈ Retain/Delete | enum |
+
+Enforced at reconcile time (visible via `kubectl get nomadcluster` and
+the `Ready` condition, not an admission error):
+
+| Invariant | Behaviour when violated |
+|-----------|------------------------|
+| Scaling from ≥ 3 replicas to below 3 requires the `nomad.hashicorp.com/accept-degraded-quorum: "true"` annotation | Scale-down does not start; `Ready` reason `DegradedQuorumNotAccepted`. Operator-side because CRD CEL cannot read `metadata.annotations` |
+| Scale-down requires a Raft leader | Scale-down pauses; `Ready` reason `ScaleDownBlocked` |
+| `audit.enabled=true` requires `audit.size` | Never violated in practice: `audit.size` defaults to `5Gi` at admission, and the operator falls back to `5Gi` if the field is explicitly cleared |
+
+Not validated: the existence of the Secret named by
+`spec.license.secretName` is not checked at admission (a missing Secret
+surfaces at reconcile time). Anti-affinity has no user-facing knob to
+validate — it is operator-owned per ADR 0003 (see
+[Pod placement](#pod-placement)).
 
 ## Image version pinning
 
@@ -309,6 +376,24 @@ spec:
     secretName: nomad-license
 ```
 
+**CA lifetime and renewal.** The operator-generated CA is valid for
+**2 years** — deliberately short so a leaked or compromised CA key has a
+bounded blast radius (the CA private key lives in a namespace Secret;
+anyone who can read it can mint certificates trusted by the cluster
+until the CA expires). The trade-off is a renewal obligation:
+
+- `status.certificateAuthority.expiryTime` — when the CA expires.
+- `status.certificateAuthority.renewalRequiredBy` — expiry minus the
+  30-day renewal window. When this deadline passes, the operator emits
+  a one-shot Warning Event with reason `CARenewalRequired` (debounced
+  across operator restarts). The `Ready` condition stays `True` — a CA
+  due for renewal is an operator obligation, not a cluster failure.
+
+To renew, delete the `<cluster>-ca` Secret; the operator generates a
+fresh CA and reissues server certificates from it on the next
+reconcile. Plan a rolling restart — peers must converge on the new
+trust root.
+
 ### User-provided CA
 
 Supply your own CA and the operator issues certificates from it. The CA secret must contain a certificate and private key.
@@ -349,6 +434,12 @@ The PDB is operator-owned with no spec field; scaling from `N=3` to `N=5` update
 ## Scaling down
 
 To scale a cluster down, patch `spec.replicas` to the desired count. The operator removes one Raft peer per reconcile (highest ordinal first), verifies the removal against the new peer list, records the removed server ID in `status.scaleDown.removedPeers`, and only patches `sts.spec.replicas` once every required peer has been removed. The recorded list persists across operator restarts so a crashed operator never re-removes a peer.
+
+Scaling from 3 or more replicas down to fewer than 3 sacrifices Raft
+fault tolerance, so the operator refuses to start until you opt in by
+annotating the cluster with
+`nomad.hashicorp.com/accept-degraded-quorum: "true"`. Until then the
+`Ready` condition reports reason `DegradedQuorumNotAccepted`.
 
 PVCs for removed ordinals are **not deleted** by the operator. `spec.persistence.reclaimPolicy` governs cluster-*delete* behaviour only — scale-down preserves PVCs in every case so a subsequent scale-up can re-attach to existing data.
 

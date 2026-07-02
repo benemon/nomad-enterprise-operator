@@ -29,6 +29,10 @@ type NomadAPI interface {
 	// ACL bootstrap and tokens
 	BootstrapACL() (*ACLBootstrapResult, error)
 	CreateACLPolicy(authToken, name, description, rules string) error
+	// GetACLPolicy returns the observed policy, or (nil, nil) if it does
+	// not exist. Used for GET-then-write-on-diff reconciliation of the
+	// operator-owned policies (C2 / AC-2.5.1–3).
+	GetACLPolicy(authToken, name string) (*ACLPolicyResult, error)
 	CreateACLTokenWithPolicies(authToken, name string, policies []string) (*ACLTokenResult, error)
 	GetACLToken(authToken, accessorID string) (*ACLTokenResult, error)
 	DeleteACLToken(authToken, accessorID string) error

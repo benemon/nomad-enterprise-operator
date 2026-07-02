@@ -149,6 +149,33 @@ func (c *Client) CreateACLPolicy(authToken, name, description, rules string) err
 	return nil
 }
 
+// ACLPolicyResult contains the observed state of an ACL policy.
+type ACLPolicyResult struct {
+	Name        string
+	Description string
+	Rules       string
+}
+
+// GetACLPolicy retrieves an ACL policy by name. Returns (nil, nil) if the
+// policy does not exist. Requires a management token for authentication.
+func (c *Client) GetACLPolicy(authToken, name string) (*ACLPolicyResult, error) {
+	policy, _, err := c.api.ACLPolicies().Info(name, &nomadapi.QueryOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get ACL policy: %w", err)
+	}
+
+	return &ACLPolicyResult{
+		Name:        policy.Name,
+		Description: policy.Description,
+		Rules:       policy.Rules,
+	}, nil
+}
+
 // ACLTokenResult contains the result of ACL token operations.
 type ACLTokenResult struct {
 	AccessorID     string

@@ -93,7 +93,40 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		}
 	}
 
+	p.maybeMarkAuditPVCMigrated(ctx, cluster)
+
 	return OK()
+}
+
+// maybeMarkAuditPVCMigrated implements the B6 migration signal
+// (AC-4.5.4): the first time the audit PVC is observed Bound, emit a
+// one-shot Normal Event with reason AuditPVCCreated and set the
+// status.auditPVCMigrated debounce marker. The marker lives on Status
+// so the Event is not re-emitted after operator restarts; the status
+// write lands in updateFinalStatus's merge patch (same pattern as
+// InitialReconcileEventEmitted). Checking ordinal 0 is sufficient —
+// claim templates are identical across ordinals.
+func (p *StatefulSetPhase) maybeMarkAuditPVCMigrated(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
+	if !cluster.Spec.Server.Audit.Enabled || cluster.Status.AuditPVCMigrated {
+		return
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	pvcName := fmt.Sprintf("audit-%s-0", cluster.Name)
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: cluster.Namespace}, pvc); err != nil {
+		// Not found (PVC not created yet) or transient error — the next
+		// reconcile retries. The signal is best-effort by design.
+		return
+	}
+	if pvc.Status.Phase != corev1.ClaimBound {
+		return
+	}
+
+	if p.Recorder != nil {
+		p.Recorder.Event(cluster, corev1.EventTypeNormal, "AuditPVCCreated",
+			"Audit PVC bound; audit storage is independent of spec.persistence")
+	}
+	cluster.Status.AuditPVCMigrated = true
 }
 
 func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) *appsv1.StatefulSet {
@@ -378,14 +411,12 @@ func isPersistenceEnabled(cluster *nomadv1alpha1.NomadCluster) bool {
 }
 
 func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.NomadCluster) []corev1.PersistentVolumeClaim {
-	if !isPersistenceEnabled(cluster) {
-		return nil
-	}
+	var templates []corev1.PersistentVolumeClaim
 
-	dataSize := cluster.Spec.Persistence.Size
+	if isPersistenceEnabled(cluster) {
+		dataSize := cluster.Spec.Persistence.Size
 
-	templates := []corev1.PersistentVolumeClaim{
-		{
+		dataPVC := corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "data",
 				Labels: GetLabels(cluster),
@@ -398,15 +429,18 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 					},
 				},
 			},
-		},
+		}
+
+		if cluster.Spec.Persistence.StorageClassName != "" {
+			dataPVC.Spec.StorageClassName = &cluster.Spec.Persistence.StorageClassName
+		}
+
+		templates = append(templates, dataPVC)
 	}
 
-	// Add storage class if specified
-	if cluster.Spec.Persistence.StorageClassName != "" {
-		templates[0].Spec.StorageClassName = &cluster.Spec.Persistence.StorageClassName
-	}
-
-	// Add audit volume when audit is enabled (opinionated: audit always gets persistent storage)
+	// Audit PVC is independent of data persistence (B6 / AC-4.5.1):
+	// audit always gets persistent storage when enabled, even when
+	// spec.persistence is disabled and data runs on emptyDir.
 	if cluster.Spec.Server.Audit.Enabled {
 		auditSize := cluster.Spec.Server.Audit.Size
 		if auditSize == "" {
@@ -462,7 +496,6 @@ func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity
 		},
 	}
 }
-
 
 // needsUpdate reports whether the desired StatefulSet differs from
 // the existing one in any of the fields the phase manages. The

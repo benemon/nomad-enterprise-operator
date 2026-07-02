@@ -26,6 +26,12 @@ import "time"
 // across the operator. Do not introduce tree-specific TTL constants without a
 // documented reason.
 const (
+	// CALifetime is the validity duration of the operator-generated CA
+	// (C5 / AC-2.4.8): capped at 2 years so a compromised or leaked CA
+	// key has a bounded blast radius, at the cost of a documented
+	// renewal obligation (status.certificateAuthority.renewalRequiredBy).
+	CALifetime = 2 * 365 * 24 * time.Hour
+
 	// ServerCertTTL is the validity duration of issued leaf certificates.
 	ServerCertTTL = 365 * 24 * time.Hour
 

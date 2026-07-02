@@ -34,10 +34,11 @@ import (
 )
 
 // C1 (neo-bjd): spec.persistence.reclaimPolicy gates finalizer PVC deletion.
-//   AC-2.3.12 — enum Retain|Delete, default Retain (admission defaulting).
-//   AC-2.3.13 — under Retain the finalizer does not delete PVCs.
-//   AC-2.3.14 — under Delete the finalizer deletes selector-matching PVCs.
-//   AC-2.3.15 — the value at deletion time wins (not retroactive).
+//
+//	AC-2.3.12 — enum Retain|Delete, default Retain (admission defaulting).
+//	AC-2.3.13 — under Retain the finalizer does not delete PVCs.
+//	AC-2.3.14 — under Delete the finalizer deletes selector-matching PVCs.
+//	AC-2.3.15 — the value at deletion time wins (not retroactive).
 //
 // Note: envtest has no kube-controller-manager, so a "deleted" PVC stays
 // Terminating behind the pvc-protection finalizer. "Deleted" is therefore

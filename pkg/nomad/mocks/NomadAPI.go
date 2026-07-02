@@ -397,6 +397,65 @@ func (_c *MockNomadAPI_DeleteACLToken_Call) RunAndReturn(run func(string, string
 	return _c
 }
 
+// GetACLPolicy provides a mock function with given fields: authToken, name
+func (_m *MockNomadAPI) GetACLPolicy(authToken string, name string) (*nomad.ACLPolicyResult, error) {
+	ret := _m.Called(authToken, name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetACLPolicy")
+	}
+
+	var r0 *nomad.ACLPolicyResult
+	var r1 error
+	if rf, ok := ret.Get(0).(func(string, string) (*nomad.ACLPolicyResult, error)); ok {
+		return rf(authToken, name)
+	}
+	if rf, ok := ret.Get(0).(func(string, string) *nomad.ACLPolicyResult); ok {
+		r0 = rf(authToken, name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*nomad.ACLPolicyResult)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(string, string) error); ok {
+		r1 = rf(authToken, name)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockNomadAPI_GetACLPolicy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetACLPolicy'
+type MockNomadAPI_GetACLPolicy_Call struct {
+	*mock.Call
+}
+
+// GetACLPolicy is a helper method to define mock.On call
+//   - authToken string
+//   - name string
+func (_e *MockNomadAPI_Expecter) GetACLPolicy(authToken interface{}, name interface{}) *MockNomadAPI_GetACLPolicy_Call {
+	return &MockNomadAPI_GetACLPolicy_Call{Call: _e.mock.On("GetACLPolicy", authToken, name)}
+}
+
+func (_c *MockNomadAPI_GetACLPolicy_Call) Run(run func(authToken string, name string)) *MockNomadAPI_GetACLPolicy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(string), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_GetACLPolicy_Call) Return(_a0 *nomad.ACLPolicyResult, _a1 error) *MockNomadAPI_GetACLPolicy_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockNomadAPI_GetACLPolicy_Call) RunAndReturn(run func(string, string) (*nomad.ACLPolicyResult, error)) *MockNomadAPI_GetACLPolicy_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetACLToken provides a mock function with given fields: authToken, accessorID
 func (_m *MockNomadAPI) GetACLToken(authToken string, accessorID string) (*nomad.ACLTokenResult, error) {
 	ret := _m.Called(authToken, accessorID)
