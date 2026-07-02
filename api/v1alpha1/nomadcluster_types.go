@@ -549,6 +549,14 @@ type NomadClusterStatus struct {
 	// +optional
 	OperatorStatusSecretName string `json:"operatorStatusSecretName,omitempty"`
 
+	// OperatorManagementSecretName is the name of the Secret containing
+	// the least-privilege management ACL token (acl:write,
+	// operator:write) used for all day-2 management writes (C4). Cache
+	// only: cleanup on deletion uses the deterministic name
+	// `<cluster>-operator-management`, not this field (AC-2.4.7).
+	// +optional
+	OperatorManagementSecretName string `json:"operatorManagementSecretName,omitempty"`
+
 	// OperatorStatusPolicyName is the Nomad ACL policy name created for the
 	// operator status token. Stored for cleanup if the cluster is deleted.
 	// +optional

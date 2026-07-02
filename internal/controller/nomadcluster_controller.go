@@ -44,6 +44,7 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 
 	routev1 "github.com/openshift/api/route/v1"
@@ -70,6 +71,25 @@ type NomadClusterReconciler struct {
 	Scheme     *runtime.Scheme
 	RESTConfig *rest.Config
 	Recorder   record.EventRecorder
+
+	// NomadClientFactory overrides Nomad API client construction for the
+	// finalizer's ACL cleanup (AC-2.4.7 order test). nil in production —
+	// nomad.NewClient is used.
+	NomadClientFactory func(cfg nomad.ClientConfig) (nomad.NomadAPI, error)
+}
+
+// newNomadClient builds a Nomad API client for finalizer cleanup,
+// honouring the injected factory in tests. The production path carries
+// the D4b request counter like every other operator Nomad client.
+func (r *NomadClusterReconciler) newNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, error) {
+	if r.NomadClientFactory != nil {
+		return r.NomadClientFactory(cfg)
+	}
+	c, err := nomad.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return metrics.InstrumentNomadAPI(c), nil
 }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -141,7 +161,7 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	for _, phase := range phaseList {
 		log.V(1).Info("Executing phase", "phase", phase.Name())
 
-		result := phase.Execute(ctx, cluster)
+		result := phases.TimedExecute(ctx, phase, cluster)
 
 		if result.Error != nil {
 			log.Error(result.Error, "Phase failed", "phase", phase.Name(), "message", result.Message)
@@ -225,10 +245,13 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		// Secret is read here (AC-2.4.2), before anything deletes it —
 		// it carries no ownerReference (C3), precisely so this cleanup
 		// can still authenticate against Nomad during deletion.
+		// Gated on spec (not status): cleanup uses deterministic names,
+		// so it must run even when the status cache fields were never
+		// persisted (AC-2.4.7 leak window).
 		// Non-fatal — Kubernetes-owned resources are cleaned up via owner references
-		if cluster.Status.OperatorStatusPolicyName != "" {
-			if err := r.cleanupOperatorStatusResources(ctx, cluster); err != nil {
-				log.Error(err, "Failed to clean up operator status ACL resources, continuing")
+		if cluster.Spec.Server.ACL.Enabled {
+			if err := r.cleanupNomadACLResources(ctx, cluster); err != nil {
+				log.Error(err, "Failed to clean up Nomad-side ACL resources, continuing")
 			}
 		}
 
@@ -296,9 +319,13 @@ func (r *NomadClusterReconciler) cleanupPVCs(ctx context.Context, cluster *nomad
 	return nil
 }
 
-// cleanupOperatorStatusResources attempts to delete the Nomad-side ACL token
-// and policy created for the operator status token. Failures are non-fatal.
-func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) error {
+// cleanupNomadACLResources revokes the operator-created Nomad-side ACL
+// tokens and policies — management first, then status (C4 / AC-2.4.7).
+// Deterministic names are the source of truth, NOT the status cache
+// fields: a cluster deleted between Nomad-side creation and the status
+// write must still get its policy revoked. Per-resource failures are
+// logged and cleanup continues (best-effort).
+func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) error {
 	log := logf.FromContext(ctx)
 
 	// Retrieve bootstrap token for authentication. The Secret name is
@@ -343,35 +370,39 @@ func (r *NomadClusterReconciler) cleanupOperatorStatusResources(ctx context.Cont
 		Timeout:    10 * time.Second,
 	}
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := r.newNomadClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create Nomad client for cleanup: %w", err)
 	}
 
-	// Revoke the operator status token if we can read its accessor ID
-	if cluster.Status.OperatorStatusSecretName != "" {
-		opSecret := &corev1.Secret{}
+	// Revoke token then policy for each derived credential, management
+	// first (AC-2.4.7 order). The token accessor ID lives in the Secret
+	// of the same deterministic name; a missing Secret or Nomad-side
+	// not-found just means there is nothing to revoke.
+	for _, name := range []string{
+		phases.OperatorManagementSecretName(cluster.Name),
+		cluster.Name + "-operator-status",
+	} {
+		secret := &corev1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{
-			Name:      cluster.Status.OperatorStatusSecretName,
+			Name:      name,
 			Namespace: cluster.Namespace,
-		}, opSecret); err == nil {
-			accessorID := string(opSecret.Data[phases.SecretKeyAccessorID])
-			if accessorID != "" {
+		}, secret); err == nil {
+			if accessorID := string(secret.Data[phases.SecretKeyAccessorID]); accessorID != "" {
 				if err := nomadClient.DeleteACLToken(bootstrapToken, accessorID); err != nil {
-					log.Error(err, "Failed to delete operator status ACL token", "accessorID", accessorID)
+					log.Error(err, "Failed to delete ACL token", "name", name, "accessorID", accessorID)
 				} else {
-					log.Info("Deleted operator status ACL token", "accessorID", accessorID)
+					log.Info("Deleted ACL token", "name", name, "accessorID", accessorID)
 				}
 			}
 		}
-	}
 
-	// Delete the operator status policy
-	if err := nomadClient.DeleteACLPolicy(bootstrapToken, cluster.Status.OperatorStatusPolicyName); err != nil {
-		log.Error(err, "Failed to delete operator status ACL policy", "policy", cluster.Status.OperatorStatusPolicyName)
-		return err
+		if err := nomadClient.DeleteACLPolicy(bootstrapToken, name); err != nil {
+			log.Error(err, "Failed to delete ACL policy", "policy", name)
+		} else {
+			log.Info("Deleted ACL policy", "policy", name)
+		}
 	}
-	log.Info("Deleted operator status ACL policy", "policy", cluster.Status.OperatorStatusPolicyName)
 
 	return nil
 }

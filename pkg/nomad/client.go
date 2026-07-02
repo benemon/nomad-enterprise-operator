@@ -513,11 +513,10 @@ type AutopilotServer struct {
 // license, and CheckHealth; /v1/status/leader needs no token; agent:read
 // is the new addition required by /v1/agent/self.
 //
-// Adding to this constant changes the policy on freshly bootstrapped
-// clusters only — clusters already past ACL bootstrap retain the old
-// policy because the bootstrap phase short-circuits when the
-// operator-status token already exists. Policy refresh on existing
-// clusters is a separate concern (file an issue if a use case appears).
+// Since C2 (neo-95g), edits to this constant propagate to EXISTING
+// clusters too: the observed-state diff in reconcileOperatorPolicies
+// rewrites any policy whose rules drift from this text on the next
+// reconcile.
 const OperatorStatusPolicyRules = `
 operator {
   policy = "read"
@@ -525,6 +524,22 @@ operator {
 
 agent {
   policy = "read"
+}
+`
+
+// OperatorManagementPolicyRules is the least-privilege write policy for
+// the operator's long-lived management token (C4 / AC-2.4.6): ACL
+// policy/token management (C2 drift reconciliation, derived-token
+// provisioning) plus operator writes (D2 Raft peer removal). Exactly
+// these two blocks — AC-2.4.6 pins the text; extending it requires
+// updating that AC and TestManagementTokenPolicyText.
+const OperatorManagementPolicyRules = `
+acl {
+  policy = "write"
+}
+
+operator {
+  policy = "write"
 }
 `
 

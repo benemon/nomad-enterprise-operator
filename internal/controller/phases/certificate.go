@@ -23,6 +23,7 @@ import (
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	tlspkg "github.com/hashicorp/nomad-enterprise-operator/pkg/tls"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -195,6 +196,10 @@ func (p *CertificatePhase) updateCAStatus(cluster *nomadv1alpha1.NomadCluster, s
 		status.ExpiryTime = cert.NotAfter.Format(time.RFC3339)
 		status.Subject = cert.Subject.String()
 
+		// D4c / AC-8.1.3: export the CA expiry for alerting.
+		metrics.CertExpiry.WithLabelValues(cluster.Name, cluster.Namespace, "ca").
+			Set(float64(cert.NotAfter.Unix()))
+
 		renewalRequiredBy := cert.NotAfter.Add(-certWarningWindow)
 		status.RenewalRequiredBy = renewalRequiredBy.Format(time.RFC3339)
 
@@ -240,6 +245,7 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 	if err == nil {
 		if certPEM, ok := existing.Data["tls.crt"]; ok {
 			if validateErr := tlspkg.ValidateCertificate(certPEM, requiredDNS, requiredIPs, certWarningWindow); validateErr == nil {
+				setServerCertExpiryGauge(cluster, certPEM)
 				return OK()
 			}
 			p.Log.Info("Server certificate needs renewal", "name", secretName, "reason", "SANs or expiry changed")
@@ -271,11 +277,25 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 	// without needing the intermediate CA pre-installed.
 	fullChain := append(issued.CertPEM, issued.CACertPEM...)
 
+	setServerCertExpiryGauge(cluster, issued.CertPEM)
+
 	return p.writeSecret(ctx, cluster, secretName, map[string][]byte{
 		"ca.crt":  issued.CACertPEM,
 		"tls.crt": fullChain,
 		"tls.key": issued.KeyPEM,
 	})
+}
+
+// setServerCertExpiryGauge exports the server leaf certificate's
+// NotAfter (D4c / AC-8.1.3). Both the valid-existing and fresh-issue
+// paths call it so the gauge tracks whichever certificate the pods are
+// actually mounting. Unparseable PEM is skipped — ValidateCertificate
+// or IssueCertificate error out on those paths anyway.
+func setServerCertExpiryGauge(cluster *nomadv1alpha1.NomadCluster, certPEM []byte) {
+	if cert, err := tlspkg.ParseCertificate(certPEM); err == nil {
+		metrics.CertExpiry.WithLabelValues(cluster.Name, cluster.Namespace, "server").
+			Set(float64(cert.NotAfter.Unix()))
+	}
 }
 
 // ensureCABundleConfigMap ensures the CA bundle ConfigMap exists.

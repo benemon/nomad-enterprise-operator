@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -114,6 +115,18 @@ type Phase interface {
 
 	// Execute performs the phase reconciliation.
 	Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult
+}
+
+// TimedExecute runs the phase and observes its wall-clock duration on
+// the nomad_operator_phase_duration_seconds histogram (D4a / AC-8.1.1).
+// The controller's phase loop calls this instead of Execute directly so
+// every phase is measured, including failing ones.
+func TimedExecute(ctx context.Context, phase Phase, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	start := time.Now()
+	result := phase.Execute(ctx, cluster)
+	metrics.PhaseDuration.WithLabelValues(cluster.Name, cluster.Namespace, phase.Name()).
+		Observe(time.Since(start).Seconds())
+	return result
 }
 
 // PhaseContext provides shared context for phases.
@@ -208,11 +221,17 @@ func (pc *PhaseContext) BuildClientConfig(cluster *nomadv1alpha1.NomadCluster, t
 // NewNomadClient constructs a Nomad API client using PhaseContext.NomadClientFactory
 // if set, falling back to nomad.NewClient. The return type is the NomadAPI
 // interface so phases depend on the interface rather than the concrete *Client.
+// The production path is instrumented with the D4b request counter;
+// factory-injected clients (tests) are returned as-is.
 func (pc *PhaseContext) NewNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, error) {
 	if pc.NomadClientFactory != nil {
 		return pc.NomadClientFactory(cfg)
 	}
-	return nomad.NewClient(cfg)
+	c, err := nomad.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return metrics.InstrumentNomadAPI(c), nil
 }
 
 // CheckPodsReady returns true if at least one pod matching the cluster's selector labels is ready.

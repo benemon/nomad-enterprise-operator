@@ -21,7 +21,9 @@ import (
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -104,6 +106,12 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 			Features:        license.Features,
 		}
 		p.Log.V(1).Info("Got license info", "licenseId", license.LicenseID, "expiration", license.ExpirationTime)
+
+		// D4d / AC-8.1.4: export the license expiration for alerting.
+		if expiry, perr := time.Parse(time.RFC3339, license.ExpirationTime); perr == nil {
+			metrics.LicenseExpiry.WithLabelValues(cluster.Name, cluster.Namespace).
+				Set(float64(expiry.Unix()))
+		}
 	}
 
 	// Get agent-reported Nomad version (C7 / AC-4.7.1). Non-fatal per
@@ -116,6 +124,14 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 	} else if self.Version != "" {
 		p.NomadVersion = self.Version
 		p.Log.V(1).Info("Got Nomad version", "version", self.Version)
+
+		// D4d / AC-8.1.7: info-style version gauge. Delete the cluster's
+		// previous series first so a version change leaves exactly one
+		// series per cluster (bounded cardinality).
+		metrics.NomadVersionInfo.DeletePartialMatch(prometheus.Labels{
+			"cluster": cluster.Name, "namespace": cluster.Namespace,
+		})
+		metrics.NomadVersionInfo.WithLabelValues(cluster.Name, cluster.Namespace, self.Version).Set(1)
 	}
 
 	// Get autopilot health information

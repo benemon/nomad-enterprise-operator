@@ -331,11 +331,14 @@ func (p *ScaleDownPhase) pickNextPeer(
 	return best, nil
 }
 
-// getManagementToken returns a token with operator:write capability,
-// needed for RaftRemovePeer. For now this is the bootstrap token —
-// the operator-status policy is intentionally read-only and a
-// dedicated long-lived management token is C4's job (neo-ikf).
-// Returns the empty string with no error when ACLs are disabled.
+// getManagementToken returns the C4 (neo-ikf) least-privilege
+// management token (acl:write, operator:write), needed for
+// RaftRemovePeer. The bootstrap token is no longer used for scale-down
+// (AC-2.4.5). If the management Secret does not exist yet — first
+// reconcile after an operator upgrade, before ACLBootstrapPhase (which
+// runs later in the phase order) has minted it — the caller defers to
+// the next reconcile. Returns the empty string with no error when ACLs
+// are disabled.
 func (p *ScaleDownPhase) getManagementToken(
 	ctx context.Context,
 	cluster *nomadv1alpha1.NomadCluster,
@@ -343,16 +346,17 @@ func (p *ScaleDownPhase) getManagementToken(
 	if !cluster.Spec.Server.ACL.Enabled {
 		return "", nil
 	}
+	secretName := OperatorManagementSecretName(cluster.Name)
 	secret := &corev1.Secret{}
 	if err := p.Client.Get(ctx, types.NamespacedName{
-		Name:      BootstrapSecretName(cluster.Name),
+		Name:      secretName,
 		Namespace: cluster.Namespace,
 	}, secret); err != nil {
 		return "", err
 	}
 	token := string(secret.Data["secret-id"])
 	if token == "" {
-		return "", fmt.Errorf("bootstrap secret %q has no secret-id", BootstrapSecretName(cluster.Name))
+		return "", fmt.Errorf("management token secret %q has no secret-id", secretName)
 	}
 	return token, nil
 }

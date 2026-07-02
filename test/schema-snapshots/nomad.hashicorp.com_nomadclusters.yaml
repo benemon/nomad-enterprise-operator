@@ -890,6 +890,14 @@ spec:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              operatorManagementSecretName:
+                description: |-
+                  OperatorManagementSecretName is the name of the Secret containing
+                  the least-privilege management ACL token (acl:write,
+                  operator:write) used for all day-2 management writes (C4). Cache
+                  only: cleanup on deletion uses the deterministic name
+                  `<cluster>-operator-management`, not this field (AC-2.4.7).
+                type: string
               operatorStatusPolicyName:
                 description: |-
                   OperatorStatusPolicyName is the Nomad ACL policy name created for the

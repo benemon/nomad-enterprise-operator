@@ -18,8 +18,12 @@ limitations under the License.
 // (design review §8.1) and registers them on controller-runtime's default
 // registry, which is exposed on the existing :8443/metrics endpoint.
 //
-// This package is infrastructure only (F4): every handle starts at zero.
-// Population happens per-site in Tranche D (D4a–D4e) and D2e.
+// The handles were scaffolded by F4 and are populated per-site: phase
+// durations by the controller's TimedExecute loop (D4a), API requests
+// by the InstrumentNomadAPI decorator (D4b), cert expiry by
+// CertificatePhase (D4c), license expiry and version info by
+// ClusterStatusPhase (D4d), bootstrap failures by ACLBootstrapPhase
+// (D4e), and scale-down-in-progress by ScaleDownPhase (D2e).
 package metrics
 
 import (

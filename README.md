@@ -414,14 +414,25 @@ spec:
 
 ## ACL Configuration
 
-ACLs are enabled by default (`server.acl.enabled: true`). When the StatefulSet becomes ready, the operator:
+ACLs are enabled by default (`server.acl.enabled: true`). When the StatefulSet becomes ready, the operator bootstraps the ACL system and provisions **three tokens**, each in its own Secret:
 
-1. Bootstraps the Nomad ACL system and stores the bootstrap token in the `<cluster>-acl-bootstrap` Secret.
-2. Creates a dedicated least-privilege ACL policy with `operator:read` and `agent:read` capabilities (the latter for the agent-version probe).
-3. Creates a token bound to that policy and stores it in the `<cluster>-operator-status` Secret.
-4. Uses the operator status token (not the bootstrap token) for all subsequent Nomad API queries (autopilot health, license status, leader election).
+| Secret | Capabilities | Used for |
+|--------|--------------|----------|
+| `<cluster>-acl-bootstrap` | full management (Nomad bootstrap token) | Minting the management token at bootstrap, and revoking the derived tokens/policies on cluster deletion. Nothing else — day-2 operations never use it. |
+| `<cluster>-operator-management` | `acl:write`, `operator:write` | All day-2 management writes: keeping the operator-owned ACL policies in their desired state, and Raft peer removal during scale-down. |
+| `<cluster>-operator-status` | `operator:read`, `agent:read` | All day-2 read-only queries: autopilot health, license status, leader, agent-version probe. |
 
-On cluster deletion, the operator revokes the operator status token and deletes the associated ACL policy from Nomad before removing Kubernetes resources.
+The principle is least privilege per concern: the bootstrap token is
+effectively sealed after minting the management token; writes ride the
+management token; reads ride the status token. The operator also keeps
+the three operator-owned policies (`anonymous`,
+`<cluster>-operator-management`, `<cluster>-operator-status`) in their
+desired state on every reconcile — manual edits to them are reverted.
+
+On cluster deletion, the finalizer revokes the management and status
+tokens and deletes their policies from Nomad (authenticating with the
+bootstrap token, whose Secret is deliberately deleted last — see
+[Bootstrap token Secret lifecycle](#bootstrap-token-secret-lifecycle)).
 
 ## Pod Disruption Budget
 
