@@ -326,6 +326,12 @@ validate — it is operator-owned per ADR 0003 (see
 
 The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.0-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
 
+Upgrading a cluster to a new Nomad version is a user-driven
+`spec.image.tag` change. **Snapshot before you upgrade** — the operator
+deliberately does not do it for you. The full procedure, including the
+pre-upgrade one-shot snapshot and rollback guidance, is in
+[docs/runbooks/upgrade.md](docs/runbooks/upgrade.md).
+
 **Why a pinned default matters.** Nomad is a Raft consensus cluster. A floating tag (one that resolves to "whatever the latest patch happens to be at this instant") combined with the operator's default `imagePullPolicy: Always` means a registry-side retag during a rolling restart can produce version-mismatched peers. Two servers running 2.0.3 and one server running 2.0.4 may interact in ways that produce silent quorum loss or replication anomalies. By pinning the default to a single concrete version per operator release, every server in every Raft cluster runs the same Nomad binary unless the user explicitly opts out.
 
 **How to override.** Set `spec.image.tag` to your desired version (concrete or floating) at the CR level:

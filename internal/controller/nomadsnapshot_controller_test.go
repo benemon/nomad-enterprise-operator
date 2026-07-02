@@ -256,16 +256,32 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			snapshot.Spec.Schedule.Stale = true
 			Expect(k8sClient.Create(ctx, snapshot)).To(Succeed())
 
-			By("Reconciling - this will fail on token creation but ConfigMap should be created")
-			// Note: Reconcile will fail when trying to create token (no real Nomad)
-			// but we can still verify the ConfigMap would have correct content
+			By("Reconciling without a management token secret — must wait (C4 / neo-pfx)")
+			// First reconcile adds the finalizer; second reaches the token gate.
+			for i := 0; i < 2; i++ {
+				_, _ = reconcileSnapshot(ctx, types.NamespacedName{
+					Name:      snapshot.Name,
+					Namespace: namespace,
+				})
+			}
+			fetched := &nomadv1alpha1.NomadSnapshot{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshot.Name, Namespace: namespace}, fetched)).To(Succeed())
+			waiting := false
+			for _, cond := range fetched.Status.Conditions {
+				if cond.Type == "Ready" && cond.Status == metav1.ConditionFalse && cond.Reason == "WaitingForManagementToken" {
+					waiting = true
+				}
+			}
+			Expect(waiting).To(BeTrue(), "Expected Ready=False with WaitingForManagementToken while the management secret is absent")
+
+			By("Reconciling past the token gate once the management secret exists")
+			createBootstrapSecret(ctx, namespace, "nomad-operator-management")
+			// Note: Reconcile now proceeds to Nomad-side token creation and
+			// fails there (no real Nomad in envtest); the spec is parsed.
 			_, _ = reconcileSnapshot(ctx, types.NamespacedName{
 				Name:      snapshot.Name,
 				Namespace: namespace,
 			})
-
-			// The reconcile will fail at token creation, but we can verify
-			// the snapshot spec is correctly parsed
 			Expect(snapshot.Spec.Schedule.Interval).To(Equal("2h"))
 			Expect(snapshot.Spec.Schedule.Retain).To(Equal(12))
 			Expect(snapshot.Spec.Schedule.Stale).To(BeTrue())

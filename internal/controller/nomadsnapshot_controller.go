@@ -152,24 +152,23 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
-	// Get bootstrap token from cluster
-	bootstrapSecretName := cluster.Status.ACLBootstrapSecretName
-	if bootstrapSecretName == "" {
-		bootstrapSecretName = cluster.Name + "-acl-bootstrap"
-	}
-
-	bootstrapSecret := &corev1.Secret{}
+	// Get the cluster's management token (C4 / neo-pfx): the bootstrap
+	// token is sealed after minting it, so snapshot-agent policy/token
+	// creation authenticates with the management token (acl:write). The
+	// Secret appears one reconcile after ACL bootstrap — wait for it.
+	managementSecretName := phases.OperatorManagementSecretName(cluster.Name)
+	managementSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      bootstrapSecretName,
+		Name:      managementSecretName,
 		Namespace: clusterNamespace,
-	}, bootstrapSecret); err != nil {
-		log.Error(err, "Failed to get bootstrap token secret", "secret", bootstrapSecretName)
+	}, managementSecret); err != nil {
+		log.Info("Waiting for cluster management token secret", "secret", managementSecretName)
 		patchBase := snapshot.DeepCopy()
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
-			Reason:  "BootstrapSecretNotFound",
-			Message: fmt.Sprintf("Bootstrap secret %s not found", bootstrapSecretName),
+			Reason:  "WaitingForManagementToken",
+			Message: fmt.Sprintf("Waiting for cluster management token secret %s", managementSecretName),
 		})
 		if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
 			return ctrl.Result{}, err
@@ -177,9 +176,9 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
-	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
-	if bootstrapToken == "" {
-		log.Info("Bootstrap secret has no secret-id", "secret", bootstrapSecretName)
+	managementToken := string(managementSecret.Data["secret-id"])
+	if managementToken == "" {
+		log.Info("Management token secret has no secret-id", "secret", managementSecretName)
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
@@ -189,7 +188,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Create or get a dedicated ACL token for the snapshot agent.
 	// The token is scoped to operator:write which grants snapshot-save and
 	// license-read capabilities (required by the snapshot agent).
-	snapshotToken, err := r.ensureSnapshotToken(ctx, snapshot, cluster, clusterNamespace, bootstrapToken)
+	snapshotToken, err := r.ensureSnapshotToken(ctx, snapshot, cluster, clusterNamespace, managementToken)
 	if err != nil {
 		log.Error(err, "Failed to ensure snapshot agent token")
 		patchBase := snapshot.DeepCopy()
@@ -505,7 +504,7 @@ operator {
 // ensureSnapshotToken creates or retrieves a dedicated ACL token for the snapshot agent.
 func (r *NomadSnapshotReconciler) ensureSnapshotToken(
 	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
-	cluster *nomadv1alpha1.NomadCluster, clusterNamespace, bootstrapToken string,
+	cluster *nomadv1alpha1.NomadCluster, clusterNamespace, authToken string,
 ) (string, error) {
 	log := logf.FromContext(ctx)
 
@@ -522,7 +521,7 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(
 
 	// If we already have a token, try to look it up
 	if snapshot.Status.TokenAccessorID != "" {
-		token, err := nomadClient.GetACLToken(bootstrapToken, snapshot.Status.TokenAccessorID)
+		token, err := nomadClient.GetACLToken(authToken, snapshot.Status.TokenAccessorID)
 		if err == nil && token != nil {
 			log.V(1).Info("Using existing snapshot agent token", "accessor", snapshot.Status.TokenAccessorID)
 			return token.SecretID, nil
@@ -532,7 +531,7 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(
 			if err != nil {
 				return "", err
 			}
-			token, err = nomadClient.GetACLToken(bootstrapToken, snapshot.Status.TokenAccessorID)
+			token, err = nomadClient.GetACLToken(authToken, snapshot.Status.TokenAccessorID)
 			if err == nil && token != nil {
 				return token.SecretID, nil
 			}
@@ -541,20 +540,20 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(
 	}
 
 	// Create the policy (upsert, idempotent)
-	err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules)
+	err = nomadClient.CreateACLPolicy(authToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules)
 	if nomad.IsNetworkError(err) && loadBalancerAddr != "" {
 		nomadClient, err = r.snapshotNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr)
 		if err != nil {
 			return "", err
 		}
-		err = nomadClient.CreateACLPolicy(bootstrapToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules)
+		err = nomadClient.CreateACLPolicy(authToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules)
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to create snapshot agent policy: %w", err)
 	}
 
 	// Create a client token bound to the policy
-	newToken, err := nomadClient.CreateACLTokenWithPolicies(bootstrapToken, policyName, []string{policyName})
+	newToken, err := nomadClient.CreateACLTokenWithPolicies(authToken, policyName, []string{policyName})
 	if err != nil {
 		return "", fmt.Errorf("failed to create snapshot agent token: %w", err)
 	}
@@ -589,19 +588,32 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 		return fmt.Errorf("failed to get cluster: %w", err)
 	}
 
-	bootstrapSecretName := cluster.Status.ACLBootstrapSecretName
-	if bootstrapSecretName == "" {
-		bootstrapSecretName = cluster.Name + "-acl-bootstrap"
-	}
-
-	bootstrapSecret := &corev1.Secret{}
+	// Prefer the management token (C4 / neo-pfx); fall back to the
+	// bootstrap token — during cluster teardown the management token may
+	// already be revoked while the bootstrap Secret survives until the
+	// cluster finalizer's last step (C3).
+	authToken := ""
+	managementSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      bootstrapSecretName,
+		Name:      phases.OperatorManagementSecretName(cluster.Name),
 		Namespace: clusterNamespace,
-	}, bootstrapSecret); err != nil {
-		return fmt.Errorf("failed to get bootstrap secret: %w", err)
+	}, managementSecret); err == nil {
+		authToken = string(managementSecret.Data["secret-id"])
 	}
-	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
+	if authToken == "" {
+		bootstrapSecretName := cluster.Status.ACLBootstrapSecretName
+		if bootstrapSecretName == "" {
+			bootstrapSecretName = cluster.Name + "-acl-bootstrap"
+		}
+		bootstrapSecret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      bootstrapSecretName,
+			Namespace: clusterNamespace,
+		}, bootstrapSecret); err != nil {
+			return fmt.Errorf("failed to get a cleanup auth token (management and bootstrap secrets both unavailable): %w", err)
+		}
+		authToken = string(bootstrapSecret.Data["secret-id"])
+	}
 
 	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
 	nomadClient, err := r.snapshotNomadClient(ctx, cluster, clusterNamespace, internalAddr)
@@ -611,12 +623,12 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 
 	// Delete token
 	if snapshot.Status.TokenAccessorID != "" {
-		if err := nomadClient.DeleteACLToken(bootstrapToken, snapshot.Status.TokenAccessorID); err != nil {
+		if err := nomadClient.DeleteACLToken(authToken, snapshot.Status.TokenAccessorID); err != nil {
 			if !nomad.IsNetworkError(err) {
 				log.Error(err, "Failed to delete snapshot agent token")
 			} else if loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true); loadBalancerAddr != "" {
 				if lbClient, lbErr := r.snapshotNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr); lbErr == nil {
-					_ = lbClient.DeleteACLToken(bootstrapToken, snapshot.Status.TokenAccessorID)
+					_ = lbClient.DeleteACLToken(authToken, snapshot.Status.TokenAccessorID)
 				}
 			}
 		} else {
@@ -626,12 +638,12 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 
 	// Delete policy
 	if snapshot.Status.PolicyName != "" {
-		if err := nomadClient.DeleteACLPolicy(bootstrapToken, snapshot.Status.PolicyName); err != nil {
+		if err := nomadClient.DeleteACLPolicy(authToken, snapshot.Status.PolicyName); err != nil {
 			if !nomad.IsNetworkError(err) {
 				log.Error(err, "Failed to delete snapshot agent policy")
 			} else if loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true); loadBalancerAddr != "" {
 				if lbClient, lbErr := r.snapshotNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr); lbErr == nil {
-					_ = lbClient.DeleteACLPolicy(bootstrapToken, snapshot.Status.PolicyName)
+					_ = lbClient.DeleteACLPolicy(authToken, snapshot.Status.PolicyName)
 				}
 			}
 		} else {

@@ -55,6 +55,11 @@ var excludedFiles = []string{
 // excludedPrefixes drop whole subtrees (e.g. cmd/...).
 var excludedPrefixes = []string{
 	"cmd/",
+	// mockery-generated code (neo-dic): pure delegation with zero
+	// branches of our own, same rationale as zz_generated.deepcopy.go.
+	// Without this the pkg/ aggregate is dominated by generated
+	// statements no test should ever target.
+	"pkg/nomad/mocks/",
 }
 
 // repoRoot is the module path prefix stripped from go-tool-cover lines so

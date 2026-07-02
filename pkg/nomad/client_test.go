@@ -783,3 +783,226 @@ func TestCheckHealth(t *testing.T) {
 		t.Errorf("CheckHealth().Server.OK = false, want true")
 	}
 }
+
+// TestGetACLPolicy pins the C2 observed-state read: policy fields come
+// back verbatim, a 404 maps to (nil, nil) — "policy absent" is data,
+// not an error — and other failures surface as errors.
+func TestGetACLPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		handler    http.HandlerFunc
+		wantErr    bool
+		wantResult *ACLPolicyResult
+	}{
+		{
+			name: "existing policy",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/acl/policy/anonymous" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"Name":        "anonymous",
+					"Description": "desc",
+					"Rules":       `agent { policy = "read" }`,
+				})
+			},
+			wantResult: &ACLPolicyResult{
+				Name:        "anonymous",
+				Description: "desc",
+				Rules:       `agent { policy = "read" }`,
+			},
+		},
+		{
+			name: "missing policy returns nil, nil",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte("ACL policy not found"))
+			},
+		},
+		{
+			name: "server error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+
+			client, err := NewClient(ClientConfig{Address: server.URL})
+			if err != nil {
+				t.Fatalf("Failed to create client: %v", err)
+			}
+
+			result, err := client.GetACLPolicy("token", "anonymous")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("GetACLPolicy() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantResult == nil {
+				if result != nil && !tt.wantErr {
+					t.Errorf("GetACLPolicy() = %+v, want nil", result)
+				}
+				return
+			}
+			if result == nil || *result != *tt.wantResult {
+				t.Errorf("GetACLPolicy() = %+v, want %+v", result, tt.wantResult)
+			}
+		})
+	}
+}
+
+// TestAgentSelf pins the C7 version probe: the version is read from
+// stats.nomad.version first, falls back to the serf build tag, and an
+// absent version is an empty string (probe miss), not an error.
+func TestAgentSelf(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        map[string]interface{}
+		status      int
+		wantErr     bool
+		wantVersion string
+	}{
+		{
+			name: "version from stats",
+			body: map[string]interface{}{
+				"stats":  map[string]interface{}{"nomad": map[string]string{"version": "1.11.0+ent"}},
+				"member": map[string]interface{}{"Tags": map[string]string{}},
+			},
+			wantVersion: "1.11.0+ent",
+		},
+		{
+			name: "version from serf build tag",
+			body: map[string]interface{}{
+				"stats":  map[string]interface{}{},
+				"member": map[string]interface{}{"Tags": map[string]string{"build": "1.11.1+ent"}},
+			},
+			wantVersion: "1.11.1+ent",
+		},
+		{
+			name: "no version anywhere is a probe miss, not an error",
+			body: map[string]interface{}{
+				"stats":  map[string]interface{}{},
+				"member": map[string]interface{}{"Tags": map[string]string{}},
+			},
+			wantVersion: "",
+		},
+		{
+			name:    "server error",
+			status:  http.StatusInternalServerError,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.status != 0 {
+					w.WriteHeader(tt.status)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(tt.body)
+			}))
+			defer server.Close()
+
+			client, err := NewClient(ClientConfig{Address: server.URL})
+			if err != nil {
+				t.Fatalf("Failed to create client: %v", err)
+			}
+
+			result, err := client.AgentSelf(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("AgentSelf() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if result.Version != tt.wantVersion {
+				t.Errorf("AgentSelf().Version = %q, want %q", result.Version, tt.wantVersion)
+			}
+		})
+	}
+}
+
+// TestRaftListPeers pins the D2 peer-list read used by scale-down.
+func TestRaftListPeers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/operator/raft/configuration" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"Servers": []map[string]interface{}{
+				{"ID": "id-1", "Node": "nomad-0.global", "Address": "10.0.0.1:4647", "Leader": true, "Voter": true},
+				{"ID": "id-2", "Node": "nomad-1.global", "Address": "10.0.0.2:4647", "Leader": false, "Voter": true},
+			},
+			"Index": 7,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Address: server.URL})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	peers, err := client.RaftListPeers(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("RaftListPeers() error = %v", err)
+	}
+	if len(peers) != 2 {
+		t.Fatalf("RaftListPeers() returned %d peers, want 2", len(peers))
+	}
+	if peers[0].ID != "id-1" || !peers[0].Leader || peers[1].Node != "nomad-1.global" {
+		t.Errorf("peer fields not mapped: %+v", peers)
+	}
+
+	errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer errServer.Close()
+	errClient, _ := NewClient(ClientConfig{Address: errServer.URL})
+	if _, err := errClient.RaftListPeers(context.Background(), "token"); err == nil {
+		t.Error("RaftListPeers() expected error on 403")
+	}
+}
+
+// TestRaftRemovePeer pins the D2 peer-removal write used by scale-down.
+func TestRaftRemovePeer(t *testing.T) {
+	var gotID, gotToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/operator/raft/peer" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gotID = r.URL.Query().Get("id")
+		gotToken = r.Header.Get("X-Nomad-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Address: server.URL})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	if err := client.RaftRemovePeer(context.Background(), "mgmt-token", "id-2"); err != nil {
+		t.Fatalf("RaftRemovePeer() error = %v", err)
+	}
+	if gotID != "id-2" || gotToken != "mgmt-token" {
+		t.Errorf("request carried id=%q token=%q, want id-2/mgmt-token", gotID, gotToken)
+	}
+
+	errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer errServer.Close()
+	errClient, _ := NewClient(ClientConfig{Address: errServer.URL})
+	if err := errClient.RaftRemovePeer(context.Background(), "token", "id-2"); err == nil {
+		t.Error("RaftRemovePeer() expected error on 403")
+	}
+}
