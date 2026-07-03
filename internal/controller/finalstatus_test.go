@@ -18,11 +18,12 @@ package controller
 
 import (
 	"context"
-	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -51,7 +52,6 @@ func newFinalStatusFixture(t *testing.T, objs ...client.Object) (*NomadClusterRe
 	// Mirror the D5 field indexes SetupWithManager registers on the real
 	// cache, using the same shared extractors.
 	for key, extract := range secretRefIndexes {
-		extract := extract
 		builder = builder.WithIndex(&nomadv1alpha1.NomadCluster{}, key, func(obj client.Object) []string {
 			if name := extract(obj.(*nomadv1alpha1.NomadCluster)); name != "" {
 				return []string{name}
@@ -71,10 +71,6 @@ func newFinalStatusFixture(t *testing.T, objs ...client.Object) (*NomadClusterRe
 		Scheme:   scheme.Scheme,
 		Recorder: recorder,
 	}, recorder
-}
-
-func condition(cluster *nomadv1alpha1.NomadCluster, condType string) *metav1.Condition {
-	return meta.FindStatusCondition(cluster.Status.Conditions, condType)
 }
 
 // TestReadyTruePrecondition covers C9 / AC-2.5.5: Ready=True requires

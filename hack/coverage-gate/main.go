@@ -80,7 +80,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "coverage-gate: %v\n", err)
 			os.Exit(2)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		r = f
 	}
 
@@ -131,7 +131,8 @@ func main() {
 	for _, t := range thresholds {
 		a := agg[t.prefix]
 		if a == nil || a.total == 0 {
-			fmt.Printf("  WARN  no covered statements under %s — skipping (this rule is unenforceable until coverage data exists)\n", t.prefix)
+			fmt.Printf("  WARN  no covered statements under %s — skipping "+
+				"(this rule is unenforceable until coverage data exists)\n", t.prefix)
 			continue
 		}
 		pct := 100.0 * a.covered / a.total
@@ -145,7 +146,8 @@ func main() {
 
 	if failed {
 		fmt.Println()
-		fmt.Println("Coverage gate FAILED. Raise tests or, if the regression is justified, update CONTRIBUTING.md §1.5 in the same PR.")
+		fmt.Println("Coverage gate FAILED. Raise tests or, if the regression is " +
+			"justified, update CONTRIBUTING.md §1.5 in the same PR.")
 		os.Exit(1)
 	}
 }

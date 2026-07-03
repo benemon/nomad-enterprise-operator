@@ -492,8 +492,8 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 		t.Fatalf("call %q not recorded; calls = %v", name, calls)
 		return -1
 	}
-	if !(index("bootstrap") < index("token:mgmt") &&
-		index("token:mgmt") < index("token:status")) {
+	if index("bootstrap") >= index("token:mgmt") ||
+		index("token:mgmt") >= index("token:status") {
 		t.Errorf("call order wrong: %v", calls)
 	}
 

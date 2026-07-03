@@ -101,7 +101,6 @@ var _ = Describe("Finalizer reclaimPolicy gating", func() {
 	}
 
 	for i, sc := range scenarios {
-		sc := sc
 		namespace := fmt.Sprintf("reclaim-test-%d", i)
 
 		It(sc.name, func() {

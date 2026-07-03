@@ -79,7 +79,6 @@ var _ = Describe("C3 bootstrap Secret finalizer lifecycle", func() {
 	}
 
 	for i, sc := range scenarios {
-		sc := sc
 		namespace := fmt.Sprintf("bootstrap-secret-test-%d", i)
 
 		It(sc.name, func() {

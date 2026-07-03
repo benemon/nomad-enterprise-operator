@@ -263,10 +263,10 @@ func rotationFixture(t *testing.T, caExpiresIn time.Duration) (*CertificatePhase
 	return phase, cluster, recorder
 }
 
-func getSecret(t *testing.T, phase *CertificatePhase, ns, name string) *corev1.Secret {
+func getSecret(t *testing.T, phase *CertificatePhase, name string) *corev1.Secret {
 	t.Helper()
 	s := &corev1.Secret{}
-	if err := phase.Client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: ns}, s); err != nil {
+	if err := phase.Client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "rot-ns"}, s); err != nil {
 		t.Fatalf("Get secret %s: %v", name, err)
 	}
 	return s
@@ -279,7 +279,7 @@ func getSecret(t *testing.T, phase *CertificatePhase, ns, name string) *corev1.S
 func TestCARotationLifecycle(t *testing.T) {
 	phase, cluster, recorder := rotationFixture(t, 10*24*time.Hour) // inside the 30d window
 
-	oldCASecret := getSecret(t, phase, "rot-ns", "rot-ca")
+	oldCASecret := getSecret(t, phase, "rot-ca")
 	oldCAPEM := append([]byte{}, oldCASecret.Data["tls.crt"]...)
 	oldCACert, _ := tlspkg.ParseCertificate(oldCAPEM)
 
@@ -295,14 +295,14 @@ func TestCARotationLifecycle(t *testing.T) {
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() pass 1 error = %v", result.Error)
 	}
-	caSecret := getSecret(t, phase, "rot-ns", "rot-ca")
+	caSecret := getSecret(t, phase, "rot-ca")
 	if _, ok := caSecret.Data["tls-next.crt"]; !ok {
 		t.Fatal("phase A did not introduce tls-next.crt")
 	}
 	if !bytes.Equal(caSecret.Data["tls.crt"], oldCAPEM) {
 		t.Fatal("phase A must not change the active CA")
 	}
-	tlsSecret := getSecret(t, phase, "rot-ns", "rot-tls")
+	tlsSecret := getSecret(t, phase, "rot-tls")
 	if !bytes.Contains(tlsSecret.Data["ca.crt"], oldCAPEM) ||
 		!bytes.Contains(tlsSecret.Data["ca.crt"], caSecret.Data["tls-next.crt"]) {
 		t.Fatal("trust union after phase A must contain active AND next CA")
@@ -318,7 +318,7 @@ func TestCARotationLifecycle(t *testing.T) {
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() pass 2 error = %v", result.Error)
 	}
-	caSecret = getSecret(t, phase, "rot-ns", "rot-ca")
+	caSecret = getSecret(t, phase, "rot-ca")
 	if _, ok := caSecret.Data["tls-next.crt"]; ok {
 		t.Fatal("phase B must remove tls-next.*")
 	}
@@ -332,7 +332,7 @@ func TestCARotationLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promoted CA unparseable: %v", err)
 	}
-	tlsSecret = getSecret(t, phase, "rot-ns", "rot-tls")
+	tlsSecret = getSecret(t, phase, "rot-tls")
 	if !leafSignedBy(tlsSecret.Data["tls.crt"], newCACert) {
 		t.Fatal("leaf must be reissued from the promoted CA (issuer-forced)")
 	}
@@ -344,11 +344,11 @@ func TestCARotationLifecycle(t *testing.T) {
 	}
 
 	// --- Pass 3: steady state — nothing changes, no events. ---
-	beforeCA := getSecret(t, phase, "rot-ns", "rot-ca").ResourceVersion
+	beforeCA := getSecret(t, phase, "rot-ca").ResourceVersion
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() pass 3 error = %v", result.Error)
 	}
-	if rv := getSecret(t, phase, "rot-ns", "rot-ca").ResourceVersion; rv != beforeCA {
+	if rv := getSecret(t, phase, "rot-ca").ResourceVersion; rv != beforeCA {
 		t.Errorf("steady-state pass rewrote the CA secret (rv %s -> %s)", beforeCA, rv)
 	}
 	if evs := drain(); len(evs) != 0 {
@@ -356,7 +356,7 @@ func TestCARotationLifecycle(t *testing.T) {
 	}
 
 	// --- Phase C: previous CA expires -> passively retired. ---
-	caSecret = getSecret(t, phase, "rot-ns", "rot-ca")
+	caSecret = getSecret(t, phase, "rot-ca")
 	expired := testCAWithExpiry(t, -time.Hour)
 	caSecret.Data["tls-previous.crt"] = expired.CACertPEM
 	if err := phase.Client.Update(context.Background(), caSecret); err != nil {
@@ -365,11 +365,11 @@ func TestCARotationLifecycle(t *testing.T) {
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() retire pass error = %v", result.Error)
 	}
-	caSecret = getSecret(t, phase, "rot-ns", "rot-ca")
+	caSecret = getSecret(t, phase, "rot-ca")
 	if _, ok := caSecret.Data["tls-previous.crt"]; ok {
 		t.Fatal("expired previous CA must be removed")
 	}
-	tlsSecret = getSecret(t, phase, "rot-ns", "rot-tls")
+	tlsSecret = getSecret(t, phase, "rot-tls")
 	if bytes.Contains(tlsSecret.Data["ca.crt"], expired.CACertPEM) {
 		t.Fatal("expired CA must leave the trust union")
 	}
@@ -396,7 +396,7 @@ func TestCARotationWaitsForRoll(t *testing.T) {
 			t.Fatalf("Execute() pass %d error = %v", i, result.Error)
 		}
 	}
-	caSecret := getSecret(t, phase, "rot-ns", "rot-ca")
+	caSecret := getSecret(t, phase, "rot-ca")
 	if _, ok := caSecret.Data["tls-next.crt"]; !ok {
 		t.Fatal("phase A should still introduce the next CA")
 	}
@@ -437,7 +437,7 @@ func TestUserCANeverRotates(t *testing.T) {
 	if err := phase.Client.Get(context.Background(), types.NamespacedName{Name: "userca-ca", Namespace: "rot-ns"}, caSecret); err == nil {
 		t.Fatal("operator-generated CA secret created despite user-provided CA")
 	}
-	got := getSecret(t, phase, "rot-ns", "corp-ca")
+	got := getSecret(t, phase, "corp-ca")
 	if _, ok := got.Data["tls-next.crt"]; ok {
 		t.Fatal("rotation artifacts written into the USER's CA secret")
 	}

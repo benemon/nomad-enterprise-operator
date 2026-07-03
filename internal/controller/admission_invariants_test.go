@@ -166,7 +166,6 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 		}
 
 		for i, c := range cases {
-			c := c
 			name := fmt.Sprintf("adm-cluster-%d", i)
 			It(c.name, func() {
 				cluster := newTestCluster(namespace, name)
@@ -238,7 +237,6 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 		}
 
 		for i, c := range cases {
-			c := c
 			name := fmt.Sprintf("adm-snapshot-%d", i)
 			It(c.name, func() {
 				snap := base(name)

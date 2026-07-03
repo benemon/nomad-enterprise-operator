@@ -196,10 +196,7 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	}
 	p.Log.Info("ScaleDown: peer list from Nomad", "nodes", peerNodes)
 
-	candidate, err := p.pickNextPeer(cluster, peers, desiredReplicas)
-	if err != nil {
-		return Error(err, "Failed to pick next peer for removal")
-	}
+	candidate := p.pickNextPeer(cluster, peers, desiredReplicas)
 	if candidate == nil {
 		p.Log.Info("ScaleDown: deferring — no peer matches the scale-down target this cycle")
 		return OK()
@@ -294,7 +291,7 @@ func (p *ScaleDownPhase) pickNextPeer(
 	cluster *nomadv1alpha1.NomadCluster,
 	peers []*nomad.RaftPeer,
 	desiredReplicas int32,
-) (*nomad.RaftPeer, error) {
+) *nomad.RaftPeer {
 	alreadyRemoved := map[string]bool{}
 	if cluster.Status.ScaleDown != nil {
 		for _, id := range cluster.Status.ScaleDown.RemovedPeers {
@@ -328,7 +325,7 @@ func (p *ScaleDownPhase) pickNextPeer(
 			bestOrdinal = ordinal
 		}
 	}
-	return best, nil
+	return best
 }
 
 // getManagementToken returns the C4 (neo-ikf) least-privilege

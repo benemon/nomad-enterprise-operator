@@ -488,6 +488,9 @@ func TestAdvertisePhase_ConfiguredIP(t *testing.T) {
 	phase := NewAdvertisePhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
+	// Admission defaults Type to LoadBalancer; the fake client does no
+	// defaulting, and neo-8yf short-circuits non-LoadBalancer types.
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeLoadBalancer
 	cluster.Spec.Services.External.LoadBalancerIP = "192.168.1.100"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -519,6 +522,9 @@ func TestAdvertisePhase_WaitForLoadBalancer(t *testing.T) {
 	phase := NewAdvertisePhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
+	// Admission defaults Type to LoadBalancer; the fake client does no
+	// defaulting, and neo-8yf short-circuits non-LoadBalancer types.
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeLoadBalancer
 	// No LoadBalancerIP configured, must wait for assignment
 
 	result := phase.Execute(context.Background(), cluster)
@@ -553,6 +559,9 @@ func TestAdvertisePhase_LoadBalancerIP(t *testing.T) {
 	phase := NewAdvertisePhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
+	// Admission defaults Type to LoadBalancer; the fake client does no
+	// defaulting, and neo-8yf short-circuits non-LoadBalancer types.
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeLoadBalancer
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -586,6 +595,9 @@ func TestAdvertisePhase_LoadBalancerHostname(t *testing.T) {
 	phase := NewAdvertisePhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
+	// Admission defaults Type to LoadBalancer; the fake client does no
+	// defaulting, and neo-8yf short-circuits non-LoadBalancer types.
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeLoadBalancer
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -602,6 +614,9 @@ func TestAdvertisePhase_ServiceNotFound(t *testing.T) {
 	phase := NewAdvertisePhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
+	// Admission defaults Type to LoadBalancer; the fake client does no
+	// defaulting, and neo-8yf short-circuits non-LoadBalancer types.
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeLoadBalancer
 
 	result := phase.Execute(context.Background(), cluster)
 

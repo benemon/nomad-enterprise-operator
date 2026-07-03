@@ -2287,7 +2287,8 @@ spec:
 				Expect(time.Now().Before(deadline)).To(BeTrue(), "upgrade roll did not complete within 15m")
 
 				cmd := exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
-					"-o", "jsonpath={.status.readyReplicas} {.status.updatedReplicas} {.status.currentRevision} {.status.updateRevision}")
+					"-o", "jsonpath={.status.readyReplicas} {.status.updatedReplicas} "+
+						"{.status.currentRevision} {.status.updateRevision}")
 				output, err := utils.Run(cmd)
 				Expect(err).NotTo(HaveOccurred())
 				var ready, updated int
@@ -2318,7 +2319,8 @@ spec:
 			By("verifying the upgraded cluster converged: version, quorum, leader")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", upgradeClusterName, "-n", namespace,
-					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status} {.status.autopilot.healthy} {.status.autopilot.voters} {.status.nomadVersion}`)
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status} `+
+						`{.status.autopilot.healthy} {.status.autopilot.voters} {.status.nomadVersion}`)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				parts := strings.Fields(output)

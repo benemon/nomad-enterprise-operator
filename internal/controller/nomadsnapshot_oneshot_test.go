@@ -634,7 +634,7 @@ func TestNextScheduledProjection(t *testing.T) {
 		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
 			t.Fatalf("reconcileRecurring() error = %v", err)
 		}
-		if !snap.Status.NextScheduled.Time.After(time.Now()) {
+		if !snap.Status.NextScheduled.After(time.Now()) {
 			t.Errorf("lapsed nextScheduled not re-projected: %v", snap.Status.NextScheduled.Time)
 		}
 	})

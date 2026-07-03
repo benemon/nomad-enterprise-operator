@@ -115,7 +115,6 @@ var _ = Describe("ADR 0003 dropped fields are pruned from the schema", func() {
 	}
 
 	for i, df := range dropped {
-		df := df
 		It(fmt.Sprintf("prunes %s", df.name), func() {
 			stored, err := create(fmt.Sprintf("dropped-%d", i), df.spec)
 			Expect(err).NotTo(HaveOccurred())

@@ -64,7 +64,9 @@ jobs:
         # cluster) and tell go test to atomic-mode the counts so parallel
         # tests don't race the cover file.
         run: |
-          KUBEBUILDER_ASSETS="$(bin/setup-envtest use ${{ steps.envtest.outputs.k8s_version }} --bin-dir bin -p path)" \
+          # --bin-dir must be absolute: -p path echoes it back verbatim, and a
+          # relative KUBEBUILDER_ASSETS breaks envtest exec from package dirs.
+          KUBEBUILDER_ASSETS="$(bin/setup-envtest use ${{ steps.envtest.outputs.k8s_version }} --bin-dir "$(pwd)/bin" -p path)" \
             go test $(go list ./... | grep -v /e2e) \
               -covermode=atomic \
               -coverprofile=cover.out \

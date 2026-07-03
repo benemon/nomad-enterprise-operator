@@ -659,7 +659,6 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Secrets so findClustersReferencingSecret is an indexed lookup, not
 	// a namespace-wide list+filter on every Secret event.
 	for key, extract := range secretRefIndexes {
-		extract := extract
 		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &nomadv1alpha1.NomadCluster{}, key,
 			func(obj client.Object) []string {
 				if name := extract(obj.(*nomadv1alpha1.NomadCluster)); name != "" {
