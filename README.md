@@ -13,7 +13,7 @@ A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise serv
 
 ## Contributing
 
-Work is tracked in [`bd`](https://github.com/gastownhall/beads) (issue prefix: `neo-`). Contribution guidelines will be published when the project opens for external contributions.
+Contribution guidelines will be published when the project opens for external contributions.
 
 ## Architectural boundaries
 
@@ -59,7 +59,7 @@ For environments with CISO-gated container-image requirements (signed images, SB
 3. Re-tag and push to your internal registry; sign per your organisation's policy (cosign, notation, etc.).
 4. Deploy from the internal-registry tag; override the operator image in the deployment manifest.
 
-The operator's runtime is compatible with any image that exposes the same entrypoint and binary contract, so this fork-and-sign workflow does not require code changes. See the design review's §4.6 and platform-engineer review's §3.8 / §3.3 for the full discussion of this deferral.
+The operator's runtime is compatible with any image that exposes the same entrypoint and binary contract, so this fork-and-sign workflow does not require code changes.
 
 ### Bootstrap token Secret lifecycle
 
@@ -209,7 +209,7 @@ make undeploy
 | `image.tag` | `string` | `2.0.3-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
 | `image.digest` | `string` | — | Optional content digest (`sha256:…`). When set, the image reference is `repository@digest` and `tag` is ignored — see [Image version pinning](#image-version-pinning) |
 | `image.pullPolicy` | `string` | `Always` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
-| `license.secretName` | `string` | | Name of secret containing the Nomad license, stored under the key `license` (operator-owned per ADR 0003). Mutually exclusive with `value` |
+| `license.secretName` | `string` | | Name of secret containing the Nomad license, stored under the key `license` (operator-owned). Mutually exclusive with `value` |
 | `license.value` | `string` | | Inline license content. The operator creates a managed secret. Mutually exclusive with `secretName` |
 | `topology.region` | `string` | `global` | Nomad region name |
 | `topology.datacenter` | `string` | | Nomad datacenter name. Defaults to the namespace |
@@ -243,13 +243,13 @@ See [TLS Configuration](#tls-configuration) for details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `server.acl.enabled` | `bool` | `true` | Enable Nomad ACLs. The operator auto-bootstraps; the token is always stored in `<name>-acl-bootstrap` (operator-owned per ADR 0003) |
+| `server.acl.enabled` | `bool` | `true` | Enable Nomad ACLs. The operator auto-bootstraps; the token is always stored in `<name>-acl-bootstrap` (operator-owned) |
 
 See [ACL Configuration](#acl-configuration) for details.
 
 ### Autopilot
 
-Autopilot is operator-owned per ADR 0003 and not configurable:
+Autopilot is operator-owned and not configurable:
 `cleanup_dead_servers = true` (required for Serf cleanup delegation),
 `last_contact_threshold = 200ms`, `max_trailing_logs = 250`,
 `server_stabilization_time = 10s` — Nomad's own defaults.
@@ -257,7 +257,7 @@ Autopilot is operator-owned per ADR 0003 and not configurable:
 ### Audit (`spec.server.audit`)
 
 Delivery guarantee (`enforced`), format (`json`), and rotation
-(`24h` × 15 files) are operator-owned per ADR 0003. Ship logs with a
+(`24h` × 15 files) are operator-owned. Ship logs with a
 sidecar if you need different retention.
 
 Audit storage is independent of data storage: when audit is enabled the
@@ -276,7 +276,7 @@ configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `gossip.secretName` | `string` | | Name of existing secret containing the gossip key under the key `gossip-key` (operator-owned per ADR 0003). Auto-generated if empty |
+| `gossip.secretName` | `string` | | Name of existing secret containing the gossip key under the key `gossip-key` (operator-owned). Auto-generated if empty |
 
 ### Services (`spec.services`)
 
@@ -309,13 +309,13 @@ Clusters without the CRDs skip monitoring resources cleanly.
 | `monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
 | `monitoring.prometheusRulesEnabled` | `bool` | `false` | Create PrometheusRule |
 
-Scrape cadence is operator-owned per ADR 0003 (30s interval, 10s
+Scrape cadence is operator-owned (30s interval, 10s
 timeout); ServiceMonitor label/relabel customisation belongs in
 Prometheus configuration.
 
 ### Pod placement
 
-Pod anti-affinity is operator-owned per ADR 0003: preferred scheduling,
+Pod anti-affinity is operator-owned: preferred scheduling,
 weight 100, `kubernetes.io/hostname` topology, applied when
 `replicas >= 3`. For multi-zone distribution use the standard
 `spec.topologySpreadConstraints` field.
@@ -350,7 +350,7 @@ the `Ready` condition, not an admission error):
 Not validated: the existence of the Secret named by
 `spec.license.secretName` is not checked at admission (a missing Secret
 surfaces at reconcile time). Anti-affinity has no user-facing knob to
-validate — it is operator-owned per ADR 0003 (see
+validate — it is operator-owned (see
 [Pod placement](#pod-placement)).
 
 ## Image version pinning
