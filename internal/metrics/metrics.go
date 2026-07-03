@@ -18,6 +18,13 @@ limitations under the License.
 // (design review §8.1) and registers them on controller-runtime's default
 // registry, which is exposed on the existing :8443/metrics endpoint.
 //
+// TEST ISOLATION (neo-9eq): the registry is process-global, shared by
+// every test in the binary. Tests asserting on these handles MUST use
+// label values unique to the test (e.g. "d4a-cluster"/"d4a-ns") — a
+// duplicated cluster/namespace pair across test files silently
+// cross-contaminates counters. Prefer delta assertions (read before,
+// act, read after) over absolute values where practical.
+//
 // The handles were scaffolded by F4 and are populated per-site: phase
 // durations by the controller's TimedExecute loop (D4a), API requests
 // by the InstrumentNomadAPI decorator (D4b), cert expiry by

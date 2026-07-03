@@ -18,10 +18,12 @@ package phases
 
 import (
 	"context"
+	"fmt"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -218,6 +220,55 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 							},
 						},
 						{
+							// neo-ru9: operator-gauge-backed cert alerts. The CA
+							// warning uses for:6h so a healthy automatic rotation
+							// (which starts exactly at the 30d mark and completes
+							// in minutes) never fires it — only a STUCK rotation
+							// or an unrenewed user-provided CA does.
+							Alert: "NomadCACertExpiringSoon",
+							Expr: intstr.FromString(fmt.Sprintf(
+								`(nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time()) / 86400 < 30 and (nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time()) > 0`,
+								cluster.Name, cluster.Namespace, cluster.Name, cluster.Namespace)),
+							For: ptr.To(monitoringv1.Duration("6h")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad cluster CA approaching expiry",
+								"description": "The CA for NomadCluster {{ $labels.cluster }} expires in {{ $value | printf \"%.0f\" }} days. Operator-generated CAs rotate automatically — a persistent alert means rotation is stuck or the CA is user-provided and needs manual renewal.",
+							},
+						},
+						{
+							Alert: "NomadCACertExpired",
+							Expr: intstr.FromString(fmt.Sprintf(
+								`nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time() <= 0`,
+								cluster.Name, cluster.Namespace)),
+							For: ptr.To(monitoringv1.Duration("5m")),
+							Labels: map[string]string{
+								"severity": "critical",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad cluster CA has expired",
+								"description": "The CA for NomadCluster {{ $labels.cluster }} has expired; TLS handshakes fail cluster-wide. The Ready condition reports reason CAExpired.",
+							},
+						},
+						{
+							// Server leaves reissue automatically inside their 30d
+							// window; reaching 7d means the reissue path is broken.
+							Alert: "NomadServerCertExpiringSoon",
+							Expr: intstr.FromString(fmt.Sprintf(
+								`(nomad_operator_cert_expiry_timestamp_seconds{cert="server",cluster=%q,namespace=%q} - time()) / 86400 < 7 and (nomad_operator_cert_expiry_timestamp_seconds{cert="server",cluster=%q,namespace=%q} - time()) > 0`,
+								cluster.Name, cluster.Namespace, cluster.Name, cluster.Namespace)),
+							For: ptr.To(monitoringv1.Duration("1h")),
+							Labels: map[string]string{
+								"severity": "critical",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad server certificate not reissuing",
+								"description": "The server certificate for NomadCluster {{ $labels.cluster }} expires in under 7 days; the operator should have reissued it at 30 days — investigate the Certificate phase.",
+							},
+						},
+						{
 							Alert: "NomadLicenseExpiringSoon",
 							Expr:  intstr.FromString(`(nomad_license_expiration_time_epoch - time()) / 86400 < 30 and (nomad_license_expiration_time_epoch - time()) > 0`),
 							For:   ptr.To(monitoringv1.Duration("1h")),
@@ -262,6 +313,17 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 			return OK()
 		}
 		return Error(err, "Failed to get PrometheusRule")
+	}
+
+	// Update on drift — without this, operators upgraded with new alert
+	// rules never deliver them to existing clusters (found during the
+	// neo-6xm.3 RBAC audit; the ru9 cert alerts were the first casualty).
+	if !equality.Semantic.DeepEqual(existing.Spec, rule.Spec) {
+		existing.Spec = rule.Spec
+		p.Log.Info("Updating PrometheusRule", "name", rule.Name)
+		if err := p.Client.Update(ctx, existing); err != nil {
+			return Error(err, "Failed to update PrometheusRule")
+		}
 	}
 
 	return OK()

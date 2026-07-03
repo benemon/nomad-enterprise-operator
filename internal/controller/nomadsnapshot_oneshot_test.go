@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,6 +37,8 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
 )
 
 // D3 (neo-kk7) unit tests, driven at the reconcileOneShot /
@@ -310,3 +313,387 @@ var _ = Describe("NomadSnapshot mode-switch admission rule (D3 / AC-2.7.3a)", fu
 		Expect(k8sClient.Update(ctx, fetched)).To(Succeed())
 	})
 })
+
+// TestEnsureSnapshotTokenWithMock covers neo-8qk: snapshotNomadClient
+// honours the injected factory (the production path routes through the
+// same function and is instrumented), so the token-mint flow is finally
+// drivable in a unit test: policy upsert + token creation, both
+// authenticated with the passed management token, and the accessor
+// persisted to status.
+func TestEnsureSnapshotTokenWithMock(t *testing.T) {
+	snap := newOneShotSnapshot("tok")
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-tls", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"ca.crt": []byte("dummy-ca")},
+	}
+	r, _ := newSnapshotReconciler(snap, cluster, tlsSecret)
+
+	mockNomad := mocks.NewMockNomadAPI(t)
+	r.NomadClientFactory = func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+		return mockNomad, nil
+	}
+
+	policyName := "snapshot-agent-snap-ns-tok"
+	mockNomad.EXPECT().
+		CreateACLPolicy("mgmt-token", policyName, "Snapshot agent policy for tok", snapshotAgentPolicyRules).
+		Return(nil).Once()
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
+		Return(&nomad.ACLTokenResult{AccessorID: "snap-acc", SecretID: "snap-secret"}, nil).Once()
+
+	token, err := r.ensureSnapshotToken(context.Background(), snap, cluster, "snap-ns", "mgmt-token")
+	if err != nil {
+		t.Fatalf("ensureSnapshotToken() error = %v", err)
+	}
+	if token != "snap-secret" {
+		t.Errorf("token = %q, want snap-secret", token)
+	}
+	if snap.Status.TokenAccessorID != "snap-acc" || snap.Status.PolicyName != policyName {
+		t.Errorf("status not persisted: %+v", snap.Status)
+	}
+}
+
+// TestManagedByLabelConsistency pins neo-e3y: the operator stamps ONE
+// managed-by identity across both controllers' resources. No migration
+// path for the old value — this is a pre-release operator with no users
+// (see bd memory no-migration-code-brand-new-operator).
+func TestManagedByLabelConsistency(t *testing.T) {
+	snap := newOneShotSnapshot("labels")
+	cluster := newTestCluster("snap-ns", "test-cluster")
+
+	clusterVal := phases.GetLabels(cluster)["app.kubernetes.io/managed-by"]
+	agentVal := snapshotAgentLabels(snap)["app.kubernetes.io/managed-by"]
+	if clusterVal != agentVal {
+		t.Fatalf("managed-by mismatch: cluster resources %q vs snapshot agent %q", clusterVal, agentVal)
+	}
+
+}
+
+// TestSnapshotTargetPodWiring covers neo-tih: each storage backend's
+// pod-spec requirements — credentials env vars / volume mounts and the
+// local PVC mount — asserted per target, including the no-credentials
+// (IAM/workload-identity) variants which must leave the pod untouched.
+func TestSnapshotTargetPodWiring(t *testing.T) {
+	credRef := &corev1.LocalObjectReference{Name: "backend-creds"}
+
+	envNames := func(spec corev1.PodSpec) map[string]bool {
+		out := map[string]bool{}
+		for _, e := range spec.Containers[0].Env {
+			out[e.Name] = true
+		}
+		return out
+	}
+	mountPaths := func(spec corev1.PodSpec) map[string]bool {
+		out := map[string]bool{}
+		for _, m := range spec.Containers[0].VolumeMounts {
+			out[m.MountPath] = true
+		}
+		return out
+	}
+
+	cases := []struct {
+		name       string
+		target     nomadv1alpha1.SnapshotTarget
+		wantEnv    []string
+		wantNoEnv  []string
+		wantMounts []string
+	}{
+		{
+			name: "S3 with credentials gets AWS env pair",
+			target: nomadv1alpha1.SnapshotTarget{S3: &nomadv1alpha1.SnapshotS3Config{
+				Bucket: "b", Region: "eu-west-1", CredentialsSecretRef: credRef,
+			}},
+			wantEnv: []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"},
+		},
+		{
+			name: "S3 without credentials (IRSA) adds no AWS env",
+			target: nomadv1alpha1.SnapshotTarget{S3: &nomadv1alpha1.SnapshotS3Config{
+				Bucket: "b", Region: "eu-west-1",
+			}},
+			wantNoEnv: []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"},
+		},
+		{
+			name: "GCS with credentials mounts key file and sets GOOGLE_APPLICATION_CREDENTIALS",
+			target: nomadv1alpha1.SnapshotTarget{GCS: &nomadv1alpha1.SnapshotGCSConfig{
+				Bucket: "b", CredentialsSecretRef: credRef,
+			}},
+			wantEnv:    []string{"GOOGLE_APPLICATION_CREDENTIALS"},
+			wantMounts: []string{"/gcp"},
+		},
+		{
+			name: "GCS without credentials (workload identity) adds nothing",
+			target: nomadv1alpha1.SnapshotTarget{GCS: &nomadv1alpha1.SnapshotGCSConfig{
+				Bucket: "b",
+			}},
+			wantNoEnv: []string{"GOOGLE_APPLICATION_CREDENTIALS"},
+		},
+		{
+			name: "Azure with credentials gets account key env",
+			target: nomadv1alpha1.SnapshotTarget{Azure: &nomadv1alpha1.SnapshotAzureConfig{
+				Container: "c", AccountName: "acct", CredentialsSecretRef: credRef,
+			}},
+			wantEnv: []string{"AZURE_BLOB_ACCOUNT_KEY"},
+		},
+		{
+			name: "local target mounts the snapshot PVC at the configured path",
+			target: nomadv1alpha1.SnapshotTarget{Local: &nomadv1alpha1.SnapshotLocalConfig{
+				Path: "/backups", Size: "1Gi",
+			}},
+			wantMounts: []string{"/backups"},
+		},
+		{
+			name: "local target defaults the mount path",
+			target: nomadv1alpha1.SnapshotTarget{Local: &nomadv1alpha1.SnapshotLocalConfig{
+				Size: "1Gi",
+			}},
+			wantMounts: []string{"/snapshots"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := newOneShotSnapshot("wiring")
+			snap.Spec.Target = tc.target
+			cluster := newTestCluster("snap-ns", "test-cluster")
+			r, _ := newSnapshotReconciler(snap, cluster)
+
+			template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c")
+
+			env := envNames(template.Spec)
+			for _, want := range tc.wantEnv {
+				if !env[want] {
+					t.Errorf("env %s missing; have %v", want, env)
+				}
+			}
+			for _, absent := range tc.wantNoEnv {
+				if env[absent] {
+					t.Errorf("env %s present but no credentials were configured", absent)
+				}
+			}
+			mounts := mountPaths(template.Spec)
+			for _, want := range tc.wantMounts {
+				if !mounts[want] {
+					t.Errorf("mount %s missing; have %v", want, mounts)
+				}
+			}
+		})
+	}
+}
+
+// TestSnapshotPVCReconcile covers neo-tih: local-target PVC sizing,
+// storageClassName passthrough, and the immutability guard (spec is set
+// only on create — a subsequent reconcile with a different size must
+// not attempt to mutate the immutable PVC spec).
+func TestSnapshotPVCReconcile(t *testing.T) {
+	sc := "fast-ssd"
+	snap := newOneShotSnapshot("pvc")
+	snap.Spec.Target = nomadv1alpha1.SnapshotTarget{Local: &nomadv1alpha1.SnapshotLocalConfig{
+		Size: "2Gi", StorageClassName: &sc,
+	}}
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	r, _ := newSnapshotReconciler(snap, cluster)
+
+	if err := r.reconcilePVC(context.Background(), snap); err != nil {
+		t.Fatalf("reconcilePVC() error = %v", err)
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	key := types.NamespacedName{Name: "pvc-snapshots", Namespace: "snap-ns"}
+	if err := r.Get(context.Background(), key, pvc); err != nil {
+		t.Fatalf("PVC not created: %v", err)
+	}
+	if got := pvc.Spec.Resources.Requests.Storage().String(); got != "2Gi" {
+		t.Errorf("PVC size = %s, want 2Gi", got)
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "fast-ssd" {
+		t.Errorf("storageClassName = %v, want fast-ssd", pvc.Spec.StorageClassName)
+	}
+
+	// Size change on the CR must not rewrite the immutable PVC spec.
+	snap.Spec.Target.Local.Size = "10Gi"
+	if err := r.reconcilePVC(context.Background(), snap); err != nil {
+		t.Fatalf("reconcilePVC() second pass error = %v", err)
+	}
+	if err := r.Get(context.Background(), key, pvc); err != nil {
+		t.Fatal(err)
+	}
+	if got := pvc.Spec.Resources.Requests.Storage().String(); got != "2Gi" {
+		t.Errorf("PVC size mutated to %s — immutability guard broken", got)
+	}
+
+	// Invalid size surfaces as an error, not a panic.
+	snap2 := newOneShotSnapshot("pvc-bad")
+	snap2.Spec.Target = nomadv1alpha1.SnapshotTarget{Local: &nomadv1alpha1.SnapshotLocalConfig{Size: "not-a-size"}}
+	if err := r.reconcilePVC(context.Background(), snap2); err == nil {
+		t.Error("reconcilePVC() accepted an unparseable size")
+	}
+}
+
+// neo-tih: cross-namespace clusterRef — a NomadSnapshot in one
+// namespace referencing a NomadCluster in another must resolve the
+// cluster AND perform its secret lookups (management token) in the
+// CLUSTER's namespace, not the snapshot's.
+var _ = Describe("NomadSnapshot cross-namespace clusterRef (neo-tih)", func() {
+	ctx := context.Background()
+
+	It("resolves the cluster and its secrets in the referenced namespace", func() {
+		createTestNamespace(ctx, "xns-snap")
+		createTestNamespace(ctx, "xns-cluster")
+
+		cluster := newTestCluster("xns-cluster", "target")
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		fetched := &nomadv1alpha1.NomadCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "target", Namespace: "xns-cluster"}, fetched)).To(Succeed())
+		fetched.Status.ACLBootstrapped = true
+		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+
+		snap := newOneShotSnapshot("xns")
+		snap.Namespace = "xns-snap"
+		snap.Spec.ClusterRef = nomadv1alpha1.ClusterReference{Name: "target", Namespace: "xns-cluster"}
+		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
+
+		// Two reconciles: finalizer add, then the real pass. With no
+		// management Secret in xns-cluster the reconcile must park at
+		// WaitingForManagementToken — proving the cluster (and the
+		// namespace its secrets live in) resolved across namespaces;
+		// ClusterNotFound or WaitingForACLBootstrap would mean the
+		// lookup used the wrong namespace.
+		for i := 0; i < 2; i++ {
+			_, err := reconcileSnapshot(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		got := &nomadv1alpha1.NomadSnapshot{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"}, got)).To(Succeed())
+		var reason string
+		for _, c := range got.Status.Conditions {
+			if c.Type == "Ready" {
+				reason = c.Reason
+			}
+		}
+		Expect(reason).To(Equal("WaitingForManagementToken"))
+
+		// And with the management Secret created IN THE CLUSTER'S
+		// namespace, the wait clears (next stop: Nomad token mint).
+		createBootstrapSecret(ctx, "xns-cluster", "target-operator-management")
+		_, _ = reconcileSnapshot(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"})
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"}, got)).To(Succeed())
+		for _, c := range got.Status.Conditions {
+			if c.Type == "Ready" {
+				Expect(c.Reason).NotTo(Equal("WaitingForManagementToken"))
+			}
+		}
+	})
+})
+
+// TestNextScheduledProjection covers neo-c2f / AC-2.7.9: recurring mode
+// projects status.nextScheduled forward one interval when unset or
+// lapsed, does NOT advance it while still in the future (the
+// once-per-interval churn bound), leaves it unset on an unparseable
+// interval, and one-shot mode clears it.
+func TestNextScheduledProjection(t *testing.T) {
+	newRecurring := func(name, interval string) (*NomadSnapshotReconciler, *nomadv1alpha1.NomadSnapshot, *nomadv1alpha1.NomadCluster) {
+		snap := newOneShotSnapshot(name)
+		snap.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: interval, Retain: 24}
+		cluster := newTestCluster("snap-ns", "test-cluster")
+		// A ready Deployment so the projection branch (agent Ready) runs.
+		deploy := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name + "-snapshot-agent", Namespace: "snap-ns"},
+			Status:     appsv1.DeploymentStatus{ReadyReplicas: 1},
+		}
+		r, _ := newSnapshotReconciler(snap, cluster, deploy)
+		return r, snap, cluster
+	}
+
+	t.Run("set on first ready reconcile, not advanced while in the future", func(t *testing.T) {
+		r, snap, cluster := newRecurring("proj", "1h")
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			t.Fatalf("reconcileRecurring() error = %v", err)
+		}
+		if snap.Status.NextScheduled == nil {
+			t.Fatal("nextScheduled not set on first ready reconcile")
+		}
+		first := snap.Status.NextScheduled.Time
+		if until := time.Until(first); until < 55*time.Minute || until > 65*time.Minute {
+			t.Errorf("nextScheduled projected %v out, want ~1h", until)
+		}
+
+		// Second reconcile within the interval: unchanged (churn bound).
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			t.Fatalf("second reconcileRecurring() error = %v", err)
+		}
+		if !snap.Status.NextScheduled.Time.Equal(first) {
+			t.Errorf("nextScheduled advanced within the interval: %v -> %v", first, snap.Status.NextScheduled.Time)
+		}
+	})
+
+	t.Run("re-projected after the deadline lapses", func(t *testing.T) {
+		r, snap, cluster := newRecurring("lapsed", "1h")
+		past := metav1.NewTime(time.Now().Add(-time.Minute))
+		snap.Status.NextScheduled = &past
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			t.Fatalf("reconcileRecurring() error = %v", err)
+		}
+		if !snap.Status.NextScheduled.Time.After(time.Now()) {
+			t.Errorf("lapsed nextScheduled not re-projected: %v", snap.Status.NextScheduled.Time)
+		}
+	})
+
+	t.Run("unparseable interval leaves it unset without error", func(t *testing.T) {
+		// Admission now rejects bad intervals (neo-f7j), but the
+		// controller must stay robust to pre-validation objects.
+		r, snap, cluster := newRecurring("badint", "not-a-duration")
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			t.Fatalf("reconcileRecurring() error = %v", err)
+		}
+		if snap.Status.NextScheduled != nil {
+			t.Errorf("nextScheduled set despite unparseable interval: %v", snap.Status.NextScheduled)
+		}
+	})
+
+	t.Run("switching to one-shot clears it", func(t *testing.T) {
+		snap := newOneShotSnapshot("clear") // no schedule = one-shot
+		future := metav1.NewTime(time.Now().Add(time.Hour))
+		snap.Status.NextScheduled = &future
+		cluster := newTestCluster("snap-ns", "test-cluster")
+		r, _ := newSnapshotReconciler(snap, cluster)
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			t.Fatalf("reconcileOneShot() error = %v", err)
+		}
+		if snap.Status.NextScheduled != nil {
+			t.Errorf("nextScheduled not cleared on mode switch: %v", snap.Status.NextScheduled)
+		}
+	})
+}
+
+// TestSnapshotAgentSecurityContext covers neo-8xu for the snapshot
+// agent: the same PSS-restricted profile as the server pods, with the
+// /tmp staging mount required by the read-only root filesystem.
+func TestSnapshotAgentSecurityContext(t *testing.T) {
+	snap := newOneShotSnapshot("sec")
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	r, _ := newSnapshotReconciler(snap, cluster)
+
+	template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c")
+
+	sc := template.Spec.SecurityContext
+	if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot ||
+		sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("agent pod security context not PSS-restricted: %+v", sc)
+	}
+	c := template.Spec.Containers[0].SecurityContext
+	if c == nil || c.AllowPrivilegeEscalation == nil || *c.AllowPrivilegeEscalation ||
+		c.ReadOnlyRootFilesystem == nil || !*c.ReadOnlyRootFilesystem ||
+		c.Capabilities == nil || len(c.Capabilities.Drop) != 1 || c.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("agent container security context not PSS-restricted: %+v", c)
+	}
+	var tmpMounted bool
+	for _, m := range template.Spec.Containers[0].VolumeMounts {
+		if m.MountPath == "/tmp" {
+			tmpMounted = true
+		}
+	}
+	if !tmpMounted {
+		t.Error("agent read-only root requires the /tmp staging mount")
+	}
+}

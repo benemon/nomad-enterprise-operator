@@ -100,7 +100,7 @@ func TestPDBShape(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cluster := newTestCluster("test-cluster", "test-ns")
+			cluster := newTestCluster("test-ns", "test-cluster")
 			cluster.Spec.Replicas = c.replicas
 
 			var seeds []*policyv1.PodDisruptionBudget
@@ -161,7 +161,7 @@ func TestPDBShape(t *testing.T) {
 // expected shape. With the fake client we simulate the out-of-band
 // delete by running Execute twice with a Delete between them.
 func TestPDB_RecreatedOnDeletion(t *testing.T) {
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Replicas = 3
 
 	c := fake.NewClientBuilder().
@@ -206,7 +206,7 @@ func TestPDB_RecreatedOnDeletion(t *testing.T) {
 // TestPDB_UpdatedOnScale covers AC-2.3.3 — scale from N=3 to N=5
 // updates the PDB's maxUnavailable from 1 to 2 within one reconcile.
 func TestPDB_UpdatedOnScale(t *testing.T) {
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Replicas = 3
 
 	c := fake.NewClientBuilder().

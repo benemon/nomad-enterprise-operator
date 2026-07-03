@@ -50,7 +50,7 @@ func newMapperPhaseContext(mapper meta.RESTMapper) *PhaseContext {
 }
 
 func TestMonitoringDiscoveryGated(t *testing.T) {
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Monitoring.Enabled = true
 	// openshift.enabled deliberately false: monitoring must work without it.
 
@@ -91,7 +91,7 @@ func TestMonitoringDiscoveryGated(t *testing.T) {
 		mapper := meta.NewDefaultRESTMapper(nil)
 		mapper.Add(serviceMonitorGVK, meta.RESTScopeNamespace)
 
-		disabled := newTestCluster("test-cluster", "test-ns")
+		disabled := newTestCluster("test-ns", "test-cluster")
 		disabled.Spec.Monitoring.Enabled = false
 
 		p := NewMonitoringPhase(newMapperPhaseContext(mapper))
@@ -107,7 +107,7 @@ func TestMonitoringDiscoveryGated(t *testing.T) {
 }
 
 func TestRouteDiscoveryGated(t *testing.T) {
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.OpenShift.Enabled = true
 	cluster.Spec.OpenShift.Route.Enabled = true
 

@@ -58,7 +58,7 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 	// Inline license - create/update managed secret
 	if cluster.Spec.License.Value != "" {
 		return p.ensureManagedSecret(ctx, cluster, managedSecretConfig{
-			name:   cluster.Name + "-license",
+			name:   getLicenseSecretName(cluster),
 			labels: GetLabels(cluster),
 			data: map[string]string{
 				licenseSecretKey: cluster.Spec.License.Value,
@@ -82,14 +82,20 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 	}, secret)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return Error(fmt.Errorf("license secret %q not found", cluster.Spec.License.SecretName),
-				"License secret not found - create it with your Nomad Enterprise license")
+			// neo-0zq: dedicated reason (replacing the abandoned C6f
+			// admission rule) so kubectl names the missing Secret
+			// instead of a generic PhaseFailed. The D5 Secret watch
+			// re-reconciles the moment it appears.
+			return ErrorWithReason(fmt.Errorf("license secret %q not found", cluster.Spec.License.SecretName),
+				"LicenseSecretNotFound",
+				fmt.Sprintf("License secret %q not found - create it with your Nomad Enterprise license", cluster.Spec.License.SecretName))
 		}
 		return Error(err, "Failed to get license secret")
 	}
 
 	if _, ok := secret.Data[secretKey]; !ok {
-		return Error(fmt.Errorf("key %q not found in license secret", secretKey),
+		return ErrorWithReason(fmt.Errorf("key %q not found in license secret", secretKey),
+			"LicenseSecretInvalid",
 			"License secret missing required key")
 	}
 

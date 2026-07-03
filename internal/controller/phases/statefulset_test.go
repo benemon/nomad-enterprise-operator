@@ -18,14 +18,13 @@ package phases
 
 import (
 	"context"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"strings"
 	"testing"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -52,10 +51,10 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	}
 	phase := &StatefulSetPhase{PhaseContext: phaseCtx}
 
-	threeRep := newTestCluster("nomad", "ns")
+	threeRep := newTestCluster("ns", "nomad")
 	threeRep.Spec.Replicas = 3
 
-	oneRep := newTestCluster("nomad", "ns")
+	oneRep := newTestCluster("ns", "nomad")
 	oneRep.Spec.Replicas = 1
 
 	stsThree := phase.buildStatefulSet(context.Background(), threeRep)
@@ -98,7 +97,7 @@ func TestAuditPVCIndependent(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cluster := newTestCluster("nomad", "ns")
+			cluster := newTestCluster("ns", "nomad")
 			if tc.persistence {
 				cluster.Spec.Persistence.Size = "10Gi"
 			}
@@ -125,106 +124,149 @@ func TestAuditPVCIndependent(t *testing.T) {
 	}
 }
 
-// TestMaybeMarkAuditPVCMigrated covers AC-4.5.4 (B6 / neo-av7): the
-// AuditPVCCreated Event fires exactly once — on first observation of
-// a Bound audit PVC — and the status.auditPVCMigrated marker
-// suppresses re-emission thereafter (including across operator
-// restarts, which is why the debounce is a status field and not
-// operator memory).
-func TestMaybeMarkAuditPVCMigrated(t *testing.T) {
-	boundPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "audit-nomad-0", Namespace: "ns"},
-		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
-	}
-	pendingPVC := boundPVC.DeepCopy()
-	pendingPVC.Status.Phase = corev1.ClaimPending
+// TestStatefulSetScaleUp covers neo-i4a: increasing spec.replicas must
+// flow straight through to the StatefulSet — the D2b guard only
+// preserves the existing count while it EXCEEDS the desired count
+// (scale-down territory); an up-scale is a plain update.
+func TestStatefulSetScaleUp(t *testing.T) {
+	cluster := newTestCluster("ns", "nomad")
+	cluster.Spec.Replicas = 1
 
-	newPhase := func(objs ...client.Object) (*StatefulSetPhase, *record.FakeRecorder) {
-		recorder := record.NewFakeRecorder(5)
-		return &StatefulSetPhase{PhaseContext: &PhaseContext{
-			Client:   fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(objs...).Build(),
-			Log:      zap.New(zap.UseDevMode(true)),
-			Recorder: recorder,
-		}}, recorder
+	phaseCtx := &PhaseContext{
+		Client:           fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme:           scheme.Scheme,
+		Log:              zap.New(zap.UseDevMode(true)),
+		AdvertiseAddress: "10.0.0.5",
+		GossipKey:        "fixed-gossip-key-for-test==",
+	}
+	phase := &StatefulSetPhase{PhaseContext: phaseCtx}
+
+	// Create at 1 replica.
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("Execute() create error = %v", result.Error)
 	}
 
-	drainEvents := func(recorder *record.FakeRecorder) []string {
-		var events []string
-		for {
-			select {
-			case e := <-recorder.Events:
-				events = append(events, e)
-			default:
-				return events
+	// Scale up to 3.
+	cluster.Spec.Replicas = 3
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("Execute() scale-up error = %v", result.Error)
+	}
+
+	sts := &appsv1.StatefulSet{}
+	if err := phaseCtx.Client.Get(context.Background(),
+		types.NamespacedName{Name: "nomad", Namespace: "ns"}, sts); err != nil {
+		t.Fatalf("StatefulSet missing: %v", err)
+	}
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 3 {
+		t.Errorf("sts replicas = %v after scale-up, want 3", sts.Spec.Replicas)
+	}
+}
+
+// TestPodSecurityContexts covers neo-8xu: both workload pod specs meet
+// PSS "restricted" — runAsNonRoot + RuntimeDefault seccomp at pod
+// level, no privilege escalation + ALL capabilities dropped +
+// read-only root at container level. Identity fields (runAsUser,
+// fsGroup) are set explicitly on vanilla Kubernetes and deliberately
+// LEFT UNSET on OpenShift, where the SCC injects them from the
+// namespace's allocated range.
+func TestPodSecurityContexts(t *testing.T) {
+	build := func(openshift bool) *appsv1.StatefulSet {
+		cluster := newTestCluster("ns", "sec")
+		cluster.Spec.OpenShift.Enabled = openshift
+		phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+			Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+			Scheme: scheme.Scheme,
+			Log:    zap.New(zap.UseDevMode(true)),
+		}}
+		return phase.buildStatefulSet(context.Background(), cluster)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		openshift   bool
+		wantUserSet bool
+	}{
+		{"vanilla sets explicit non-root identity", false, true},
+		{"openshift leaves identity to the SCC", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sts := build(tc.openshift)
+			pod := sts.Spec.Template.Spec
+
+			sc := pod.SecurityContext
+			if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+				t.Fatal("pod runAsNonRoot must be true")
 			}
-		}
+			if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+				t.Fatal("pod seccompProfile must be RuntimeDefault")
+			}
+			if got := sc.RunAsUser != nil; got != tc.wantUserSet {
+				t.Errorf("runAsUser set = %v, want %v", got, tc.wantUserSet)
+			}
+			if got := sc.FSGroup != nil; got != tc.wantUserSet {
+				t.Errorf("fsGroup set = %v, want %v", got, tc.wantUserSet)
+			}
+
+			c := pod.Containers[0].SecurityContext
+			if c == nil || c.AllowPrivilegeEscalation == nil || *c.AllowPrivilegeEscalation {
+				t.Fatal("container allowPrivilegeEscalation must be false")
+			}
+			if c.ReadOnlyRootFilesystem == nil || !*c.ReadOnlyRootFilesystem {
+				t.Fatal("container readOnlyRootFilesystem must be true")
+			}
+			if c.Capabilities == nil || len(c.Capabilities.Drop) != 1 || c.Capabilities.Drop[0] != "ALL" {
+				t.Fatal("container must drop ALL capabilities")
+			}
+
+			// Read-only root needs the /tmp scratch mount.
+			var tmpMounted bool
+			for _, m := range pod.Containers[0].VolumeMounts {
+				if m.MountPath == "/tmp" {
+					tmpMounted = true
+				}
+			}
+			if !tmpMounted {
+				t.Error("read-only root filesystem requires a /tmp scratch mount")
+			}
+		})
+	}
+}
+
+// TestImageRef covers neo-4xj: digest pinning takes precedence over the
+// tag; without a digest the tag reference is unchanged. Both workloads
+// build their reference through this one function.
+func TestImageRef(t *testing.T) {
+	cases := []struct {
+		name   string
+		digest string
+		want   string
+	}{
+		{"tag only", "", "hashicorp/nomad:2.0.3-ent"},
+		{"digest pinned wins over tag", "sha256:" + strings.Repeat("ab", 32), "hashicorp/nomad@sha256:" + strings.Repeat("ab", 32)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := newTestCluster("ns", "img")
+			cluster.Spec.Image.Repository = "hashicorp/nomad"
+			cluster.Spec.Image.Tag = "2.0.3-ent"
+			cluster.Spec.Image.Digest = tc.digest
+			if got := ImageRef(cluster); got != tc.want {
+				t.Errorf("ImageRef() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 
-	t.Run("bound PVC emits event once and sets marker", func(t *testing.T) {
-		phase, recorder := newPhase(boundPVC.DeepCopy())
-		cluster := newTestCluster("nomad", "ns")
-		cluster.Spec.Server.Audit.Enabled = true
-
-		phase.maybeMarkAuditPVCMigrated(context.Background(), cluster)
-
-		if !cluster.Status.AuditPVCMigrated {
-			t.Fatal("status.auditPVCMigrated not set after bound PVC observed")
-		}
-		events := drainEvents(recorder)
-		if len(events) != 1 || !strings.Contains(events[0], "AuditPVCCreated") {
-			t.Fatalf("events = %v, want exactly one AuditPVCCreated", events)
-		}
-
-		// Second reconcile (simulating operator restart: marker persisted
-		// on status) — no re-emission.
-		phase.maybeMarkAuditPVCMigrated(context.Background(), cluster)
-		if events := drainEvents(recorder); len(events) != 0 {
-			t.Fatalf("marker did not suppress re-emission, got %v", events)
-		}
-	})
-
-	t.Run("pending PVC does not emit or mark", func(t *testing.T) {
-		phase, recorder := newPhase(pendingPVC.DeepCopy())
-		cluster := newTestCluster("nomad", "ns")
-		cluster.Spec.Server.Audit.Enabled = true
-
-		phase.maybeMarkAuditPVCMigrated(context.Background(), cluster)
-
-		if cluster.Status.AuditPVCMigrated {
-			t.Fatal("marker set while PVC still Pending")
-		}
-		if events := drainEvents(recorder); len(events) != 0 {
-			t.Fatalf("unexpected events for pending PVC: %v", events)
-		}
-	})
-
-	t.Run("missing PVC does not emit or mark", func(t *testing.T) {
-		phase, recorder := newPhase()
-		cluster := newTestCluster("nomad", "ns")
-		cluster.Spec.Server.Audit.Enabled = true
-
-		phase.maybeMarkAuditPVCMigrated(context.Background(), cluster)
-
-		if cluster.Status.AuditPVCMigrated {
-			t.Fatal("marker set with no PVC present")
-		}
-		if events := drainEvents(recorder); len(events) != 0 {
-			t.Fatalf("unexpected events for missing PVC: %v", events)
-		}
-	})
-
-	t.Run("audit disabled is a no-op", func(t *testing.T) {
-		phase, recorder := newPhase(boundPVC.DeepCopy())
-		cluster := newTestCluster("nomad", "ns")
-		cluster.Spec.Server.Audit.Enabled = false
-
-		phase.maybeMarkAuditPVCMigrated(context.Background(), cluster)
-
-		if cluster.Status.AuditPVCMigrated {
-			t.Fatal("marker set while audit disabled")
-		}
-		if events := drainEvents(recorder); len(events) != 0 {
-			t.Fatalf("unexpected events while audit disabled: %v", events)
-		}
-	})
+	// Rendered into the StatefulSet container.
+	cluster := newTestCluster("ns", "img")
+	cluster.Spec.Image.Repository = "hashicorp/nomad"
+	cluster.Spec.Image.Digest = "sha256:" + strings.Repeat("cd", 32)
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	sts := phase.buildStatefulSet(context.Background(), cluster)
+	if got := sts.Spec.Template.Spec.Containers[0].Image; got != "hashicorp/nomad@sha256:"+strings.Repeat("cd", 32) {
+		t.Errorf("StatefulSet image = %q, want digest reference", got)
+	}
 }

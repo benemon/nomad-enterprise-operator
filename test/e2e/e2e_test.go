@@ -92,9 +92,11 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
+  monitoring:
+    prometheusRulesEnabled: true
   services:
     external:
       type: LoadBalancer
@@ -106,6 +108,69 @@ spec:
       enabled: true
 `
 
+// stripLeftoverFinalizers force-clears finalizers on any remaining
+// NomadCluster/NomadSnapshot CRs in the namespace. Only for harness
+// states where no operator exists to process them (aborted-run
+// recovery and post-undeploy teardown) — never a substitute for real
+// finalizer handling.
+func stripLeftoverFinalizers(namespace string) {
+	for _, crd := range []string{"nomadclusters", "nomadsnapshots"} {
+		listCmd := exec.Command("kubectl", "get", crd+".nomad.hashicorp.com", "-n", namespace,
+			"-o", "jsonpath={.items[*].metadata.name}")
+		names, err := utils.Run(listCmd)
+		if err != nil || strings.TrimSpace(names) == "" {
+			continue // CRD absent or no leftovers
+		}
+		for _, name := range strings.Fields(names) {
+			patchCmd := exec.Command("kubectl", "patch", crd+".nomad.hashicorp.com", name, "-n", namespace,
+				"--type=merge", "-p", `{"metadata":{"finalizers":[]}}`)
+			_, _ = utils.Run(patchCmd)
+		}
+	}
+}
+
+// nearExpiryCA builds a CA inside the operator's 30-day rotation
+// window (neo-4s4), for seeding into a live cluster's <cluster>-ca
+// Secret to trigger rotation.
+func nearExpiryCA() (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "e2e Near-Expiry CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(10 * 24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+// envOr returns the environment variable's value, or fallback when it
+// is unset or empty (matrix lanes pass UPGRADE_FROM/UPGRADE_TO).
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -114,15 +179,47 @@ var _ = Describe("Manager", Ordered, func() {
 	// and deploying the controller.
 	BeforeAll(func() {
 		By("creating manager namespace")
+		// Tolerate AlreadyExists: the namespace survives aborted runs on
+		// a reused kind cluster (neo-9eq re-entrance, same rationale as
+		// the pre-clean sweep below).
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		if output, nsErr := utils.Run(cmd); nsErr != nil {
+			Expect(output).To(ContainSubstring("already exists"),
+				"Failed to create namespace: %s", output)
+			// "already exists" can mean Terminating: a previous run's
+			// teardown deletes the namespace asynchronously and a rerun
+			// racing it would hit "namespace is being terminated" at
+			// deploy time (neo-9eq). Wait it out, then recreate.
+			phaseCmd := exec.Command("kubectl", "get", "ns", namespace, "-o", "jsonpath={.status.phase}")
+			if phase, _ := utils.Run(phaseCmd); strings.Contains(phase, "Terminating") {
+				// A Terminating namespace can only be stuck on CR
+				// finalizers here — no operator runs inside a namespace
+				// being deleted, so stripping them is the only unstick.
+				stripLeftoverFinalizers(namespace)
+				waitCmd := exec.Command("kubectl", "wait", "--for=delete", "ns/"+namespace, "--timeout=5m")
+				_, waitErr := utils.Run(waitCmd)
+				Expect(waitErr).NotTo(HaveOccurred(),
+					"namespace %s stuck in Terminating — inspect finalizers manually", namespace)
+				cmd = exec.Command("kubectl", "create", "ns", namespace)
+				_, recreateErr := utils.Run(cmd)
+				Expect(recreateErr).NotTo(HaveOccurred(), "Failed to recreate namespace after termination")
+			}
+		}
 
-		By("labeling the namespace to enforce the baseline security policy")
+		By("labeling the namespace to enforce the restricted security policy (neo-8xu)")
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-			"pod-security.kubernetes.io/enforce=baseline")
-		_, err = utils.Run(cmd)
+			"pod-security.kubernetes.io/enforce=restricted")
+		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
+
+		By("installing Prometheus Operator CRDs (vendored, neo-ru9)")
+		// MonitoringPhase discovery-gates on these; without them the
+		// PrometheusRule path is silently skipped and never e2e-tested.
+		cmd = exec.Command("kubectl", "apply",
+			"-f", "test/e2e/testdata/monitoring.coreos.com_servicemonitors.yaml",
+			"-f", "test/e2e/testdata/monitoring.coreos.com_prometheusrules.yaml")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to install Prometheus Operator CRDs")
 
 		By("installing CRDs")
 		cmd = exec.Command("make", "install")
@@ -133,6 +230,19 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		By("pre-cleaning leftovers from any aborted previous run (neo-9eq)")
+		// The kind cluster survives failed runs for debugging; without
+		// this sweep, a rerun trips over AlreadyExists (license secret)
+		// or half-reconciled CRs. All deletes tolerate absence.
+		for _, args := range [][]string{
+			{"delete", "nomadsnapshot", "--all", "-n", namespace, "--ignore-not-found", "--timeout=2m"},
+			{"delete", "nomadcluster", "--all", "-n", namespace, "--ignore-not-found", "--timeout=5m"},
+			{"delete", "secret", "nomad-license", "dead-s3-creds", "-n", namespace, "--ignore-not-found"},
+		} {
+			cmd = exec.Command("kubectl", args...)
+			_, _ = utils.Run(cmd) // best-effort: the namespace may not even exist yet
+		}
 
 		By("creating the license secret from test license file")
 		projectDir, err := utils.GetProjectDir()
@@ -160,6 +270,17 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
+		By("draining CRs while the operator can still process finalizers (neo-9eq)")
+		// Order matters: once the operator is undeployed, nothing clears
+		// CR finalizers — deleting the namespace afterwards deadlocks it
+		// in Terminating and hangs the whole binary to its -timeout.
+		for _, crd := range []string{"nomadsnapshot", "nomadcluster"} {
+			cmd = exec.Command("kubectl", "delete", crd, "--all", "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+		}
+		stripLeftoverFinalizers(namespace)
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
@@ -169,7 +290,7 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
+		cmd = exec.Command("kubectl", "delete", "ns", namespace, "--timeout=3m")
 		_, _ = utils.Run(cmd)
 	})
 
@@ -446,7 +567,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			checks := []check{
 				{"{.spec.replicas}", "1", "replica count"},
-				{"{.spec.template.spec.containers[0].image}", "hashicorp/nomad:1.11-ent", "container image"},
+				{"{.spec.template.spec.containers[0].image}", "hashicorp/nomad:2.0.3-ent", "container image"},
 				{"{.spec.template.spec.serviceAccountName}", testClusterName, "service account"},
 				{"{.spec.serviceName}", testClusterName + "-headless", "headless service name"},
 				{"{.spec.podManagementPolicy}", "Parallel", "pod management policy"},
@@ -925,7 +1046,7 @@ var _ = Describe("Manager", Ordered, func() {
 				"-o", `jsonpath={.spec.template.spec.containers[0].image}`)
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("hashicorp/nomad:1.11-ent"), "snapshot agent should use same image as cluster")
+			Expect(output).To(Equal("hashicorp/nomad:2.0.3-ent"), "snapshot agent should use same image as cluster")
 
 			By("verifying container command runs snapshot agent")
 			cmd = exec.Command("kubectl", "get", "deployment",
@@ -1095,6 +1216,280 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 		})
 
+		// neo-bqd (a): the external-Secret watch pipeline end-to-end —
+		// editing a user-referenced Secret must reconcile the cluster,
+		// change the pod template's secrets checksum, and roll the pods.
+		It("rolls pods when a referenced external Secret changes (neo-bqd)", func() {
+			By("capturing the current secrets checksum")
+			cmd := exec.Command("kubectl", "get", "statefulset", testClusterName, "-n", namespace,
+				"-o", `jsonpath={.spec.template.metadata.annotations.checksum/secrets}`)
+			before, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(before).NotTo(BeEmpty(), "secrets checksum annotation should be present")
+
+			By("adding a canary key to the license Secret (content of the license key untouched)")
+			cmd = exec.Command("kubectl", "patch", "secret", "nomad-license", "-n", namespace,
+				"--type=merge", "-p", `{"stringData":{"rotation-canary":"1"}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the checksum to change (watch -> index -> checksum pipeline)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", testClusterName, "-n", namespace,
+					"-o", `jsonpath={.spec.template.metadata.annotations.checksum/secrets}`)
+				after, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(after).NotTo(Equal(before), "secrets checksum should change after the Secret edit")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the rolled pod to become Ready again")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		// neo-bqd (b): AC-2.7.6a — patching a recurring snapshot's target
+		// updates the agent config checksum and rolls the Deployment.
+		It("rolls the snapshot agent Deployment when spec.target changes (neo-bqd / AC-2.7.6a)", func() {
+			By("creating a recurring NomadSnapshot")
+			rollCR := `apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: test-snapshot-roll
+  namespace: nomad-enterprise-operator-system
+spec:
+  clusterRef:
+    name: test-cluster
+  schedule:
+    interval: "1h"
+    retain: 3
+  target:
+    local:
+      size: 1Gi
+`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(rollCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the agent Deployment and capturing its config checksum")
+			var before string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-snapshot-roll-snapshot-agent", "-n", namespace,
+					"-o", `jsonpath={.spec.template.metadata.annotations.checksum/config}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+				before = output
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("patching spec.target.local.path")
+			cmd = exec.Command("kubectl", "patch", "nomadsnapshot", "test-snapshot-roll", "-n", namespace,
+				"--type=merge", "-p", `{"spec":{"target":{"local":{"path":"/altpath"}}}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the Deployment template checksum to change")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "test-snapshot-roll-snapshot-agent", "-n", namespace,
+					"-o", `jsonpath={.spec.template.metadata.annotations.checksum/config}`)
+				after, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(after).NotTo(Equal(before), "config checksum should change after a target edit")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "nomadsnapshot", "test-snapshot-roll", "-n", namespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		// neo-ru9: the operator-shipped PrometheusRule exists on a live
+		// cluster and carries the cert-lifecycle alerts.
+		It("ships cert-lifecycle alerts in the PrometheusRule (neo-ru9)", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "prometheusrule", testClusterName, "-n", namespace,
+					"-o", "jsonpath={.spec.groups[*].rules[*].alert}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				for _, alert := range []string{"NomadCACertExpiringSoon", "NomadCACertExpired",
+					"NomadServerCertExpiringSoon", "NomadLicenseExpiringSoon"} {
+					g.Expect(output).To(ContainSubstring(alert))
+				}
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		// neo-4s4: automatic CA rotation end-to-end — seed a CA inside
+		// the 30-day window and watch the operator introduce, cut over,
+		// and reissue with the cluster Ready throughout.
+		It("rotates a near-expiry CA with dual-trust overlap (neo-4s4)", func() {
+			By("seeding a near-expiry CA into the cluster's CA secret")
+			certPEM, keyPEM, err := nearExpiryCA()
+			Expect(err).NotTo(HaveOccurred())
+			seedYAML := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s-ca
+  namespace: %s
+type: Opaque
+data:
+  tls.crt: %s
+  tls.key: %s
+`, testClusterName, namespace,
+				base64.StdEncoding.EncodeToString(certPEM),
+				base64.StdEncoding.EncodeToString(keyPEM))
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(seedYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for rotation to complete (next CA promoted, old retained as previous)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", testClusterName+"-ca", "-n", namespace,
+					"-o", "jsonpath={.data.tls-previous\\.crt}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "tls-previous.crt should hold the retired CA after cutover")
+
+				cmd = exec.Command("kubectl", "get", "secret", testClusterName+"-ca", "-n", namespace,
+					"-o", "jsonpath={.data.tls-next\\.crt}")
+				output, err = utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(BeEmpty(), "tls-next.crt should be gone once promoted")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the promoted CA is long-lived and status reflects it")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.certificateAuthority.expiryTime}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				expiry, perr := time.Parse(time.RFC3339, output)
+				g.Expect(perr).NotTo(HaveOccurred())
+				g.Expect(expiry.After(time.Now().Add(365*24*time.Hour))).To(BeTrue(),
+					"promoted CA should be a fresh 2-year CA, got expiry %s", output)
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying both rotation Events were emitted")
+			for _, reason := range []string{"CARotationStarted", "CARotationCompleted"} {
+				cmd := exec.Command("kubectl", "get", "events", "-n", namespace,
+					"--field-selector", "reason="+reason, "-o", "jsonpath={.items[*].reason}")
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(output).To(ContainSubstring(reason))
+			}
+
+			By("verifying the cluster returned to Ready on the rotated trust")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		// neo-bqd (c): the CRD contract enforced by the real kind
+		// apiserver — invalid CRs are rejected at admission.
+		It("rejects invalid CRs at admission (neo-bqd)", func() {
+			By("rejecting replicas outside the 1/3/5 enum")
+			badCluster := `apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: bad-replicas
+  namespace: nomad-enterprise-operator-system
+spec:
+  replicas: 2
+  license:
+    secretName: nomad-license
+`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(badCluster)
+			output, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "replicas=2 must be rejected, got: %s", output)
+
+			By("rejecting a NomadSnapshot with no storage target")
+			badSnapshot := `apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: bad-target
+  namespace: nomad-enterprise-operator-system
+spec:
+  clusterRef:
+    name: test-cluster
+  target: {}
+`
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(badSnapshot)
+			output, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "empty target must be rejected, got: %s", output)
+		})
+
+		// neo-bqd (d): one-shot failure path on a real cluster — an
+		// unreachable S3 endpoint drives the Job to Failed with the
+		// Degraded condition and the SnapshotDegraded Warning Event.
+		It("surfaces a failed one-shot snapshot as phase=Failed with Degraded (neo-bqd)", func() {
+			By("creating fake S3 credentials and a one-shot snapshot with a dead endpoint")
+			cmd := exec.Command("kubectl", "create", "secret", "generic", "dead-s3-creds", "-n", namespace,
+				"--from-literal=AWS_ACCESS_KEY_ID=x", "--from-literal=AWS_SECRET_ACCESS_KEY=y")
+			_, _ = utils.Run(cmd) // tolerate AlreadyExists on rerun
+
+			failCR := `apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: test-snapshot-fail
+  namespace: nomad-enterprise-operator-system
+spec:
+  clusterRef:
+    name: test-cluster
+  target:
+    s3:
+      bucket: no-such-bucket
+      region: eu-west-1
+      endpoint: "http://127.0.0.1:1"
+      forcePathStyle: true
+      credentialsSecretRef:
+        name: dead-s3-creds
+`
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(failCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for phase=Failed after the Job exhausts its retries")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadsnapshot", "test-snapshot-fail", "-n", namespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Failed"))
+			}, 8*time.Minute, 15*time.Second).Should(Succeed())
+
+			By("verifying the Degraded condition is True")
+			cmd = exec.Command("kubectl", "get", "nomadsnapshot", "test-snapshot-fail", "-n", namespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Degraded")].status}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("True"))
+
+			By("verifying the SnapshotDegraded Warning Event was emitted")
+			cmd = exec.Command("kubectl", "get", "events", "-n", namespace,
+				"--field-selector", "reason=SnapshotDegraded",
+				"-o", "jsonpath={.items[*].reason}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("SnapshotDegraded"))
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "nomadsnapshot", "test-snapshot-fail", "-n", namespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("should clean up resources on CR deletion", func() {
 			By("deleting the NomadCluster CR")
 			cmd := exec.Command("kubectl", "delete", "nomadcluster", testClusterName, "-n", namespace)
@@ -1155,7 +1550,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   services:
@@ -1309,7 +1704,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   services:
@@ -1450,7 +1845,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   services:
@@ -1538,7 +1933,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   services:
@@ -1599,7 +1994,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   services:
@@ -1676,7 +2071,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   services:
@@ -1763,6 +2158,274 @@ spec:
 					"PVC %q must still exist after scale-down (reclaimPolicy governs cluster-delete only)", pvcName)
 				Expect(output).To(Equal(pvcName))
 			}
+		})
+
+		// neo-i4a: scale-UP after scale-down — proves the README claim
+		// that preserved PVCs re-attach and peers rejoin the quorum.
+		It("scales back up to 3 re-attaching the preserved PVCs (neo-i4a)", func() {
+			By("capturing the preserved PVC UIDs before scale-up")
+			pvcUIDs := map[string]string{}
+			for _, ordinal := range []string{"1", "2"} {
+				pvcName := fmt.Sprintf("data-%s-%s", scaleDownClusterName, ordinal)
+				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
+					"-o", "jsonpath={.metadata.uid}")
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(output).NotTo(BeEmpty())
+				pvcUIDs[pvcName] = output
+			}
+
+			By("patching spec.replicas back to 3")
+			cmd := exec.Command("kubectl", "patch", "nomadcluster", scaleDownClusterName, "-n", namespace,
+				"--type=merge", "-p", `{"spec":{"replicas":3}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the StatefulSet to reach 3 ready replicas")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", scaleDownClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("3"), "all three replicas should become ready on scale-up")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the rejoined peers reformed a healthy 3-voter quorum")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.autopilot.healthy} {.status.autopilot.voters}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true 3"), "autopilot should report a healthy 3-voter quorum")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying ordinals 1 and 2 re-attached the SAME PVCs (uid match)")
+			for pvcName, wantUID := range pvcUIDs {
+				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
+					"-o", "jsonpath={.metadata.uid}")
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(output).To(Equal(wantUID),
+					"PVC %q must be the same object post-scale-up — re-attach, not recreate", pvcName)
+			}
+		})
+	})
+
+	// neo-6xm.1: the upgrade path — a rolling Nomad version upgrade of
+	// a 3-replica Raft cluster, with the quorum floor asserted at every
+	// poll during the roll. CI wiring: this container plus scale-down
+	// are the slow lane (~8 min each); neo-g1o's smoke matrix may move
+	// them to a nightly lane — they are tagged by container name for
+	// ginkgo --focus/--skip selection.
+	Context("Nomad version upgrade (neo-6xm.1)", Ordered, func() {
+		const upgradeClusterName = "upgrade-test"
+		// The pair is overridable so the nightly matrix can sweep
+		// consecutive minors (UPGRADE_FROM/UPGRADE_TO). Major.minor
+		// tags are deliberate for matrix use: HashiCorp recommends
+		// upgrading from the latest patch of a minor, and those tags
+		// always serve it — the matrix self-maintains as patches ship.
+		// Defaults keep a bare local run on the consecutive-minor path.
+		fromTag := envOr("UPGRADE_FROM", "1.11-ent")
+		toTag := envOr("UPGRADE_TO", "2.0-ent")
+
+		upgradeClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 3
+  image:
+    repository: hashicorp/nomad
+    tag: %q
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: LoadBalancer
+      loadBalancerIP: "10.0.0.6"
+  server:
+    acl:
+      enabled: true
+`, upgradeClusterName, namespace, fromTag)
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", upgradeClusterName,
+				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("rolls a 3-replica cluster to the next Nomad version without losing quorum", func() {
+			By(fmt.Sprintf("creating a 3-replica cluster on %s", fromTag))
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(upgradeClusterCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the cluster to be Ready with healthy autopilot")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", upgradeClusterName, "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status} {.status.autopilot.healthy}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True true"))
+			}, 12*time.Minute, 10*time.Second).Should(Succeed())
+
+			By(fmt.Sprintf("patching spec.image.tag to %s", toTag))
+			cmd = exec.Command("kubectl", "patch", "nomadcluster", upgradeClusterName, "-n", namespace,
+				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"image":{"tag":%q}}}`, toTag))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("rolling through the upgrade with the quorum floor asserted at every poll")
+			// The structural no-quorum-loss guarantee: with 3 replicas
+			// and PDB/rolling-update pacing, at most one server is ever
+			// down — readyReplicas must never drop below 2 while the
+			// roll progresses to completion.
+			deadline := time.Now().Add(15 * time.Minute)
+			for {
+				Expect(time.Now().Before(deadline)).To(BeTrue(), "upgrade roll did not complete within 15m")
+
+				cmd := exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.readyReplicas} {.status.updatedReplicas} {.status.currentRevision} {.status.updateRevision}")
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+				var ready, updated int
+				var current, update string
+				_, _ = fmt.Sscanf(output, "%d %d %s %s", &ready, &updated, &current, &update)
+
+				Expect(ready).To(BeNumerically(">=", 2),
+					"quorum floor violated: %d/3 ready during the roll", ready)
+
+				if ready == 3 && updated == 3 && current == update && current != "" {
+					break
+				}
+				time.Sleep(5 * time.Second)
+			}
+
+			By("verifying every pod runs the target image")
+			cmd = exec.Command("kubectl", "get", "pods", "-n", namespace,
+				"-l", "app.kubernetes.io/instance="+upgradeClusterName,
+				"-o", "jsonpath={.items[*].spec.containers[0].image}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			images := strings.Fields(output)
+			Expect(images).To(HaveLen(3))
+			for _, img := range images {
+				Expect(img).To(Equal("hashicorp/nomad:" + toTag))
+			}
+
+			By("verifying the upgraded cluster converged: version, quorum, leader")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", upgradeClusterName, "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status} {.status.autopilot.healthy} {.status.autopilot.voters} {.status.nomadVersion}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts := strings.Fields(output)
+				g.Expect(parts).To(HaveLen(4))
+				g.Expect(parts[0]).To(Equal("True"), "Ready after upgrade")
+				g.Expect(parts[1]).To(Equal("true"), "autopilot healthy after upgrade")
+				g.Expect(parts[2]).To(Equal("3"), "3 voters after upgrade")
+				g.Expect(parts[3]).To(HavePrefix(strings.TrimSuffix(toTag, "-ent")),
+					"status.nomadVersion should report the new version line")
+			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying a leader exists")
+			cmd = exec.Command("kubectl", "get", "nomadcluster", upgradeClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.leaderAddress}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "leaderAddress must be populated after the upgrade")
+		})
+	})
+
+	// neo-6xm.2: HA operator topology — leader election exists in the
+	// deployment but failover had never been exercised. Runs LAST: it
+	// kills the operator leader mid-suite.
+	Context("Operator leader failover (neo-6xm.2)", Ordered, func() {
+		const deployName = "nomad-enterprise-operator-controller-manager"
+		const leaseName = "42388956.hashicorp.com"
+
+		AfterAll(func() {
+			By("restoring the single-replica operator deployment")
+			cmd := exec.Command("kubectl", "scale", "deployment", deployName, "-n", namespace, "--replicas=1")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "nomadcluster", "failover-canary",
+				"-n", namespace, "--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("fails over to a standby replica and keeps reconciling", func() {
+			By("scaling the operator to 2 replicas (leader + standby)")
+			cmd := exec.Command("kubectl", "scale", "deployment", deployName, "-n", namespace, "--replicas=2")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", deployName, "-n", namespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("identifying the current leader from the election Lease")
+			cmd = exec.Command("kubectl", "get", "lease", leaseName, "-n", namespace,
+				"-o", "jsonpath={.spec.holderIdentity}")
+			oldHolder, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(oldHolder).NotTo(BeEmpty())
+			// holderIdentity is "<pod-name>_<uuid>"
+			leaderPod := strings.Split(oldHolder, "_")[0]
+
+			By(fmt.Sprintf("deleting the leader pod %s", leaderPod))
+			cmd = exec.Command("kubectl", "delete", "pod", leaderPod, "-n", namespace, "--wait=false")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the standby to acquire the Lease")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "lease", leaseName, "-n", namespace,
+					"-o", "jsonpath={.spec.holderIdentity}")
+				newHolder, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(newHolder).NotTo(BeEmpty())
+				g.Expect(newHolder).NotTo(Equal(oldHolder), "lease should transfer to the standby")
+				g.Expect(strings.Split(newHolder, "_")[0]).NotTo(Equal(leaderPod))
+			}, 2*time.Minute, 3*time.Second).Should(Succeed())
+
+			By("proving the new leader reconciles: a canary CR gets its status set")
+			// A cluster referencing a missing license Secret parks at
+			// LicenseSecretNotFound (neo-0zq) within one reconcile — a
+			// cheap end-to-end liveness probe needing no Nomad boot.
+			// NodePort matters: the defaulted LoadBalancer would make
+			// AdvertisePhase (which runs before Secrets) requeue forever
+			// waiting for an IP, parking the canary at Reconciling.
+			canary := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: failover-canary
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: no-such-secret
+  services:
+    external:
+      type: NodePort
+`, namespace)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(canary)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", "failover-canary", "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].reason}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("LicenseSecretNotFound"),
+					"the post-failover leader should reconcile the canary CR")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		})
 	})
 })

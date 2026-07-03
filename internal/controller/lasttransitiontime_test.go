@@ -53,7 +53,7 @@ func TestSetStatusConditionPreservesTransitionTimeOnSteadyState(t *testing.T) {
 
 	// Sleep so any unintended Now() rewrite would produce a measurably
 	// different timestamp.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // real wall-clock gap: LastTransitionTime has second granularity; deliberate (neo-9eq)
 
 	// Same condition again — no status change.
 	meta.SetStatusCondition(&conditions, metav1.Condition{
@@ -85,7 +85,7 @@ func TestSetStatusConditionUpdatesTransitionTimeOnRealTransition(t *testing.T) {
 	})
 	firstLTT := conditions[0].LastTransitionTime
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) // real wall-clock gap: LastTransitionTime has second granularity; deliberate (neo-9eq)
 
 	// Genuine transition: False → True.
 	meta.SetStatusCondition(&conditions, metav1.Condition{

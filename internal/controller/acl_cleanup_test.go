@@ -71,11 +71,12 @@ func TestCleanupNomadACLResourcesOrder(t *testing.T) {
 	var calls []string
 	step := func(name string) { calls = append(calls, name) }
 
+	// The management credential is a management-TYPE token with no
+	// backing policy (Nomad has no ACL-write policy grammar), so cleanup
+	// deletes its token only; the status credential deletes token+policy.
 	mockNomad := mocks.NewMockNomadAPI(t)
 	mockNomad.EXPECT().DeleteACLToken(bootToken, "mgmt-acc").
 		Run(func(_, _ string) { step("token:mgmt") }).Return(nil).Once()
-	mockNomad.EXPECT().DeleteACLPolicy(bootToken, mgmtName).
-		Run(func(_, _ string) { step("policy:mgmt") }).Return(nil).Once()
 	mockNomad.EXPECT().DeleteACLToken(bootToken, "status-acc").
 		Run(func(_, _ string) { step("token:status") }).Return(nil).Once()
 	mockNomad.EXPECT().DeleteACLPolicy(bootToken, statusName).
@@ -93,7 +94,7 @@ func TestCleanupNomadACLResourcesOrder(t *testing.T) {
 		t.Fatalf("cleanupNomadACLResources() error = %v", err)
 	}
 
-	want := []string{"token:mgmt", "policy:mgmt", "token:status", "policy:status"}
+	want := []string{"token:mgmt", "token:status", "policy:status"}
 	if len(calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", calls, want)
 	}

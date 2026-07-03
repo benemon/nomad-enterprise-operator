@@ -15,7 +15,37 @@ A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise serv
 
 Contributions follow the workflow and standards defined in [`CONTRIBUTING.md`](CONTRIBUTING.md). Work is tracked in [`bd`](https://github.com/gastownhall/beads) (issue prefix: `neo-`); the full backlog is mirrored in [`docs/bd-backlog-2026-06-06.md`](docs/bd-backlog-2026-06-06.md). Per-issue templates: [`.bd/issue-template.md`](.bd/issue-template.md); PR descriptions: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
 
+## Architectural boundaries
+
+Two deliberate scope decisions define what this operator is:
+
+**Server clusters only — bring your own clients.** The operator
+deploys and manages Nomad **server** (control-plane) clusters.
+HashiCorp does not support running Nomad clients as containers, so
+client nodes are explicitly out of scope: provision your client fleet
+on VMs or bare metal and point it at the cluster's advertised address
+(`status.services`). Nothing in the CRD models clients, and nothing
+will.
+
+**Single region per cluster — no federation management (v1).** Each
+NomadCluster CR is one Raft cluster in one region
+(`spec.topology.region`). Multi-region federation — WAN gossip joins,
+cross-region ACL replication — is not managed by the operator in v1.
+Nomad itself supports federating operator-deployed clusters if you
+expose the serf WAN port and configure the joins out-of-band; the
+operator neither helps nor hinders. If federation management becomes a
+real need, it will arrive as its own design cycle, not as a side
+effect.
+
 ## Security posture
+
+All workloads — the operator, Nomad server pods, and snapshot agents —
+run under the Kubernetes Pod Security Standards **restricted** profile:
+non-root (explicit UID/fsGroup on vanilla Kubernetes; SCC-assigned on
+OpenShift), `RuntimeDefault` seccomp, no privilege escalation, all
+capabilities dropped, and read-only root filesystems with explicit
+writable mounts. The e2e suite runs in a namespace with
+`pod-security.kubernetes.io/enforce=restricted` to keep this true.
 
 The v1alpha2 release is deliberately scoped: it prioritises operational stability, runtime security, developer maintainability, and value delivery. Some supply-chain hardening is **deliberately deferred** to a future release:
 
@@ -175,7 +205,8 @@ make undeploy
 |-------|------|---------|-------------|
 | `replicas` | `int` | `3` | Number of Nomad server replicas. Must be 1, 3, or 5 |
 | `image.repository` | `string` | `hashicorp/nomad` | Container image repository |
-| `image.tag` | `string` | `2.0.0-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
+| `image.tag` | `string` | `2.0.3-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
+| `image.digest` | `string` | — | Optional content digest (`sha256:…`). When set, the image reference is `repository@digest` and `tag` is ignored — see [Image version pinning](#image-version-pinning) |
 | `image.pullPolicy` | `string` | `Always` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
 | `license.secretName` | `string` | | Name of secret containing the Nomad license, stored under the key `license` (operator-owned per ADR 0003). Mutually exclusive with `value` |
 | `license.value` | `string` | | Inline license content. The operator creates a managed secret. Mutually exclusive with `secretName` |
@@ -232,9 +263,7 @@ Audit storage is independent of data storage: when audit is enabled the
 StatefulSet always carries a dedicated audit PVC sized per
 `server.audit.size`, even when `spec.persistence.size` is empty and
 Raft data runs on `emptyDir`. Audit logs survive pod restarts in every
-configuration. The operator emits a one-shot `AuditPVCCreated` Event
-(debounced via `status.auditPVCMigrated`) the first time the audit PVC
-binds.
+configuration.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -305,6 +334,7 @@ Rejected at admission (API server, no operator involvement):
 | Exactly one of `spec.license.secretName` / `spec.license.value` is set | CEL (two rules: at least one, mutually exclusive) |
 | `spec.replicas` cannot change while a scale-down is in progress (`status.scaleDown.removedPeers` non-empty) | CEL transition rule |
 | `spec.image.tag` matches `^[A-Za-z0-9._-]+$` | pattern |
+| `spec.image.digest` matches `^sha256:[a-f0-9]{64}$` | pattern |
 | `spec.image.pullPolicy` ∈ Always/IfNotPresent/Never; `spec.services.*.type` ∈ LoadBalancer/NodePort; `spec.persistence.reclaimPolicy` ∈ Retain/Delete | enum |
 
 Enforced at reconcile time (visible via `kubectl get nomadcluster` and
@@ -324,7 +354,7 @@ validate — it is operator-owned per ADR 0003 (see
 
 ## Image version pinning
 
-The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.0-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
+The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.3-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
 
 Upgrading a cluster to a new Nomad version is a user-driven
 `spec.image.tag` change. **Snapshot before you upgrade** — the operator
@@ -341,6 +371,24 @@ spec:
   image:
     tag: "2.0.4-ent"   # or any other tag your environment requires
 ```
+
+**Digest pinning (air-gapped/CISO environments).** For environments
+that require content-addressed immutability — the fork-and-sign
+workflows described under [Security posture](#security-posture) usually
+end in a digest, not a tag — set `spec.image.digest`:
+
+```yaml
+spec:
+  image:
+    repository: registry.internal/nomad
+    digest: "sha256:4f5c…"   # full 64-hex-char digest
+```
+
+When a digest is set, the image reference is `repository@digest` and
+`spec.image.tag` is ignored (digest takes precedence). Digests are
+immutable, so `pullPolicy: Always` becomes redundant — harmless, but
+`IfNotPresent` avoids pointless registry round-trips. The snapshot
+agent uses the same image reference as the cluster.
 
 **Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. The release procedure is documented in [`docs/release-process.md`](docs/release-process.md) §1. Upgrade behaviour: existing NomadClusters that do not override `spec.image.tag` receive the new default on next reconcile, which triggers a rolling restart of the StatefulSet.
 
@@ -382,23 +430,40 @@ spec:
     secretName: nomad-license
 ```
 
-**CA lifetime and renewal.** The operator-generated CA is valid for
+**CA lifetime and rotation.** The operator-generated CA is valid for
 **2 years** — deliberately short so a leaked or compromised CA key has a
 bounded blast radius (the CA private key lives in a namespace Secret;
 anyone who can read it can mint certificates trusted by the cluster
-until the CA expires). The trade-off is a renewal obligation:
+until the CA expires). **The operator rotates it automatically**: 30
+days before expiry it introduces a new CA and walks the cluster through
+a zero-trust-gap rollover —
 
-- `status.certificateAuthority.expiryTime` — when the CA expires.
-- `status.certificateAuthority.renewalRequiredBy` — expiry minus the
-  30-day renewal window. When this deadline passes, the operator emits
-  a one-shot Warning Event with reason `CARenewalRequired` (debounced
-  across operator restarts). The `Ready` condition stays `True` — a CA
-  due for renewal is an operator obligation, not a cluster failure.
+1. *Introduce*: a new CA is generated and every pod is rolled onto a
+   trust bundle containing **both** CAs (a `CARotationStarted` Event
+   marks this).
+2. *Cutover*: once every pod trusts both, the new CA becomes the
+   signer, server certificates are reissued from it, and pods roll
+   again (`CARotationCompleted`). The old CA's private key is
+   destroyed; its certificate stays in the trust bundle.
+3. *Retire*: when the old CA certificate finally expires it drops out
+   of the trust bundle on its own.
 
-To renew, delete the `<cluster>-ca` Secret; the operator generates a
-fresh CA and reissues server certificates from it on the next
-reconcile. Plan a rolling restart — peers must converge on the new
-trust root.
+Peers never disagree on the trust root at any point, and a mid-rotation
+operator restart resumes where it left off (rotation state lives in the
+`<cluster>-ca` Secret, not operator memory). Status signals:
+
+- `status.certificateAuthority.expiryTime` — when the active CA expires.
+- `status.certificateAuthority.renewalRequiredBy` — for
+  operator-generated CAs, when rotation will start; for **user-provided
+  CAs**, when *you* must renew — the operator never rotates a CA it
+  does not own, and instead emits a one-shot `CARenewalRequired`
+  Warning Event when this deadline passes. The `Ready` condition stays
+  `True` either way.
+
+To force an early rotation, delete the `<cluster>-ca` Secret; the
+operator generates a fresh CA and reissues server certificates on the
+next reconcile (this hard-cut path skips the dual-trust overlap — plan
+a rolling restart).
 
 ### User-provided CA
 
@@ -425,12 +490,14 @@ ACLs are enabled by default (`server.acl.enabled: true`). When the StatefulSet b
 | Secret | Capabilities | Used for |
 |--------|--------------|----------|
 | `<cluster>-acl-bootstrap` | full management (Nomad bootstrap token) | Minting the management token at bootstrap, and revoking the derived tokens/policies on cluster deletion. Nothing else — day-2 operations never use it. |
-| `<cluster>-operator-management` | `acl:write`, `operator:write` | All day-2 management writes: keeping the operator-owned ACL policies in their desired state, and Raft peer removal during scale-down. |
+| `<cluster>-operator-management` | management-type token | All day-2 management writes: keeping the operator-owned ACL policies in their desired state, minting the status token, and Raft peer removal during scale-down. Management-type because Nomad has no ACL-write policy grammar — only management tokens can write ACL state. |
 | `<cluster>-operator-status` | `operator:read`, `agent:read` | All day-2 read-only queries: autopilot health, license status, leader, agent-version probe. |
 
-The principle is least privilege per concern: the bootstrap token is
+The principle is separation per concern: the bootstrap token is
 effectively sealed after minting the management token; writes ride the
-management token; reads ride the status token. The operator also keeps
+management token (dedicated, independently revocable and rotatable —
+delete its Secret to force a re-mint); reads ride the least-privilege
+status token. The operator also keeps
 the three operator-owned policies (`anonymous`,
 `<cluster>-operator-management`, `<cluster>-operator-status`) in their
 desired state on every reconcile — manual edits to them are reverted.
@@ -599,7 +666,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.0-ent"
+    tag: "2.0.3-ent"
   license:
     secretName: nomad-license
   server:
@@ -687,6 +754,9 @@ sub-field keeps its last-known value).
 | `WaitingForReplicas` | StatefulSet below its desired ready count |
 | `LicenseExpired` | Nomad Enterprise license invalid — see `status.license` |
 | `AutopilotUnhealthy` | Raft autopilot reports unhealthy — see `status.autopilot` |
+| `LicenseSecretNotFound` | `spec.license.secretName` references a Secret that does not exist — create it; the operator re-reconciles the moment it appears |
+| `LicenseSecretInvalid` | The license Secret exists but is missing the `license` key |
+| `CAExpired` | The CA certificate has expired; TLS handshakes fail cluster-wide — see `status.certificateAuthority`. Takes precedence over `WaitingForReplicas` so the cascading pod failures are attributed to their cause |
 | `PhaseFailed` | A reconcile phase errored; the message names the phase |
 | `Reconciling` | A phase requested requeue (generic wait) |
 | `ScaleDownBlocked` | Scale-down waiting on a Raft leader |

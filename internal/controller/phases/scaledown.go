@@ -354,7 +354,7 @@ func (p *ScaleDownPhase) getManagementToken(
 	}, secret); err != nil {
 		return "", err
 	}
-	token := string(secret.Data["secret-id"])
+	token := string(secret.Data[SecretKeySecretID])
 	if token == "" {
 		return "", fmt.Errorf("management token secret %q has no secret-id", secretName)
 	}
@@ -370,7 +370,7 @@ func (p *ScaleDownPhase) newNomadClientForScaleDown(
 	cluster *nomadv1alpha1.NomadCluster,
 	token string,
 ) (nomad.NomadAPI, error) {
-	cfg := p.BuildClientConfig(cluster, 10*time.Second, token)
+	cfg := p.BuildClientConfig(10*time.Second, token)
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 	return p.NewNomadClient(cfg)
 }

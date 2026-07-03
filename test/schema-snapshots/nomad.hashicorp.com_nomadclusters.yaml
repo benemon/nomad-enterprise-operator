@@ -73,6 +73,17 @@ spec:
               image:
                 description: Image configuration for the Nomad container
                 properties:
+                  digest:
+                    description: |-
+                      Digest optionally pins the image by content digest for
+                      air-gapped/CISO deployments (neo-4xj). When set, the image
+                      reference is `repository@digest` and Tag is IGNORED (digest takes
+                      precedence — a CEL mutual-exclusion rule is not possible because
+                      Tag's default is materialised before validation runs). With a
+                      digest, pullPolicy Always is redundant but harmless: digests are
+                      content-addressed and immutable.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
                   pullPolicy:
                     default: Always
                     description: |-
@@ -91,7 +102,7 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 2.0.0-ent
+                    default: 2.0.3-ent
                     description: |-
                       Tag is the container image tag. The default is pinned to a concrete
                       patch version rather than a floating tag, because Nomad is a Raft
@@ -653,15 +664,6 @@ spec:
               advertiseAddress:
                 description: AdvertiseAddress is the resolved LoadBalancer address
                 type: string
-              auditPVCMigrated:
-                description: |-
-                  AuditPVCMigrated records whether the operator has observed the
-                  audit PVC Bound and emitted the one-shot "AuditPVCCreated" Event
-                  for this cluster (B6 / AC-4.5.4). Same per-cluster debounce
-                  pattern as InitialReconcileEventEmitted: the flag survives
-                  operator restarts so the Event fires exactly once across the
-                  cluster's lifetime.
-                type: boolean
               autopilot:
                 description: Autopilot contains Raft autopilot health information
                 properties:
@@ -732,18 +734,21 @@ spec:
                     type: string
                   renewalRequiredBy:
                     description: |-
-                      RenewalRequiredBy is the deadline by which the CA should be
-                      renewed (expiry minus the renewal warning window). Crossing it
-                      surfaces a one-shot Warning Event with reason CARenewalRequired;
-                      Ready stays True (C5 / AC-2.4.10 — informational, not failure).
+                      RenewalRequiredBy is the CA expiry minus the 30-day renewal
+                      window. Its meaning depends on source (neo-4s4): for
+                      operator-generated CAs it is when the operator STARTS automatic
+                      rotation (CARotationStarted/Completed Events); for user-provided
+                      CAs it is when a HUMAN must renew, signalled by the one-shot
+                      CARenewalRequired Warning Event. Ready stays True either way.
                     type: string
-                  renewalWarningEmitted:
+                  renewalWarningThreshold:
                     description: |-
-                      RenewalWarningEmitted debounces the CARenewalRequired Event: set
-                      when the Event fires, carried forward while the same CA remains in
-                      place, reset when the CA rotates. Same per-cluster status-field
-                      debounce pattern as InitialReconcileEventEmitted.
-                    type: boolean
+                      RenewalWarningThreshold debounces the escalating CARenewalRequired
+                      Events for user-provided CAs (neo-ru9): records the last emitted
+                      threshold bucket — "30d", "14d", or "7d:<date>" for the daily
+                      cadence inside the final week. Carried while the same CA is in
+                      place (survives operator restarts); a replaced CA resets it.
+                    type: string
                   source:
                     description: |-
                       Source indicates how the CA was provisioned.
@@ -893,9 +898,10 @@ spec:
               operatorManagementSecretName:
                 description: |-
                   OperatorManagementSecretName is the name of the Secret containing
-                  the least-privilege management ACL token (acl:write,
-                  operator:write) used for all day-2 management writes (C4). Cache
-                  only: cleanup on deletion uses the deterministic name
+                  the dedicated management-type ACL token used for all day-2
+                  management writes (C4). Management-type because Nomad has no
+                  ACL-write policy grammar — only management tokens can write ACL
+                  state. Cache only: cleanup on deletion uses the deterministic name
                   `<cluster>-operator-management`, not this field (AC-2.4.7).
                 type: string
               operatorStatusPolicyName:

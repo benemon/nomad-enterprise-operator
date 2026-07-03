@@ -756,34 +756,6 @@ func TestGetLeader(t *testing.T) {
 	}
 }
 
-func TestGetPeers(t *testing.T) {
-	server := newACLTestServer(t)
-	defer server.Close()
-	client := newACLTestClient(t, server.URL)
-
-	peers, err := client.GetPeers()
-	if err != nil {
-		t.Fatalf("GetPeers() error = %v", err)
-	}
-	if len(peers) != 2 {
-		t.Errorf("GetPeers() returned %d peers, want 2", len(peers))
-	}
-}
-
-func TestCheckHealth(t *testing.T) {
-	server := newACLTestServer(t)
-	defer server.Close()
-	client := newACLTestClient(t, server.URL)
-
-	health, err := client.CheckHealth()
-	if err != nil {
-		t.Fatalf("CheckHealth() error = %v", err)
-	}
-	if !health.Server.OK {
-		t.Errorf("CheckHealth().Server.OK = false, want true")
-	}
-}
-
 // TestGetACLPolicy pins the C2 observed-state read: policy fields come
 // back verbatim, a 404 maps to (nil, nil) — "policy absent" is data,
 // not an error — and other failures surface as errors.
@@ -957,7 +929,7 @@ func TestRaftListPeers(t *testing.T) {
 	if len(peers) != 2 {
 		t.Fatalf("RaftListPeers() returned %d peers, want 2", len(peers))
 	}
-	if peers[0].ID != "id-1" || !peers[0].Leader || peers[1].Node != "nomad-1.global" {
+	if peers[0].ID != "id-1" || peers[0].Address != "10.0.0.1:4647" || peers[1].Node != "nomad-1.global" {
 		t.Errorf("peer fields not mapped: %+v", peers)
 	}
 
@@ -1004,5 +976,46 @@ func TestRaftRemovePeer(t *testing.T) {
 	errClient, _ := NewClient(ClientConfig{Address: errServer.URL})
 	if err := errClient.RaftRemovePeer(context.Background(), "token", "id-2"); err == nil {
 		t.Error("RaftRemovePeer() expected error on 403")
+	}
+}
+
+// TestCreateManagementACLToken pins the C4 management-token mint: the
+// request carries Type=management and NO policies — Nomad rejects
+// management tokens with policies, and only management-type tokens can
+// write ACL state (there is no acl{} policy grammar in Nomad).
+func TestCreateManagementACLToken(t *testing.T) {
+	var gotBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/acl/token" || r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"AccessorID": "mgmt-acc",
+			"SecretID":   "mgmt-secret",
+			"Name":       "test-operator-management",
+			"Type":       "management",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Address: server.URL})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	result, err := client.CreateManagementACLToken("boot-token", "test-operator-management")
+	if err != nil {
+		t.Fatalf("CreateManagementACLToken() error = %v", err)
+	}
+	if result.Type != "management" || result.SecretID != "mgmt-secret" {
+		t.Errorf("result = %+v, want management/mgmt-secret", result)
+	}
+	if gotBody["Type"] != "management" {
+		t.Errorf("request Type = %v, want management", gotBody["Type"])
+	}
+	if policies, ok := gotBody["Policies"]; ok && policies != nil {
+		t.Errorf("request carried Policies = %v, want none for a management token", policies)
 	}
 }

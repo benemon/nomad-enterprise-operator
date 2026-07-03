@@ -44,8 +44,6 @@ import (
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
-
-	routev1 "github.com/openshift/api/route/v1"
 )
 
 const (
@@ -91,18 +89,29 @@ func (r *NomadClusterReconciler) newNomadClient(cfg nomad.ClientConfig) (nomad.N
 }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/status,verbs=patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/finalizers,verbs=update
 
-// +kubebuilder:rbac:groups="",resources=configmaps;secrets;services;serviceaccounts;pods;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// RBAC trimmed to observed runtime usage (neo-6xm.3 audit). Every
+// resource the cache-backed client reads keeps get;list;watch (a Get
+// through the default client starts an informer); write verbs exist
+// only where a call site does. Owned resources are garbage-collected
+// via ownerReferences, so most delete verbs are unnecessary.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create
 
-// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=route.openshift.io,resources=routes/custom-host,verbs=create;update;patch
-// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors;prometheusrules,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=route.openshift.io,resources=routes/custom-host,verbs=create;update
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors;prometheusrules,verbs=get;list;watch;create;update
 
 // Reconcile is part of the main kubernetes reconciliation loop
 func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -166,10 +175,22 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 			patchBase := cluster.DeepCopy()
 			cluster.Status.Phase = nomadv1alpha1.ClusterPhaseFailed
+			// A phase may carry a specific user-actionable reason
+			// (neo-0zq, e.g. LicenseSecretNotFound); fall back to the
+			// generic PhaseFailed otherwise. Entering a specific-reason
+			// state emits a Warning Event once per transition.
+			reason := "PhaseFailed"
+			if result.Reason != "" {
+				reason = result.Reason
+			}
+			if prev := meta.FindStatusCondition(cluster.Status.Conditions, "Ready"); r.Recorder != nil &&
+				result.Reason != "" && (prev == nil || prev.Reason != reason) {
+				r.Recorder.Event(cluster, corev1.EventTypeWarning, reason, result.Message)
+			}
 			meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 				Type:    "Ready",
 				Status:  metav1.ConditionFalse,
-				Reason:  "PhaseFailed",
+				Reason:  reason,
 				Message: fmt.Sprintf("%s: %s", phase.Name(), result.Message),
 			})
 			if err := r.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
@@ -337,7 +358,7 @@ func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, c
 	}, bootstrapSecret); err != nil {
 		return fmt.Errorf("failed to get bootstrap secret for cleanup: %w", err)
 	}
-	bootstrapToken := string(bootstrapSecret.Data["secret-id"])
+	bootstrapToken := string(bootstrapSecret.Data[phases.SecretKeySecretID])
 	if bootstrapToken == "" {
 		return fmt.Errorf("bootstrap secret has empty secret-id")
 	}
@@ -351,7 +372,7 @@ func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, c
 	var caCert []byte
 	tlsSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      cluster.Name + "-tls",
+		Name:      phases.TLSSecretName(cluster.Name),
 		Namespace: cluster.Namespace,
 	}, tlsSecret); err != nil {
 		log.Error(err, "Failed to get TLS secret for cleanup client, Nomad ACL resources may be leaked")
@@ -373,32 +394,39 @@ func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, c
 		return fmt.Errorf("failed to create Nomad client for cleanup: %w", err)
 	}
 
-	// Revoke token then policy for each derived credential, management
-	// first (AC-2.4.7 order). The token accessor ID lives in the Secret
-	// of the same deterministic name; a missing Secret or Nomad-side
-	// not-found just means there is nothing to revoke.
-	for _, name := range []string{
-		phases.OperatorManagementSecretName(cluster.Name),
-		cluster.Name + "-operator-status",
+	// Revoke each derived credential, management first (AC-2.4.7 order).
+	// The token accessor ID lives in the Secret of the same deterministic
+	// name; a missing Secret or Nomad-side not-found just means there is
+	// nothing to revoke. The management token has no policy — it is
+	// management-type (Nomad has no ACL-write policy grammar).
+	for _, cred := range []struct {
+		name      string
+		hasPolicy bool
+	}{
+		{phases.OperatorManagementSecretName(cluster.Name), false},
+		{phases.OperatorStatusName(cluster.Name), true},
 	} {
 		secret := &corev1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{
-			Name:      name,
+			Name:      cred.name,
 			Namespace: cluster.Namespace,
 		}, secret); err == nil {
 			if accessorID := string(secret.Data[phases.SecretKeyAccessorID]); accessorID != "" {
 				if err := nomadClient.DeleteACLToken(bootstrapToken, accessorID); err != nil {
-					log.Error(err, "Failed to delete ACL token", "name", name, "accessorID", accessorID)
+					log.Error(err, "Failed to delete ACL token", "name", cred.name, "accessorID", accessorID)
 				} else {
-					log.Info("Deleted ACL token", "name", name, "accessorID", accessorID)
+					log.Info("Deleted ACL token", "name", cred.name, "accessorID", accessorID)
 				}
 			}
 		}
 
-		if err := nomadClient.DeleteACLPolicy(bootstrapToken, name); err != nil {
-			log.Error(err, "Failed to delete ACL policy", "policy", name)
+		if !cred.hasPolicy {
+			continue
+		}
+		if err := nomadClient.DeleteACLPolicy(bootstrapToken, cred.name); err != nil {
+			log.Error(err, "Failed to delete ACL policy", "policy", cred.name)
 		} else {
-			log.Info("Deleted ACL policy", "policy", name)
+			log.Info("Deleted ACL policy", "policy", cred.name)
 		}
 	}
 
@@ -432,17 +460,14 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 		cluster.Status.AdvertiseAddress = phaseCtx.AdvertiseAddress
 	}
 
-	gossipSecretName := cluster.Name + "-gossip"
-	if cluster.Spec.Gossip.SecretName != "" {
-		gossipSecretName = cluster.Spec.Gossip.SecretName
-	}
-	cluster.Status.GossipKeySecretName = gossipSecretName
+	cluster.Status.GossipKeySecretName = phases.GossipSecretName(cluster)
 
 	// Check ACL bootstrap status
 	r.updateACLBootstrapStatus(ctx, cluster)
 
-	// Get Route host if enabled
-	r.updateRouteStatus(ctx, cluster)
+	// status.routeHost is written by RoutePhase (the Route's owner)
+	// within the reconcile-start patch window — no second computation
+	// here (neo-bjm).
 
 	// License and autopilot sub-fields from phase context (populated by
 	// ClusterStatusPhase; nil on probe miss preserves last-known state)
@@ -465,16 +490,6 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 		cluster.Status.NomadVersion = phaseCtx.NomadVersion
 	}
 
-	// Prune legacy condition types left behind by pre-C9 operators so
-	// AC-2.5.4 ("exactly one condition") holds on upgraded clusters too.
-	for _, legacy := range []string{
-		"GossipKeyReady", "ServicesReady", "AdvertiseResolved",
-		"StatefulSetReady", "ACLBootstrapped", "RouteReady",
-		"MonitoringReady", "LicenseValid", "AutopilotHealthy",
-	} {
-		meta.RemoveStatusCondition(&cluster.Status.Conditions, legacy)
-	}
-
 	// Single Ready condition (AC-2.5.5 precondition, AC-2.5.6 reasons).
 	// Order is deterministic: infrastructure first (replicas), then
 	// Nomad-side health (license, autopilot). Unknown probe state (nil
@@ -486,6 +501,15 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 		Message: fmt.Sprintf("Nomad cluster is running with %d/%d replicas", cluster.Status.ReadyReplicas, cluster.Spec.Replicas),
 	}
 	switch {
+	case caExpired(cluster):
+		// Checked before replicas: an expired CA kills TLS cluster-wide,
+		// which also manifests as unready replicas — without this case
+		// the outage would be misreported as WaitingForReplicas
+		// (neo-ru9, user-decided in scope).
+		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseRunning
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "CAExpired"
+		ready.Message = "CA certificate has expired; TLS handshakes fail cluster-wide. See status.certificateAuthority"
 	case cluster.Status.ReadyReplicas != cluster.Spec.Replicas || cluster.Status.ReadyReplicas == 0:
 		cluster.Status.Phase = nomadv1alpha1.ClusterPhaseCreating
 		ready.Status = metav1.ConditionFalse
@@ -531,6 +555,21 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 	r.maybeAdvanceLastReconcileTime(cluster, statusSnapshot)
 
 	return r.Status().Patch(ctx, cluster, client.MergeFrom(patchBase))
+}
+
+// caExpired reports whether the cluster's CA certificate is past its
+// expiry per status.certificateAuthority (neo-ru9). Empty or
+// unparseable expiry — including pre-first-reconcile — is not expired.
+func caExpired(cluster *nomadv1alpha1.NomadCluster) bool {
+	ca := cluster.Status.CertificateAuthority
+	if ca == nil || ca.ExpiryTime == "" {
+		return false
+	}
+	expiry, err := time.Parse(time.RFC3339, ca.ExpiryTime)
+	if err != nil {
+		return false
+	}
+	return time.Now().After(expiry)
 }
 
 // maybeAdvanceLastReconcileTime applies the AC-2.8.4 gate: advance
@@ -592,23 +631,6 @@ func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, c
 	if err := r.Get(ctx, client.ObjectKey{Name: bootstrapSecretName, Namespace: cluster.Namespace}, secret); err == nil {
 		cluster.Status.ACLBootstrapped = true
 		cluster.Status.ACLBootstrapSecretName = bootstrapSecretName
-	}
-}
-
-// updateRouteStatus mirrors the admitted OpenShift Route host into
-// status.routeHost.
-func (r *NomadClusterReconciler) updateRouteStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
-	if !cluster.Spec.OpenShift.Enabled || !cluster.Spec.OpenShift.Route.Enabled {
-		return
-	}
-
-	route := &routev1.Route{}
-	if err := r.Get(ctx, client.ObjectKey{Name: "console", Namespace: cluster.Namespace}, route); err != nil {
-		return
-	}
-
-	if len(route.Status.Ingress) > 0 && route.Status.Ingress[0].Host != "" {
-		cluster.Status.RouteHost = route.Status.Ingress[0].Host
 	}
 }
 

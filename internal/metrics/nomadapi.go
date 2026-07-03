@@ -63,6 +63,12 @@ func (i *instrumentedNomadAPI) GetACLPolicy(authToken, name string) (*nomad.ACLP
 	return result, err
 }
 
+func (i *instrumentedNomadAPI) CreateManagementACLToken(authToken, name string) (*nomad.ACLTokenResult, error) {
+	result, err := i.inner.CreateManagementACLToken(authToken, name)
+	count("CreateManagementACLToken", err)
+	return result, err
+}
+
 func (i *instrumentedNomadAPI) CreateACLTokenWithPolicies(authToken, name string, policies []string) (*nomad.ACLTokenResult, error) {
 	result, err := i.inner.CreateACLTokenWithPolicies(authToken, name, policies)
 	count("CreateACLTokenWithPolicies", err)
@@ -90,18 +96,6 @@ func (i *instrumentedNomadAPI) DeleteACLPolicy(authToken, name string) error {
 func (i *instrumentedNomadAPI) GetLeader() (string, error) {
 	result, err := i.inner.GetLeader()
 	count("GetLeader", err)
-	return result, err
-}
-
-func (i *instrumentedNomadAPI) GetPeers() ([]string, error) {
-	result, err := i.inner.GetPeers()
-	count("GetPeers", err)
-	return result, err
-}
-
-func (i *instrumentedNomadAPI) CheckHealth() (*nomad.HealthResult, error) {
-	result, err := i.inner.CheckHealth()
-	count("CheckHealth", err)
 	return result, err
 }
 

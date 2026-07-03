@@ -74,29 +74,10 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 		p.Log.V(1).Info("Got leader address", "leader", leader)
 	}
 
-	// Get server health
-	health, err := nomadClient.CheckHealth()
-	if err != nil {
-		p.Log.V(1).Info("Failed to get cluster health", "error", err)
-	} else {
-		p.ClusterHealthy = health.Server.OK
-		p.Log.V(1).Info("Got cluster health", "healthy", health.Server.OK)
-	}
-
-	// Get peer count
-	peers, err := nomadClient.GetPeers()
-	if err != nil {
-		p.Log.V(1).Info("Failed to get peers", "error", err)
-	} else {
-		p.PeerCount = len(peers)
-		p.Log.V(1).Info("Got peer count", "count", len(peers))
-	}
-
 	// Get license information
 	license, err := nomadClient.GetLicense(ctx, aclToken)
 	if err != nil {
 		p.Log.V(1).Info("Failed to get license info", "error", err)
-		p.LicenseError = err
 	} else {
 		p.License = &nomadv1alpha1.LicenseStatus{
 			Valid:           true, // If we got a response, it's valid
@@ -138,7 +119,6 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 	autopilot, err := nomadClient.GetAutopilotHealth(ctx, aclToken)
 	if err != nil {
 		p.Log.V(1).Info("Failed to get autopilot health", "error", err)
-		p.AutopilotError = err
 	} else {
 		servers := make([]nomadv1alpha1.ServerStatus, 0, len(autopilot.Servers))
 		for _, s := range autopilot.Servers {
@@ -175,7 +155,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 		}
 	}
 
-	cfg := p.BuildClientConfig(cluster, 10*time.Second, aclToken)
+	cfg := p.BuildClientConfig(10*time.Second, aclToken)
 
 	// Try internal service first (operator typically runs in-cluster)
 	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
@@ -216,7 +196,7 @@ func (p *ClusterStatusPhase) getOperatorStatusToken(ctx context.Context, cluster
 			Namespace: cluster.Namespace,
 		}, secret)
 		if err == nil {
-			token := string(secret.Data["secret-id"])
+			token := string(secret.Data[SecretKeySecretID])
 			if token != "" {
 				return token, nil
 			}

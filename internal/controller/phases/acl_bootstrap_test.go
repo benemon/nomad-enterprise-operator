@@ -42,7 +42,7 @@ const testOperatorStatusName = "test-cluster-operator-status"
 // PhaseContext.NomadClientFactory rather than standing up a real Nomad
 // endpoint.
 func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 	// Both must be empty so neither idempotency guard fires
 	cluster.Status.OperatorStatusSecretName = ""
@@ -178,7 +178,7 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 		},
 	}
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
 	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
@@ -242,11 +242,6 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 		Description: "Allow anonymous read access for cluster visibility",
 		Rules:       nomad.AnonymousPolicyRules,
 	}
-	managementDesired := &nomad.ACLPolicyResult{
-		Name:        "test-cluster-operator-management",
-		Description: "Operator day-2 management access (acl:write, operator:write)",
-		Rules:       nomad.OperatorManagementPolicyRules,
-	}
 	statusDesired := &nomad.ACLPolicyResult{
 		Name:        testOperatorStatusName,
 		Description: "Operator day-2 status API access (operator:read, agent:read)",
@@ -258,11 +253,11 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	// policy reconciliation with no bootstrap/token-mint calls. All
 	// policy operations authenticate with the MANAGEMENT token
 	// (C4 / AC-2.4.5), which the mock expectations below pin.
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
 	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
-	cluster.Status.OperatorManagementSecretName = managementDesired.Name
+	cluster.Status.OperatorManagementSecretName = "test-cluster-operator-management"
 
 	bootstrapSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -273,7 +268,7 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	}
 	mgmtSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      managementDesired.Name,
+			Name:      "test-cluster-operator-management",
 			Namespace: "test-ns",
 		},
 		Data: map[string][]byte{"secret-id": []byte(managementToken)},
@@ -303,7 +298,7 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	})
 
 	// Invocation 1: policies missing — all three created.
-	for _, want := range []*nomad.ACLPolicyResult{anonymousDesired, managementDesired, statusDesired} {
+	for _, want := range []*nomad.ACLPolicyResult{anonymousDesired, statusDesired} {
 		mockNomad.EXPECT().GetACLPolicy(managementToken, want.Name).Return(nil, nil).Once()
 		mockNomad.EXPECT().CreateACLPolicy(managementToken, want.Name, want.Description, want.Rules).Return(nil).Once()
 	}
@@ -315,7 +310,7 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	// Invocation 2 (AC-2.5.1): observed matches desired — GETs only,
 	// zero writes. No CreateACLPolicy expectation is registered, so any
 	// write call fails the test.
-	for _, want := range []*nomad.ACLPolicyResult{anonymousDesired, managementDesired, statusDesired} {
+	for _, want := range []*nomad.ACLPolicyResult{anonymousDesired, statusDesired} {
 		mockNomad.EXPECT().GetACLPolicy(managementToken, want.Name).Return(want, nil).Once()
 	}
 
@@ -333,7 +328,6 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	}
 	mockNomad.EXPECT().GetACLPolicy(managementToken, anonymousDesired.Name).Return(edited, nil).Once()
 	mockNomad.EXPECT().CreateACLPolicy(managementToken, anonymousDesired.Name, anonymousDesired.Description, anonymousDesired.Rules).Return(nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(managementToken, managementDesired.Name).Return(managementDesired, nil).Once()
 	mockNomad.EXPECT().GetACLPolicy(managementToken, statusDesired.Name).Return(statusDesired, nil).Once()
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
@@ -359,7 +353,7 @@ func TestBootstrapSecretNoOwnerRef(t *testing.T) {
 	}
 
 	t.Run("token secret", func(t *testing.T) {
-		cluster := newTestCluster("test-cluster", "test-ns")
+		cluster := newTestCluster("test-ns", "test-cluster")
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 		phase := NewACLBootstrapPhase(&PhaseContext{
 			Client: fakeClient,
@@ -385,7 +379,7 @@ func TestBootstrapSecretNoOwnerRef(t *testing.T) {
 	})
 
 	t.Run("external-bootstrap marker secret", func(t *testing.T) {
-		cluster := newTestCluster("test-cluster", "test-ns")
+		cluster := newTestCluster("test-ns", "test-cluster")
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 		phase := NewACLBootstrapPhase(&PhaseContext{
 			Client: fakeClient,
@@ -408,88 +402,6 @@ func TestBootstrapSecretNoOwnerRef(t *testing.T) {
 	})
 }
 
-// TestEnsureBootstrapSecretOwnership covers the C3 retrofit path: a
-// pre-C3 bootstrap Secret (ownerReference present, cluster label
-// missing) is migrated in place, and a second pass makes no further
-// change.
-func TestEnsureBootstrapSecretOwnership(t *testing.T) {
-	cluster := newTestCluster("test-cluster", "test-ns")
-
-	preC3 := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      BootstrapSecretName("test-cluster"),
-			Namespace: "test-ns",
-			Labels:    GetLabels(cluster),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "nomad.hashicorp.com/v1alpha1",
-				Kind:       "NomadCluster",
-				Name:       "test-cluster",
-				UID:        cluster.UID,
-			}},
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(preC3).Build()
-	phase := NewACLBootstrapPhase(&PhaseContext{
-		Client: fakeClient,
-		Scheme: scheme.Scheme,
-		Log:    zap.New(zap.UseDevMode(true)),
-	})
-
-	if err := phase.ensureBootstrapSecretOwnership(context.Background(), cluster, preC3); err != nil {
-		t.Fatalf("ensureBootstrapSecretOwnership() error = %v", err)
-	}
-
-	migrated := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), types.NamespacedName{
-		Name: preC3.Name, Namespace: "test-ns",
-	}, migrated); err != nil {
-		t.Fatalf("Failed to get migrated secret: %v", err)
-	}
-	if n := len(migrated.OwnerReferences); n != 0 {
-		t.Errorf("ownerReferences after migration = %d, want 0", n)
-	}
-	if got := migrated.Labels[BootstrapSecretClusterLabel]; got != "test-cluster" {
-		t.Errorf("label %s = %q, want %q", BootstrapSecretClusterLabel, got, "test-cluster")
-	}
-
-	// Second pass: already migrated — must be a no-op (no error, same
-	// resourceVersion).
-	before := migrated.ResourceVersion
-	if err := phase.ensureBootstrapSecretOwnership(context.Background(), cluster, migrated); err != nil {
-		t.Fatalf("second ensureBootstrapSecretOwnership() error = %v", err)
-	}
-	after := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), types.NamespacedName{
-		Name: preC3.Name, Namespace: "test-ns",
-	}, after); err != nil {
-		t.Fatalf("Failed to re-get secret: %v", err)
-	}
-	if after.ResourceVersion != before {
-		t.Errorf("second pass wrote (resourceVersion %s -> %s), want no-op", before, after.ResourceVersion)
-	}
-}
-
-// TestManagementTokenPolicyText covers C4 (neo-ikf) / AC-2.4.6: the
-// management policy is EXACTLY acl:write + operator:write — two blocks,
-// no extras. Exact string match so any additional grant is a conscious,
-// reviewed change to this test and the AC.
-func TestManagementTokenPolicyText(t *testing.T) {
-	want := `
-acl {
-  policy = "write"
-}
-
-operator {
-  policy = "write"
-}
-`
-	if nomad.OperatorManagementPolicyRules != want {
-		t.Errorf("OperatorManagementPolicyRules = %q, want exactly %q (AC-2.4.6)",
-			nomad.OperatorManagementPolicyRules, want)
-	}
-}
-
 // TestBootstrapMintsManagementTokenFirst covers C4 (neo-ikf) /
 // AC-2.4.4: on first bootstrap the Nomad call order is
 // BootstrapACL → CreateACLPolicy(mgmt, bootstrap auth) →
@@ -507,7 +419,7 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 		statusName = "test-cluster-operator-status"
 	)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 
 	readyPod := &corev1.Pod{
@@ -531,30 +443,22 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 	var calls []string
 	step := func(name string) { calls = append(calls, name) }
 
-	mgmtDesired := &nomad.ACLPolicyResult{
-		Name:        mgmtName,
-		Description: "Operator day-2 management access (acl:write, operator:write)",
-		Rules:       nomad.OperatorManagementPolicyRules,
-	}
-
 	mockNomad := mocks.NewMockNomadAPI(t)
 	mockNomad.EXPECT().BootstrapACL().
 		Run(func() { step("bootstrap") }).
 		Return(&nomad.ACLBootstrapResult{AccessorID: "boot-acc", SecretID: bootToken, Name: "Bootstrap Token", Type: "management"}, nil).
 		Once()
 
-	// Management mint: the ONLY two writes authenticated with the bootstrap token.
-	mockNomad.EXPECT().CreateACLPolicy(bootToken, mgmtName, mgmtDesired.Description, nomad.OperatorManagementPolicyRules).
-		Run(func(_, _, _, _ string) { step("policy:mgmt") }).
-		Return(nil).Once()
-	mockNomad.EXPECT().CreateACLTokenWithPolicies(bootToken, mgmtName, []string{mgmtName}).
-		Run(func(_, _ string, _ []string) { step("token:mgmt") }).
-		Return(&nomad.ACLTokenResult{AccessorID: "mgmt-acc", SecretID: mgmtToken}, nil).Once()
+	// Management mint: the ONLY write authenticated with the bootstrap
+	// token — a management-TYPE token (Nomad has no ACL-write policy
+	// grammar, so no policy is created for it).
+	mockNomad.EXPECT().CreateManagementACLToken(bootToken, mgmtName).
+		Run(func(_, _ string) { step("token:mgmt") }).
+		Return(&nomad.ACLTokenResult{AccessorID: "mgmt-acc", SecretID: mgmtToken, Type: "management"}, nil).Once()
 
 	// C2 policy reconciliation and status-token creation: management auth only.
 	mockNomad.EXPECT().GetACLPolicy(mgmtToken, "anonymous").Return(nil, nil).Once()
 	mockNomad.EXPECT().CreateACLPolicy(mgmtToken, "anonymous", "Allow anonymous read access for cluster visibility", nomad.AnonymousPolicyRules).Return(nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(mgmtToken, mgmtName).Return(mgmtDesired, nil).Once()
 	mockNomad.EXPECT().GetACLPolicy(mgmtToken, statusName).Return(nil, nil).Once()
 	// Status policy is written by C2's reconcile (miss) and upserted
 	// again by ensureOperatorStatusToken's own creation path.
@@ -588,8 +492,7 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 		t.Fatalf("call %q not recorded; calls = %v", name, calls)
 		return -1
 	}
-	if !(index("bootstrap") < index("policy:mgmt") &&
-		index("policy:mgmt") < index("token:mgmt") &&
+	if !(index("bootstrap") < index("token:mgmt") &&
 		index("token:mgmt") < index("token:status")) {
 		t.Errorf("call order wrong: %v", calls)
 	}
@@ -621,7 +524,7 @@ func TestC2WritesUseManagementToken(t *testing.T) {
 	const managementToken = "mgmt-secret-id"
 	const mgmtName = "test-cluster-operator-management"
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
 	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
@@ -647,11 +550,6 @@ func TestC2WritesUseManagementToken(t *testing.T) {
 		Description: "Allow anonymous read access for cluster visibility",
 		Rules:       `namespace "default" { policy = "write" }`,
 	}
-	mgmtDesired := &nomad.ACLPolicyResult{
-		Name:        mgmtName,
-		Description: "Operator day-2 management access (acl:write, operator:write)",
-		Rules:       nomad.OperatorManagementPolicyRules,
-	}
 	statusDesired := &nomad.ACLPolicyResult{
 		Name:        testOperatorStatusName,
 		Description: "Operator day-2 status API access (operator:read, agent:read)",
@@ -662,7 +560,6 @@ func TestC2WritesUseManagementToken(t *testing.T) {
 	mockNomad.EXPECT().GetACLPolicy(managementToken, "anonymous").Return(drifted, nil).Once()
 	// The drift-revert write MUST carry the management token (AC-2.4.5).
 	mockNomad.EXPECT().CreateACLPolicy(managementToken, "anonymous", drifted.Description, nomad.AnonymousPolicyRules).Return(nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(managementToken, mgmtName).Return(mgmtDesired, nil).Once()
 	mockNomad.EXPECT().GetACLPolicy(managementToken, testOperatorStatusName).Return(statusDesired, nil).Once()
 
 	phase := NewACLBootstrapPhase(&PhaseContext{

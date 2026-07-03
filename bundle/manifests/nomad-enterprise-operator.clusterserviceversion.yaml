@@ -17,7 +17,7 @@ metadata:
           "spec": {
             "image": {
               "repository": "hashicorp/nomad",
-              "tag": "2.0.0-ent"
+              "tag": "2.0.3-ent"
             },
             "license": {
               "secretName": "nomad-license"
@@ -105,7 +105,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-02T13:50:35Z"
+    createdAt: "2026-07-03T09:53:45Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
@@ -160,17 +160,11 @@ spec:
           - ""
           resources:
           - configmaps
-          - persistentvolumeclaims
-          - pods
-          - secrets
-          - serviceaccounts
           - services
           verbs:
           - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -181,13 +175,51 @@ spec:
           - create
           - patch
         - apiGroups:
-          - apps
+          - ""
           resources:
-          - deployments
-          - statefulsets
+          - persistentvolumeclaims
+          - secrets
           verbs:
           - create
           - delete
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - serviceaccounts
+          verbs:
+          - create
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - statefulsets
+          verbs:
+          - create
           - get
           - list
           - patch
@@ -202,8 +234,6 @@ spec:
           - delete
           - get
           - list
-          - patch
-          - update
           - watch
         - apiGroups:
           - monitoring.coreos.com
@@ -212,10 +242,8 @@ spec:
           - servicemonitors
           verbs:
           - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -224,11 +252,8 @@ spec:
           - nomadclusters
           - nomadsnapshots
           verbs:
-          - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -244,9 +269,7 @@ spec:
           - nomadclusters/status
           - nomadsnapshots/status
           verbs:
-          - get
           - patch
-          - update
         - apiGroups:
           - policy
           resources:
@@ -256,20 +279,25 @@ spec:
           - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
           - rbac.authorization.k8s.io
           resources:
           - rolebindings
+          verbs:
+          - create
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - rbac.authorization.k8s.io
+          resources:
           - roles
           verbs:
           - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -278,10 +306,8 @@ spec:
           - routes
           verbs:
           - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -290,7 +316,6 @@ spec:
           - routes/custom-host
           verbs:
           - create
-          - patch
           - update
         - apiGroups:
           - authentication.k8s.io

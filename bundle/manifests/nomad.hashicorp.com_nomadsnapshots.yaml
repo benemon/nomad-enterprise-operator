@@ -159,7 +159,11 @@ spec:
                 properties:
                   interval:
                     default: 1h
-                    description: Interval between snapshots (e.g., "1h", "24h")
+                    description: |-
+                      Interval between snapshots (e.g., "1h", "24h"). Must be a Go
+                      duration string — validated at admission (neo-f7j; previously any
+                      string was accepted and surfaced only as a broken agent config).
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   retain:
                     default: 24
@@ -417,12 +421,6 @@ spec:
                   error:
                     description: Error message if snapshot failed
                     type: string
-                  location:
-                    description: Location is the storage path/URL of the snapshot
-                    type: string
-                  size:
-                    description: Size of the snapshot
-                    type: string
                   status:
                     description: Status of the snapshot (Success, Failed)
                     type: string
@@ -474,9 +472,6 @@ spec:
               readyReplicas:
                 description: ReadyReplicas is the number of ready snapshot agent replicas
                 format: int32
-                type: integer
-              snapshotCount:
-                description: SnapshotCount is the total number of snapshots stored
                 type: integer
               tokenAccessorID:
                 description: TokenAccessorID is the Nomad ACL token accessor ID for

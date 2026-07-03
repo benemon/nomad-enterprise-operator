@@ -65,8 +65,11 @@ type ClusterReference struct {
 
 // SnapshotSchedule defines when and how often to take snapshots.
 type SnapshotSchedule struct {
-	// Interval between snapshots (e.g., "1h", "24h")
+	// Interval between snapshots (e.g., "1h", "24h"). Must be a Go
+	// duration string — validated at admission (neo-f7j; previously any
+	// string was accepted and surfaced only as a broken agent config).
 	// +kubebuilder:default="1h"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
 	Interval string `json:"interval,omitempty"`
 
 	// Retain is the number of snapshots to keep
@@ -219,10 +222,6 @@ type NomadSnapshotStatus struct {
 	// +optional
 	NextScheduled *metav1.Time `json:"nextScheduled,omitempty"`
 
-	// SnapshotCount is the total number of snapshots stored
-	// +optional
-	SnapshotCount int `json:"snapshotCount,omitempty"`
-
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
@@ -254,14 +253,6 @@ type SnapshotInfo struct {
 
 	// Status of the snapshot (Success, Failed)
 	Status string `json:"status,omitempty"`
-
-	// Size of the snapshot
-	// +optional
-	Size string `json:"size,omitempty"`
-
-	// Location is the storage path/URL of the snapshot
-	// +optional
-	Location string `json:"location,omitempty"`
 
 	// Error message if snapshot failed
 	// +optional

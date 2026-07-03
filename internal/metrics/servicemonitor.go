@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
@@ -58,14 +59,17 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 	}
 
 	httpsScheme := monitoringv1.Scheme("https")
+	// One label set serves as both the ServiceMonitor's own labels and
+	// its service selector — the two must agree.
+	labels := map[string]string{
+		"control-plane":          "controller-manager",
+		"app.kubernetes.io/name": "nomad-enterprise-operator",
+	}
 	sm := &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Labels: map[string]string{
-				"control-plane":          "controller-manager",
-				"app.kubernetes.io/name": "nomad-enterprise-operator",
-			},
+			Labels:    labels,
 		},
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Endpoints: []monitoringv1.Endpoint{{
@@ -85,17 +89,14 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 								// controller-runtime self-signed cert;
 								// scrape verification is skipped, matching
 								// config/prometheus/monitor.yaml.
-								InsecureSkipVerify: ptrBool(true),
+								InsecureSkipVerify: ptr.To(true),
 							},
 						},
 					},
 				},
 			}},
 			Selector: metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"control-plane":          "controller-manager",
-					"app.kubernetes.io/name": "nomad-enterprise-operator",
-				},
+				MatchLabels: labels,
 			},
 		},
 	}
@@ -105,5 +106,3 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 	}
 	return nil
 }
-
-func ptrBool(b bool) *bool { return &b }

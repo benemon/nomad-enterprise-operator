@@ -19,6 +19,7 @@ package phases
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -51,6 +53,37 @@ const (
 func BootstrapSecretName(clusterName string) string {
 	return clusterName + "-acl-bootstrap"
 }
+
+// TLSSecretName returns the operator-owned name of the server TLS
+// Secret for a cluster: `<cluster>-tls`. Single definition (neo-08p) —
+// the name is consumed by the certificate phase (writer), the
+// StatefulSet mount, checksum inputs, and both controllers' Nomad
+// client construction, which must all agree.
+func TLSSecretName(clusterName string) string {
+	return clusterName + "-tls"
+}
+
+// OperatorStatusName returns the shared deterministic name of the
+// operator-status credential: the Nomad ACL policy, the token, and the
+// Kubernetes Secret all use `<cluster>-operator-status` (ADR 0003).
+func OperatorStatusName(clusterName string) string {
+	return clusterName + "-operator-status"
+}
+
+// GossipSecretName returns the effective gossip key Secret name: the
+// user-provided spec.gossip.secretName, else the operator-owned
+// `<cluster>-gossip` default.
+func GossipSecretName(cluster *nomadv1alpha1.NomadCluster) string {
+	if cluster.Spec.Gossip.SecretName != "" {
+		return cluster.Spec.Gossip.SecretName
+	}
+	return cluster.Name + "-gossip"
+}
+
+// SecretKeySecretID is the data key under which a Nomad ACL token's
+// secret ID is stored in Kubernetes Secrets owned by this operator —
+// the pair of SecretKeyAccessorID.
+const SecretKeySecretID = "secret-id"
 
 // PhaseResult represents the outcome of a phase execution.
 type PhaseResult struct {
@@ -101,6 +134,15 @@ func RequeueWithReason(after time.Duration, reason, message string) PhaseResult 
 }
 
 // Error returns a failed result.
+// ErrorWithReason returns an error result carrying a specific Ready
+// reason (e.g. "LicenseSecretNotFound") instead of the generic
+// PhaseFailed — for failures with a user-actionable cause (neo-0zq).
+func ErrorWithReason(err error, reason, message string) PhaseResult {
+	r := Error(err, message)
+	r.Reason = reason
+	return r
+}
+
 func Error(err error, message string) PhaseResult {
 	return PhaseResult{
 		Error:   err,
@@ -115,6 +157,55 @@ type Phase interface {
 
 	// Execute performs the phase reconciliation.
 	Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult
+}
+
+// Pod security (neo-8xu): both workload families (Nomad servers,
+// snapshot agents) target the PSS "restricted" profile. The identity
+// fields are conditional on platform: on OpenShift the SCC injects
+// runAsUser/fsGroup from the namespace's allocated range and setting
+// them explicitly would fight it; on vanilla Kubernetes the Nomad image
+// has no USER directive, so runAsNonRoot needs an explicit non-root
+// UID, and fsGroup makes the PVCs writable by it.
+const nonRootUserID = int64(65532)
+
+// ImageRef returns the Nomad container image reference for the
+// cluster: `repository@digest` when a digest is pinned (neo-4xj,
+// digest takes precedence), else `repository:tag`. Single definition —
+// the StatefulSet and the snapshot-agent workloads must agree.
+func ImageRef(cluster *nomadv1alpha1.NomadCluster) string {
+	if cluster.Spec.Image.Digest != "" {
+		return cluster.Spec.Image.Repository + "@" + cluster.Spec.Image.Digest
+	}
+	return cluster.Spec.Image.Repository + ":" + cluster.Spec.Image.Tag
+}
+
+// PodSecurityContext returns the PSS-restricted pod-level context.
+func PodSecurityContext(openshift bool) *corev1.PodSecurityContext {
+	sc := &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr.To(true),
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+	if !openshift {
+		sc.RunAsUser = ptr.To(nonRootUserID)
+		sc.RunAsGroup = ptr.To(nonRootUserID)
+		sc.FSGroup = ptr.To(nonRootUserID)
+	}
+	return sc
+}
+
+// ContainerSecurityContext returns the PSS-restricted container-level
+// context. Root filesystem stays read-only — writable paths are
+// explicit mounts (data/audit PVCs, /tmp emptyDir).
+func ContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: ptr.To(false),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
 }
 
 // TimedExecute runs the phase and observes its wall-clock duration on
@@ -152,20 +243,15 @@ type PhaseContext struct {
 
 	// LeaderAddress is the cluster leader address from Nomad API (populated by ClusterStatusPhase).
 	LeaderAddress string
-	// ClusterHealthy indicates cluster health from Nomad API (populated by ClusterStatusPhase).
-	ClusterHealthy bool
-	// PeerCount is the number of peers from Nomad API (populated by ClusterStatusPhase).
-	PeerCount int
 
-	// License contains license information from Nomad API (populated by ClusterStatusPhase).
+	// License contains license information from Nomad API (populated by
+	// ClusterStatusPhase). nil on probe miss — the controller preserves
+	// the last-known status sub-field rather than clobbering it.
 	License *nomadv1alpha1.LicenseStatus
-	// LicenseError contains any error from fetching license info.
-	LicenseError error
 
-	// Autopilot contains autopilot health from Nomad API (populated by ClusterStatusPhase).
+	// Autopilot contains autopilot health from Nomad API (populated by
+	// ClusterStatusPhase). nil on probe miss, same semantics as License.
 	Autopilot *nomadv1alpha1.AutopilotStatus
-	// AutopilotError contains any error from fetching autopilot info.
-	AutopilotError error
 
 	// NomadVersion is the agent-reported version from /v1/agent/self
 	// (populated by ClusterStatusPhase via C7 probe). Empty when the
@@ -207,9 +293,10 @@ func GetSelectorLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
 	}
 }
 
-// BuildClientConfig assembles a nomad.ClientConfig for the given cluster.
-// Since verify_https_client is off, only the CA cert is needed for TLS verification.
-func (pc *PhaseContext) BuildClientConfig(cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string) nomad.ClientConfig {
+// BuildClientConfig assembles a nomad.ClientConfig from the phase
+// context. Since verify_https_client is off, only the CA cert is needed
+// for TLS verification; callers set cfg.Address themselves.
+func (pc *PhaseContext) BuildClientConfig(timeout time.Duration, token string) nomad.ClientConfig {
 	return nomad.ClientConfig{
 		Token:      token,
 		TLSEnabled: true,
@@ -232,6 +319,43 @@ func (pc *PhaseContext) NewNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, 
 		return nil, err
 	}
 	return metrics.InstrumentNomadAPI(c), nil
+}
+
+// runNomadWithFallback builds a Nomad API client for the cluster's
+// internal Service address and runs fn against it. If fn fails with a
+// network error and a LoadBalancer address is known, the client is
+// rebuilt for the LB address and fn re-run ONCE (neo-6al — the shared
+// core of the previously hand-rolled per-site fallbacks). fn must be
+// idempotent against the Nomad API; every caller is (policy upserts,
+// reads, and token creation retried only when the first attempt never
+// reached the server). Not used by executeBootstrap (bespoke per-address
+// error guidance for the one-shot critical path), ClusterStatusPhase's
+// createNomadClient (probe-and-keep shape), or the snapshot controller's
+// best-effort cleanup (per-op log-and-continue semantics).
+func (pc *PhaseContext) runNomadWithFallback(cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string, fn func(nomad.NomadAPI) error) error {
+	cfg := pc.BuildClientConfig(timeout, token)
+	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
+	nomadClient, err := pc.NewNomadClient(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create Nomad client: %w", err)
+	}
+
+	err = fn(nomadClient)
+	if err == nil || !nomad.IsNetworkError(err) {
+		return err
+	}
+
+	loadBalancerAddress := nomad.LoadBalancerAddress(pc.AdvertiseAddress, true)
+	if loadBalancerAddress == "" {
+		return err
+	}
+	cfg.Address = loadBalancerAddress
+	pc.Log.V(1).Info("Internal service not reachable, retrying via LoadBalancer", "address", loadBalancerAddress)
+	nomadClient, cerr := pc.NewNomadClient(cfg)
+	if cerr != nil {
+		return fmt.Errorf("failed to create Nomad client for LoadBalancer: %w", cerr)
+	}
+	return fn(nomadClient)
 }
 
 // CheckPodsReady returns true if at least one pod matching the cluster's selector labels is ready.

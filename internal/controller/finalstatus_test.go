@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"strings"
 	"testing"
 	"time"
@@ -78,18 +80,11 @@ func condition(cluster *nomadv1alpha1.NomadCluster, condType string) *metav1.Con
 // TestReadyTruePrecondition covers C9 / AC-2.5.5: Ready=True requires
 // StatefulSet at desired replicas AND a valid license AND healthy
 // autopilot — and when it holds, status.conditions contains EXACTLY one
-// entry (AC-2.5.4), with legacy pre-C9 types pruned. Also pins the
-// one-shot InitialReconcileComplete Event debounce.
+// entry (AC-2.5.4). Also pins the one-shot InitialReconcileComplete
+// Event debounce.
 func TestReadyTruePrecondition(t *testing.T) {
 	cluster := newTestCluster("fs-ns", "fs-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
-	// Simulate a cluster upgraded from a pre-C9 operator: legacy
-	// condition types linger on status until pruned.
-	legacyStamp := metav1.NewTime(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
-	cluster.Status.Conditions = []metav1.Condition{
-		{Type: "LicenseValid", Status: metav1.ConditionTrue, Reason: "LicenseActive", LastTransitionTime: legacyStamp},
-		{Type: "StatefulSetReady", Status: metav1.ConditionTrue, Reason: "AllReplicasReady", LastTransitionTime: legacyStamp},
-	}
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster", Namespace: "fs-ns"},
@@ -185,10 +180,39 @@ func TestReadyReasonMapping(t *testing.T) {
 		name       string
 		sts        *appsv1.StatefulSet // nil = no StatefulSet
 		phaseCtx   *phases.PhaseContext
+		preStatus  func(*nomadv1alpha1.NomadCluster) // seed status before the call
 		wantStatus metav1.ConditionStatus
 		wantReason string
 		wantPhase  nomadv1alpha1.ClusterPhase
 	}{
+		{
+			// neo-ru9: an expired CA names the cause even though it also
+			// breaks replicas — precedence over WaitingForReplicas.
+			name:     "expired CA with no ready replicas -> CAExpired, not WaitingForReplicas",
+			sts:      nil,
+			phaseCtx: &phases.PhaseContext{},
+			preStatus: func(c *nomadv1alpha1.NomadCluster) {
+				c.Status.CertificateAuthority = &nomadv1alpha1.CertificateAuthorityStatus{
+					ExpiryTime: time.Now().Add(-time.Hour).Format(time.RFC3339),
+				}
+			},
+			wantStatus: metav1.ConditionFalse,
+			wantReason: "CAExpired",
+			wantPhase:  nomadv1alpha1.ClusterPhaseRunning,
+		},
+		{
+			name:     "unexpired CA does not trip CAExpired",
+			sts:      readySTS(),
+			phaseCtx: &phases.PhaseContext{},
+			preStatus: func(c *nomadv1alpha1.NomadCluster) {
+				c.Status.CertificateAuthority = &nomadv1alpha1.CertificateAuthorityStatus{
+					ExpiryTime: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+				}
+			},
+			wantStatus: metav1.ConditionTrue,
+			wantReason: "ClusterReady",
+			wantPhase:  nomadv1alpha1.ClusterPhaseRunning,
+		},
 		{
 			name:       "no ready replicas -> WaitingForReplicas",
 			sts:        nil,
@@ -221,7 +245,7 @@ func TestReadyReasonMapping(t *testing.T) {
 		{
 			name:       "unknown probe state does not fail Ready",
 			sts:        readySTS(),
-			phaseCtx:   &phases.PhaseContext{LicenseError: context.DeadlineExceeded},
+			phaseCtx:   &phases.PhaseContext{}, // nil License/Autopilot = probe miss
 			wantStatus: metav1.ConditionTrue,
 			wantReason: "ClusterReady",
 			wantPhase:  nomadv1alpha1.ClusterPhaseRunning,
@@ -237,6 +261,9 @@ func TestReadyReasonMapping(t *testing.T) {
 			}
 			r, _ := newFinalStatusFixture(t, objs...)
 
+			if tc.preStatus != nil {
+				tc.preStatus(cluster)
+			}
 			if err := r.updateFinalStatus(context.Background(), cluster, tc.phaseCtx, cluster.DeepCopy()); err != nil {
 				t.Fatalf("updateFinalStatus() error = %v", err)
 			}
@@ -297,5 +324,71 @@ func TestFindClustersReferencingSecret(t *testing.T) {
 	}}
 	if n := requestsFor(owned); n != 0 {
 		t.Errorf("owned secret mapped to %d clusters, want 0", n)
+	}
+}
+
+// TestLicenseSecretNotFoundReason covers neo-0zq (the C6f replacement):
+// a CR referencing a missing license Secret is ACCEPTED at admission
+// (cross-resource lookups are racy there) and surfaces the dedicated
+// LicenseSecretNotFound Ready-reason with a Warning Event on the next
+// reconcile; when the Secret appears, the reason clears. The D5 Secret
+// watch (TestFindClustersReferencingSecret) provides the trigger.
+func TestLicenseSecretNotFoundReason(t *testing.T) {
+	cluster := newTestCluster("lsnf-ns", "lsnf")
+	cluster.Spec.License.SecretName = "does-not-exist-yet"
+
+	r, recorder := newFinalStatusFixture(t, cluster)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "lsnf", Namespace: "lsnf-ns"}}
+	// First reconcile adds the finalizer; second runs the phases.
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(context.Background(), req); err != nil && i == 0 {
+			t.Fatalf("finalizer reconcile error = %v", err)
+		}
+	}
+
+	got := &nomadv1alpha1.NomadCluster{}
+	if err := r.Get(context.Background(), req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason != "LicenseSecretNotFound" {
+		t.Fatalf("Ready reason = %+v, want LicenseSecretNotFound", ready)
+	}
+	if !strings.Contains(ready.Message, "does-not-exist-yet") {
+		t.Errorf("message should name the missing Secret: %q", ready.Message)
+	}
+
+	// Exactly one Warning Event on the transition; a repeat reconcile
+	// in the same state must not re-emit.
+	if _, err := r.Reconcile(context.Background(), req); err == nil {
+		t.Fatal("reconcile with missing secret should still error")
+	}
+	var events []string
+	for len(recorder.Events) > 0 {
+		e := <-recorder.Events
+		if strings.Contains(e, "LicenseSecretNotFound") {
+			events = append(events, e)
+		}
+	}
+	if len(events) != 1 {
+		t.Fatalf("LicenseSecretNotFound events = %d, want exactly 1 (transition-only)", len(events))
+	}
+
+	// Secret appears -> the reason clears on the next reconcile.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "does-not-exist-yet", Namespace: "lsnf-ns"},
+		Data:       map[string][]byte{"license": []byte("lic")},
+	}
+	if err := r.Create(context.Background(), secret); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = r.Reconcile(context.Background(), req)
+	if err := r.Get(context.Background(), req.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	ready = meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	if ready == nil || ready.Reason == "LicenseSecretNotFound" {
+		t.Fatalf("reason not cleared after Secret creation: %+v", ready)
 	}
 }

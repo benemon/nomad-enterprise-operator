@@ -52,7 +52,7 @@ func (dummyPhase) Execute(context.Context, *nomadv1alpha1.NomadCluster) PhaseRes
 // observes the phase duration histogram with cluster/namespace/phase
 // labels.
 func TestPhaseDurationRecorded(t *testing.T) {
-	cluster := newTestCluster("d4a-cluster", "d4a-ns")
+	cluster := newTestCluster("d4a-ns", "d4a-cluster")
 
 	TimedExecute(context.Background(), dummyPhase{}, cluster)
 
@@ -83,7 +83,7 @@ func TestPhaseDurationRecorded(t *testing.T) {
 // TestCertExpiryGaugeSet covers D4c / AC-8.1.3: the CA and server cert
 // expiry gauges carry the certificates' NotAfter as Unix seconds.
 func TestCertExpiryGaugeSet(t *testing.T) {
-	cluster := newTestCluster("d4c-cluster", "d4c-ns")
+	cluster := newTestCluster("d4c-ns", "d4c-cluster")
 	phase := &CertificatePhase{PhaseContext: &PhaseContext{
 		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
 		Scheme: scheme.Scheme,
@@ -108,7 +108,7 @@ func TestCertExpiryGaugeSet(t *testing.T) {
 
 	// Server path: no existing secret, so a fresh cert is issued and the
 	// gauge must track it.
-	if result := phase.ensureServerCertificate(context.Background(), cluster, ca); result.Error != nil {
+	if result := phase.ensureServerCertificate(context.Background(), cluster, ca, ca.CACertPEM); result.Error != nil {
 		t.Fatalf("ensureServerCertificate() error = %v", result.Error)
 	}
 	serverExpiry := testutil.ToFloat64(metrics.CertExpiry.WithLabelValues("d4c-cluster", "d4c-ns", "server"))
@@ -127,7 +127,7 @@ func TestLicenseAndVersionGauges(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "d4d-cluster-0",
 			Namespace: "d4d-ns",
-			Labels:    GetSelectorLabels(newTestCluster("d4d-cluster", "d4d-ns")),
+			Labels:    GetSelectorLabels(newTestCluster("d4d-ns", "d4d-cluster")),
 		},
 		Status: corev1.PodStatus{
 			Phase:      corev1.PodRunning,
@@ -137,13 +137,11 @@ func TestLicenseAndVersionGauges(t *testing.T) {
 
 	runWith := func(t *testing.T, version string) {
 		t.Helper()
-		cluster := newTestCluster("d4d-cluster", "d4d-ns")
+		cluster := newTestCluster("d4d-ns", "d4d-cluster")
 		cluster.Spec.Replicas = 1
 
 		mockNomad := mocks.NewMockNomadAPI(t)
 		mockNomad.EXPECT().GetLeader().Return("10.0.0.1:4647", nil)
-		mockNomad.EXPECT().CheckHealth().Return(&nomad.HealthResult{Server: nomad.HealthStatus{OK: true}}, nil)
-		mockNomad.EXPECT().GetPeers().Return([]string{"10.0.0.1:4647"}, nil)
 		mockNomad.EXPECT().GetLicense(mock.Anything, mock.Anything).
 			Return(&nomad.LicenseResult{LicenseID: "lic-1", ExpirationTime: expiry.Format(time.RFC3339)}, nil)
 		mockNomad.EXPECT().GetAutopilotHealth(mock.Anything, mock.Anything).
@@ -206,7 +204,7 @@ func TestLicenseAndVersionGauges(t *testing.T) {
 // externally" outcome does not.
 func TestACLBootstrapFailureCounted(t *testing.T) {
 	newFixture := func(name string, bootstrapErr error) (*ACLBootstrapPhase, *nomadv1alpha1.NomadCluster) {
-		cluster := newTestCluster(name, "d4e-ns")
+		cluster := newTestCluster("d4e-ns", name)
 		cluster.Spec.Server.ACL.Enabled = true
 		readyPod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{

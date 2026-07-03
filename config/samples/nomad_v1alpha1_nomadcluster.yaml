@@ -9,7 +9,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.0-ent"
+    tag: "2.0.3-ent"
     # pullPolicy: IfNotPresent  # default Always; override for air-gapped/digest-pinned workflows
   license:
     # Option 1: Reference an existing secret.

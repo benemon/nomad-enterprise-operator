@@ -44,7 +44,7 @@ func TestClusterStatusPhase_UsesOperatorStatusToken(t *testing.T) {
 		},
 	}
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 	cluster.Status.OperatorStatusSecretName = "test-cluster-operator-status"
 
@@ -82,7 +82,7 @@ func TestClusterStatusPhase_FallsBackToBootstrapToken(t *testing.T) {
 		},
 	}
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 	// OperatorStatusSecretName is empty — should fall back to bootstrap
 
@@ -140,10 +140,6 @@ func TestNomadVersionProbed(t *testing.T) {
 	// realistic shapes are returned.
 	stubNonVersionCalls := func(m *mocks.MockNomadAPI) {
 		m.EXPECT().GetLeader().Return("10.0.0.1:4647", nil)
-		m.EXPECT().CheckHealth().Return(&nomad.HealthResult{
-			Server: nomad.HealthStatus{OK: true},
-		}, nil)
-		m.EXPECT().GetPeers().Return([]string{"10.0.0.1:4647"}, nil)
 		m.EXPECT().GetLicense(mock.Anything, mock.Anything).
 			Return(&nomad.LicenseResult{LicenseID: "lic-1"}, nil)
 		m.EXPECT().GetAutopilotHealth(mock.Anything, mock.Anything).
@@ -191,7 +187,7 @@ func TestNomadVersionProbed(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cluster := newTestCluster("test-cluster", "test-ns")
+			cluster := newTestCluster("test-ns", "test-cluster")
 			cluster.Spec.Replicas = 1
 
 			fakeClient := fake.NewClientBuilder().

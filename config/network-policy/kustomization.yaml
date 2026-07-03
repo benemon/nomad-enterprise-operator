@@ -1,2 +1,3 @@
 resources:
+- deny-all-ingress.yaml
 - allow-metrics-traffic.yaml

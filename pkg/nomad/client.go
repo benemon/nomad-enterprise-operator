@@ -186,6 +186,38 @@ type ACLTokenResult struct {
 	ExpirationTime *time.Time
 }
 
+// CreateManagementACLToken creates a management-type ACL token (C4 /
+// neo-ikf). Nomad — unlike Consul — has NO ACL-management policy
+// grammar: there is no `acl { policy = "write" }` rule block, and only
+// management-type tokens can create or modify policies and tokens
+// (verified empirically; a policy with an `acl` key is rejected with
+// "Invalid or duplicate policy keys"). The operator's day-2 management
+// token is therefore a dedicated management token: same capabilities as
+// bootstrap, but independently revocable and rotatable while the
+// bootstrap token stays sealed.
+func (c *Client) CreateManagementACLToken(authToken, name string) (*ACLTokenResult, error) {
+	token := &nomadapi.ACLToken{
+		Name: name,
+		Type: "management",
+	}
+
+	result, _, err := c.api.ACLTokens().Create(token, &nomadapi.WriteOptions{
+		AuthToken: authToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create management ACL token: %w", err)
+	}
+
+	return &ACLTokenResult{
+		AccessorID:     result.AccessorID,
+		SecretID:       result.SecretID,
+		Name:           result.Name,
+		Type:           result.Type,
+		CreateTime:     result.CreateTime,
+		ExpirationTime: result.ExpirationTime,
+	}, nil
+}
+
 // CreateACLTokenWithPolicies creates a new client ACL token bound to the named policies.
 // Requires a management token for authentication.
 func (c *Client) CreateACLTokenWithPolicies(authToken, name string, policies []string) (*ACLTokenResult, error) {
@@ -269,30 +301,6 @@ func (c *Client) GetLeader() (string, error) {
 		return "", fmt.Errorf("failed to get leader: %w", err)
 	}
 	return leader, nil
-}
-
-// GetPeers returns the list of Raft peer addresses.
-func (c *Client) GetPeers() ([]string, error) {
-	peers, err := c.api.Status().Peers()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get peers: %w", err)
-	}
-	return peers, nil
-}
-
-// CheckHealth performs a health check against the Nomad server.
-func (c *Client) CheckHealth() (*HealthResult, error) {
-	health, err := c.api.Agent().Health()
-	if err != nil {
-		return nil, fmt.Errorf("health check failed: %w", err)
-	}
-
-	return &HealthResult{
-		Server: HealthStatus{
-			OK:      health.Server.Ok,
-			Message: health.Server.Message,
-		},
-	}, nil
 }
 
 // GetLicense retrieves the current Nomad Enterprise license information.
@@ -402,17 +410,6 @@ type ACLBootstrapResult struct {
 	ExpirationTime *time.Time
 }
 
-// HealthResult contains health check results.
-type HealthResult struct {
-	Server HealthStatus
-}
-
-// HealthStatus represents a component's health status.
-type HealthStatus struct {
-	OK      bool
-	Message string
-}
-
 // ErrAlreadyBootstrapped is returned when ACL bootstrap has already been performed.
 var ErrAlreadyBootstrapped = errors.New("ACL already bootstrapped")
 
@@ -446,8 +443,6 @@ type RaftPeer struct {
 	ID      string
 	Node    string
 	Address string
-	Leader  bool
-	Voter   bool
 }
 
 // RaftListPeers queries the current Raft configuration. Requires a
@@ -467,8 +462,6 @@ func (c *Client) RaftListPeers(ctx context.Context, token string) ([]*RaftPeer, 
 			ID:      s.ID,
 			Node:    s.Node,
 			Address: s.Address,
-			Leader:  s.Leader,
-			Voter:   s.Voter,
 		})
 	}
 	return peers, nil
@@ -524,22 +517,6 @@ operator {
 
 agent {
   policy = "read"
-}
-`
-
-// OperatorManagementPolicyRules is the least-privilege write policy for
-// the operator's long-lived management token (C4 / AC-2.4.6): ACL
-// policy/token management (C2 drift reconciliation, derived-token
-// provisioning) plus operator writes (D2 Raft peer removal). Exactly
-// these two blocks — AC-2.4.6 pins the text; extending it requires
-// updating that AC and TestManagementTokenPolicyText.
-const OperatorManagementPolicyRules = `
-acl {
-  policy = "write"
-}
-
-operator {
-  policy = "write"
 }
 `
 

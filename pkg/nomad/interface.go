@@ -34,14 +34,15 @@ type NomadAPI interface {
 	// operator-owned policies (C2 / AC-2.5.1–3).
 	GetACLPolicy(authToken, name string) (*ACLPolicyResult, error)
 	CreateACLTokenWithPolicies(authToken, name string, policies []string) (*ACLTokenResult, error)
+	// CreateManagementACLToken mints a management-type token — Nomad's
+	// only mechanism for ACL-write capability (C4; see the Client method).
+	CreateManagementACLToken(authToken, name string) (*ACLTokenResult, error)
 	GetACLToken(authToken, accessorID string) (*ACLTokenResult, error)
 	DeleteACLToken(authToken, accessorID string) error
 	DeleteACLPolicy(authToken, name string) error
 
 	// Cluster status
 	GetLeader() (string, error)
-	GetPeers() ([]string, error)
-	CheckHealth() (*HealthResult, error)
 	GetLicense(ctx context.Context, token string) (*LicenseResult, error)
 	GetAutopilotHealth(ctx context.Context, token string) (*AutopilotHealthResult, error)
 	// AgentSelf queries /v1/agent/self for agent-reported runtime info

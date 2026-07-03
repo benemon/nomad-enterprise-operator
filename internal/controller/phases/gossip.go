@@ -85,7 +85,7 @@ func (p *GossipPhase) readExternalSecret(ctx context.Context, cluster *nomadv1al
 }
 
 func (p *GossipPhase) ensureOperatorManagedSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretKey string) PhaseResult {
-	secretName := cluster.Name + "-gossip"
+	secretName := GossipSecretName(cluster)
 
 	// Check if operator-managed secret already exists (preserve across upgrades)
 	existing := &corev1.Secret{}

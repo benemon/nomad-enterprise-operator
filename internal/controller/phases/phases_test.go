@@ -52,7 +52,11 @@ func newTestPhaseContext(objs ...runtime.Object) *PhaseContext {
 	}
 }
 
-func newTestCluster(name, namespace string) *nomadv1alpha1.NomadCluster {
+// newTestCluster's parameter order matches the sibling helper in
+// internal/controller and client.ObjectKey convention: namespace first
+// (neo-t1l — the two packages previously disagreed, invisibly to the
+// compiler since both params are strings).
+func newTestCluster(namespace, name string) *nomadv1alpha1.NomadCluster {
 	return &nomadv1alpha1.NomadCluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -116,7 +120,7 @@ func (e *testError) Error() string {
 // =============================================================================
 
 func TestGetLabels(t *testing.T) {
-	cluster := newTestCluster("my-cluster", "my-ns")
+	cluster := newTestCluster("my-ns", "my-cluster")
 	labels := GetLabels(cluster)
 
 	expected := map[string]string{
@@ -134,7 +138,7 @@ func TestGetLabels(t *testing.T) {
 }
 
 func TestGetSelectorLabels(t *testing.T) {
-	cluster := newTestCluster("my-cluster", "my-ns")
+	cluster := newTestCluster("my-ns", "my-cluster")
 	labels := GetSelectorLabels(cluster)
 
 	if labels["app.kubernetes.io/name"] != "nomad" {
@@ -174,7 +178,7 @@ func TestGossipPhase_ExternalSecret(t *testing.T) {
 	ctx := newTestPhaseContext(secret)
 	phase := NewGossipPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Gossip.SecretName = "external-gossip"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -191,7 +195,7 @@ func TestGossipPhase_ExternalSecretNotFound(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewGossipPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Gossip.SecretName = "missing-secret"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -215,7 +219,7 @@ func TestGossipPhase_ExternalSecretMissingKey(t *testing.T) {
 	ctx := newTestPhaseContext(secret)
 	phase := NewGossipPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Gossip.SecretName = "external-gossip"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -229,7 +233,7 @@ func TestGossipPhase_AutoGenerate(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewGossipPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	// No gossip.secretName specified - should auto-generate
 
 	result := phase.Execute(context.Background(), cluster)
@@ -270,7 +274,7 @@ func TestGossipPhase_PreserveExisting(t *testing.T) {
 	ctx := newTestPhaseContext(existingSecret)
 	phase := NewGossipPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -299,7 +303,7 @@ func TestGossipPhase_ExternalSecretFixedKey(t *testing.T) {
 	ctx := newTestPhaseContext(secret)
 	phase := NewGossipPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Gossip.SecretName = "custom-gossip"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -327,7 +331,7 @@ func TestServicesPhase_CreatesAllServices(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewServicesPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -379,7 +383,7 @@ func TestServicesPhase_LoadBalancerIP(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewServicesPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Services.External.LoadBalancerIP = "10.0.0.100"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -403,7 +407,7 @@ func TestServicesPhase_NodePortType(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewServicesPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Services.External.Type = corev1.ServiceTypeNodePort
 
 	result := phase.Execute(context.Background(), cluster)
@@ -427,7 +431,7 @@ func TestServicesPhase_Annotations(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewServicesPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Services.External.Annotations = map[string]string{
 		"service.beta.kubernetes.io/aws-load-balancer-internal": testAnnotationTrue,
 	}
@@ -453,7 +457,7 @@ func TestServicesPhase_Idempotent(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewServicesPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	// First execution
 	result := phase.Execute(context.Background(), cluster)
@@ -483,7 +487,7 @@ func TestAdvertisePhase_ConfiguredIP(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewAdvertisePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Services.External.LoadBalancerIP = "192.168.1.100"
 
 	result := phase.Execute(context.Background(), cluster)
@@ -514,7 +518,7 @@ func TestAdvertisePhase_WaitForLoadBalancer(t *testing.T) {
 	ctx := newTestPhaseContext(svc)
 	phase := NewAdvertisePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	// No LoadBalancerIP configured, must wait for assignment
 
 	result := phase.Execute(context.Background(), cluster)
@@ -548,7 +552,7 @@ func TestAdvertisePhase_LoadBalancerIP(t *testing.T) {
 	ctx := newTestPhaseContext(svc)
 	phase := NewAdvertisePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -581,7 +585,7 @@ func TestAdvertisePhase_LoadBalancerHostname(t *testing.T) {
 	ctx := newTestPhaseContext(svc)
 	phase := NewAdvertisePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -597,7 +601,7 @@ func TestAdvertisePhase_ServiceNotFound(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewAdvertisePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -631,7 +635,7 @@ func TestSecretsPhase_LicenseSecretValid(t *testing.T) {
 	ctx := newTestPhaseContext(licenseSecret)
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -644,7 +648,7 @@ func TestSecretsPhase_LicenseSecretNotFound(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -667,7 +671,7 @@ func TestSecretsPhase_LicenseSecretMissingKey(t *testing.T) {
 	ctx := newTestPhaseContext(licenseSecret)
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -693,7 +697,7 @@ func TestSecretsPhase_FixedLicenseKey(t *testing.T) {
 	ctx := newTestPhaseContext(licenseSecret)
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -710,7 +714,7 @@ func TestCertificatePhase_GeneratesCA(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewCertificatePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -753,7 +757,7 @@ func TestCertificatePhase_UsesUserCA(t *testing.T) {
 	ctx := newTestPhaseContext(caSecret)
 	phase := NewCertificatePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
 		SecretName: "user-ca",
@@ -786,7 +790,7 @@ func TestCertificatePhase_UserCANotFound(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewCertificatePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	cluster.Spec.Server.TLS.CA = &nomadv1alpha1.CASpec{
 		SecretName: "nonexistent-ca",
@@ -803,7 +807,7 @@ func TestCertificatePhase_PopulatesPhaseContext(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewCertificatePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -819,7 +823,7 @@ func TestCertificatePhase_CreatesCABundle(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewCertificatePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -859,7 +863,7 @@ func TestSecretsPhase_InlineLicense(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.License.SecretName = ""
 	cluster.Spec.License.Value = "inline-license-content"
 
@@ -904,7 +908,7 @@ func TestSecretsPhase_InlineLicense_Update(t *testing.T) {
 	ctx := newTestPhaseContext(existingSecret)
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.License.SecretName = ""
 	cluster.Spec.License.Value = "new-license-value"
 
@@ -932,7 +936,7 @@ func TestSecretsPhase_NoLicenseConfigured(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewSecretsPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.License.SecretName = ""
 	cluster.Spec.License.Value = ""
 
@@ -1019,9 +1023,9 @@ func TestGetGossipSecretName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := getGossipSecretName(tt.cluster)
+			got := GossipSecretName(tt.cluster)
 			if got != tt.expected {
-				t.Errorf("getGossipSecretName() = %q, want %q", got, tt.expected)
+				t.Errorf("GossipSecretName() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
@@ -1042,7 +1046,7 @@ func TestRoutePhase_Disabled(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewRoutePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.OpenShift.Enabled = false
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1059,7 +1063,7 @@ func TestRoutePhase_OpenShiftEnabledRouteDisabled(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewRoutePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.OpenShift.Enabled = true
 	cluster.Spec.OpenShift.Route.Enabled = false
 
@@ -1075,7 +1079,7 @@ func TestRoutePhase_AlwaysReencrypt(t *testing.T) {
 	ctx.CACert = []byte("test-ca-cert")
 	phase := NewRoutePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.OpenShift.Enabled = true
 	cluster.Spec.OpenShift.Route.Enabled = true
 
@@ -1111,7 +1115,7 @@ func TestRoutePhase_CustomCertificate(t *testing.T) {
 	ctx.CACert = []byte("test-ca-cert")
 	phase := NewRoutePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.OpenShift.Enabled = true
 	cluster.Spec.OpenShift.Route.Enabled = true
 	cluster.Spec.OpenShift.Route.TLS.CertificateSecretName = "custom-cert"
@@ -1143,7 +1147,7 @@ func TestRoutePhase_NoCertificateClearsRouteFields(t *testing.T) {
 	ctx.CACert = []byte("test-ca-cert")
 	phase := NewRoutePhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.OpenShift.Enabled = true
 	cluster.Spec.OpenShift.Route.Enabled = true
 	// CertificateSecretName is empty — Route should have no Certificate/Key
@@ -1176,7 +1180,7 @@ func TestACLBootstrapPhase_Disabled(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewACLBootstrapPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = false
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1204,7 +1208,7 @@ func TestACLBootstrapPhase_AlreadyBootstrapped(t *testing.T) {
 	ctx := newTestPhaseContext(bootstrapSecret)
 	phase := NewACLBootstrapPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1233,7 +1237,7 @@ func TestACLBootstrapPhase_OperatorOwnedSecretName(t *testing.T) {
 	ctx := newTestPhaseContext(bootstrapSecret)
 	phase := NewACLBootstrapPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1250,7 +1254,7 @@ func TestACLBootstrapPhase_WaitForPods(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewACLBootstrapPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
 
 	result := phase.Execute(context.Background(), cluster)
@@ -1279,7 +1283,7 @@ func TestServiceAccountPhase_Creates(t *testing.T) {
 	ctx := newTestPhaseContext()
 	phase := NewServiceAccountPhase(ctx)
 
-	cluster := newTestCluster("test-cluster", "test-ns")
+	cluster := newTestCluster("test-ns", "test-cluster")
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -1363,5 +1367,122 @@ func TestMapsEqual(t *testing.T) {
 				t.Errorf("mapsEqual() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSecretsPhase_InlineLicenseValue covers neo-9bv: spec.license.value
+// creates an operator-owned managed Secret (with ownerReference and the
+// operator-owned "license" key), updates it when the inline value
+// changes, and leaves it untouched (no write) when it has not.
+func TestSecretsPhase_InlineLicenseValue(t *testing.T) {
+	cluster := newTestCluster("test-ns", "inline")
+	cluster.Spec.License.SecretName = ""
+	cluster.Spec.License.Value = "license-v1"
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+	phase := NewSecretsPhase(&PhaseContext{
+		Client: fakeClient,
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	})
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	secret := &corev1.Secret{}
+	key := types.NamespacedName{Name: "inline-license", Namespace: "test-ns"}
+	if err := fakeClient.Get(context.Background(), key, secret); err != nil {
+		t.Fatalf("managed license secret not created: %v", err)
+	}
+	if got := string(secret.Data["license"]); got != "license-v1" {
+		t.Errorf("license data = %q, want license-v1", got)
+	}
+	if len(secret.OwnerReferences) == 0 {
+		t.Error("managed secret missing ownerReference")
+	}
+	if secret.Annotations["nomad.hashicorp.com/managed"] != "true" {
+		t.Error("managed secret missing managed annotation")
+	}
+
+	// Steady state: same value — no write (resourceVersion stable).
+	before := secret.ResourceVersion
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("Execute() steady-state error = %v", result.Error)
+	}
+	if err := fakeClient.Get(context.Background(), key, secret); err != nil {
+		t.Fatal(err)
+	}
+	if secret.ResourceVersion != before {
+		t.Errorf("managed secret rewritten without a value change (rv %s -> %s)", before, secret.ResourceVersion)
+	}
+
+	// Value changed — managed secret updated in place.
+	cluster.Spec.License.Value = "license-v2"
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("Execute() after value change error = %v", result.Error)
+	}
+	if err := fakeClient.Get(context.Background(), key, secret); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(secret.Data["license"]); got != "license-v2" {
+		t.Errorf("license data after change = %q, want license-v2", got)
+	}
+}
+
+// TestStatefulSetUsesInlineLicenseSecret covers the wiring half of
+// neo-9bv: with an inline license, the StatefulSet references the
+// MANAGED secret name, not spec.license.secretName.
+func TestStatefulSetUsesInlineLicenseSecret(t *testing.T) {
+	cluster := newTestCluster("test-ns", "inline")
+	cluster.Spec.License.SecretName = ""
+	cluster.Spec.License.Value = "license-v1"
+
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	sts := phase.buildStatefulSet(context.Background(), cluster)
+
+	found := false
+	for _, v := range sts.Spec.Template.Spec.Volumes {
+		if v.Secret != nil && v.Secret.SecretName == "inline-license" {
+			found = true
+		}
+	}
+	for _, c := range sts.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
+				e.ValueFrom.SecretKeyRef.Name == "inline-license" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("StatefulSet does not reference the managed inline-license secret")
+	}
+}
+
+// TestAdvertisePhaseNodePort covers neo-8yf: a NodePort cluster must
+// pass the Advertise phase immediately — before the fix it requeued on
+// a LoadBalancer ingress that can never appear, blocking every later
+// phase forever.
+func TestAdvertisePhaseNodePort(t *testing.T) {
+	cluster := newTestCluster("adv-ns", "adv")
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeNodePort
+
+	phase := NewAdvertisePhase(&PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	})
+
+	result := phase.Execute(context.Background(), cluster)
+	if result.Error != nil || result.Requeue {
+		t.Fatalf("NodePort Advertise = %+v, want immediate OK", result)
+	}
+	if phase.AdvertiseAddress != "" {
+		t.Errorf("advertise address = %q, want empty for NodePort", phase.AdvertiseAddress)
 	}
 }

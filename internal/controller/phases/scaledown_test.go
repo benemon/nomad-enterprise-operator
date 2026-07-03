@@ -150,7 +150,7 @@ type scaleDownFixture struct {
 func newScaleDownFixture(t *testing.T, currentSTSReplicas, specReplicas int32) *scaleDownFixture {
 	t.Helper()
 
-	cluster := newTestCluster("nomad", "ns")
+	cluster := newTestCluster("ns", "nomad")
 	cluster.Spec.Replicas = specReplicas
 	// ACL disabled so the phase doesn't need a bootstrap Secret in
 	// the fake client. The token branch is exercised by
@@ -223,7 +223,6 @@ func peersAtReplicas(replicas int32) []*nomad.RaftPeer {
 			ID:      idForOrdinal(int(i)),
 			Node:    nodeForOrdinal(int(i)),
 			Address: "10.0.0.1:4647", // shared LB IP — same for every replica
-			Voter:   true,
 		})
 	}
 	return peers
@@ -523,7 +522,7 @@ func TestScaleDown_MetricLifecycle(t *testing.T) {
 	// other tests (cluster name stays "nomad" so the synthetic peers
 	// from peersAtReplicas — which use "nomad-N" — map to the right
 	// ordinals).
-	cluster := newTestCluster("nomad", "metric-ns")
+	cluster := newTestCluster("metric-ns", "nomad")
 	cluster.Spec.Replicas = 3
 	cluster.Spec.Server.ACL.Enabled = false
 

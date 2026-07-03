@@ -141,7 +141,17 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
+	# -timeout raised from the go-test default 10m: the suite includes
+	# deliberate slow paths (Job retry backoff in the snapshot failure
+	# spec, quorum reformation in the scale-up spec).
+	# GINKGO_SKIP selects the lane (neo-g1o): the PR lane skips the slow
+	# containers (scale-down, version upgrade, leader failover); the
+	# nightly lane runs everything. Empty = full suite.
+	# GINKGO_FOCUS runs a single container (matrix lanes focus the
+	# upgrade container per version pair); UPGRADE_FROM/UPGRADE_TO
+	# select the pair. Empty values are no-ops.
+	KIND_CLUSTER=$(KIND_CLUSTER) UPGRADE_FROM=$(UPGRADE_FROM) UPGRADE_TO=$(UPGRADE_TO) \
+		go test ./test/e2e/ -v -ginkgo.v -ginkgo.skip="$(GINKGO_SKIP)" -ginkgo.focus="$(GINKGO_FOCUS)" -timeout=45m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -201,14 +211,20 @@ docker-push: ## Push docker image with the manager.
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+# Supported release architectures (neo-14p): amd64 + arm64 only.
+PLATFORMS ?= linux/amd64,linux/arm64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name nomad-enterprise-operator-builder
 	$(CONTAINER_TOOL) buildx use nomad-enterprise-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	# No error-suppression on the build itself (neo-14p): the scaffold's
+	# leading '-' let a failed multi-arch build pass silently, releasing
+	# nothing while the workflow reported success. Cleanup steps below
+	# stay tolerant so a build failure still removes the builder.
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross . || \
+		{ $(CONTAINER_TOOL) buildx rm nomad-enterprise-operator-builder; rm Dockerfile.cross; exit 1; }
 	- $(CONTAINER_TOOL) buildx rm nomad-enterprise-operator-builder
 	rm Dockerfile.cross
 
@@ -265,7 +281,7 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.1.0
-MOCKERY_VERSION ?= v2.53.5
+MOCKERY_VERSION ?= v3.5.1
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -298,7 +314,7 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 .PHONY: mockery
 mockery: $(MOCKERY) ## Download mockery locally if necessary.
 $(MOCKERY): $(LOCALBIN)
-	$(call go-install-tool,$(MOCKERY),github.com/vektra/mockery/v2,$(MOCKERY_VERSION))
+	$(call go-install-tool,$(MOCKERY),github.com/vektra/mockery/v3,$(MOCKERY_VERSION))
 
 .PHONY: mocks
 mocks: mockery ## Regenerate mocks driven by .mockery.yaml (commit the result).

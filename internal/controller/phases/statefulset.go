@@ -93,40 +93,7 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		}
 	}
 
-	p.maybeMarkAuditPVCMigrated(ctx, cluster)
-
 	return OK()
-}
-
-// maybeMarkAuditPVCMigrated implements the B6 migration signal
-// (AC-4.5.4): the first time the audit PVC is observed Bound, emit a
-// one-shot Normal Event with reason AuditPVCCreated and set the
-// status.auditPVCMigrated debounce marker. The marker lives on Status
-// so the Event is not re-emitted after operator restarts; the status
-// write lands in updateFinalStatus's merge patch (same pattern as
-// InitialReconcileEventEmitted). Checking ordinal 0 is sufficient —
-// claim templates are identical across ordinals.
-func (p *StatefulSetPhase) maybeMarkAuditPVCMigrated(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
-	if !cluster.Spec.Server.Audit.Enabled || cluster.Status.AuditPVCMigrated {
-		return
-	}
-
-	pvc := &corev1.PersistentVolumeClaim{}
-	pvcName := fmt.Sprintf("audit-%s-0", cluster.Name)
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: cluster.Namespace}, pvc); err != nil {
-		// Not found (PVC not created yet) or transient error — the next
-		// reconcile retries. The signal is best-effort by design.
-		return
-	}
-	if pvc.Status.Phase != corev1.ClaimBound {
-		return
-	}
-
-	if p.Recorder != nil {
-		p.Recorder.Event(cluster, corev1.EventTypeNormal, "AuditPVCCreated",
-			"Audit PVC bound; audit storage is independent of spec.persistence")
-	}
-	cluster.Status.AuditPVCMigrated = true
 }
 
 func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) *appsv1.StatefulSet {
@@ -136,7 +103,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	}
 
 	// Build container image (defaults set via kubebuilder tags on ImageSpec)
-	imageFull := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
+	imageFull := ImageRef(cluster)
 	pullPolicy := cluster.Spec.Image.PullPolicy
 
 	// Build environment variables
@@ -155,10 +122,9 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	podSpec := corev1.PodSpec{
 		ServiceAccountName: cluster.Name,
 		ImagePullSecrets:   cluster.Spec.ImagePullSecrets,
-		// SecurityContext is intentionally minimal:
-		// On OpenShift, the SCC injects RunAsUser and fsGroup automatically.
-		// On vanilla Kubernetes, the Nomad image runs as root by default.
-		SecurityContext: &corev1.PodSecurityContext{},
+		// PSS restricted (neo-8xu); identity fields conditional on
+		// platform — see PodSecurityContext.
+		SecurityContext: PodSecurityContext(cluster.Spec.OpenShift.Enabled),
 		Containers: []corev1.Container{
 			{
 				Name:            "nomad",
@@ -197,8 +163,9 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 					TimeoutSeconds:      3,
 					FailureThreshold:    2,
 				},
-				Resources:    getResourcesWithDefaults(cluster.Spec.Resources),
-				VolumeMounts: volumeMounts,
+				Resources:       getResourcesWithDefaults(cluster.Spec.Resources),
+				VolumeMounts:    volumeMounts,
+				SecurityContext: ContainerSecurityContext(),
 			},
 		},
 		Volumes:      volumes,
@@ -345,6 +312,12 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 			MountPath: "/nomad/config",
 			ReadOnly:  true,
 		},
+		// The root filesystem is read-only (PSS restricted, neo-8xu);
+		// /tmp is the one scratch path Nomad may write outside data_dir.
+		{
+			Name:      "tmp",
+			MountPath: "/tmp",
+		},
 	}
 
 	// Add audit volume mount (always needed when audit is enabled)
@@ -379,12 +352,20 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 		},
 	}
 
+	// Scratch space to pair with readOnlyRootFilesystem (neo-8xu)
+	volumes = append(volumes, corev1.Volume{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+
 	// TLS volume from the operator-managed server certificate secret — mTLS is always enabled
 	volumes = append(volumes, corev1.Volume{
 		Name: "tls",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: cluster.Name + "-tls",
+				SecretName: TLSSecretName(cluster.Name),
 			},
 		},
 	})
@@ -576,12 +557,12 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 	}
 
 	// Gossip secret
-	if gossipSecret := getGossipSecretName(cluster); gossipSecret != "" {
+	if gossipSecret := GossipSecretName(cluster); gossipSecret != "" {
 		secretNames = append(secretNames, gossipSecret)
 	}
 
 	// TLS secret — mTLS is always enabled
-	secretNames = append(secretNames, cluster.Name+"-tls")
+	secretNames = append(secretNames, TLSSecretName(cluster.Name))
 
 	// Sort for deterministic ordering
 	sort.Strings(secretNames)
@@ -622,9 +603,3 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 }
 
 // getGossipSecretName returns the gossip secret name for the cluster.
-func getGossipSecretName(cluster *nomadv1alpha1.NomadCluster) string {
-	if cluster.Spec.Gossip.SecretName != "" {
-		return cluster.Spec.Gossip.SecretName
-	}
-	return cluster.Name + "-gossip"
-}

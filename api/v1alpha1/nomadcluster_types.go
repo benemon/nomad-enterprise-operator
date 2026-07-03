@@ -98,9 +98,20 @@ type ImageSpec struct {
 	// version-mismatched peers and silent quorum loss. The operator's
 	// release process updates this default in deliberate increments per
 	// Nomad Enterprise release (see docs/release-process.md).
-	// +kubebuilder:default="2.0.0-ent"
+	// +kubebuilder:default="2.0.3-ent"
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
+
+	// Digest optionally pins the image by content digest for
+	// air-gapped/CISO deployments (neo-4xj). When set, the image
+	// reference is `repository@digest` and Tag is IGNORED (digest takes
+	// precedence — a CEL mutual-exclusion rule is not possible because
+	// Tag's default is materialised before validation runs). With a
+	// digest, pullPolicy Always is redundant but harmless: digests are
+	// content-addressed and immutable.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	// +optional
+	Digest string `json:"digest,omitempty"`
 
 	// PullPolicy defines when to pull the image. Defaults to Always as a
 	// safety measure against registry-side image content changes (a tag
@@ -357,7 +368,11 @@ type PersistenceSpec struct {
 	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
 }
 
-// Valid spec.persistence.reclaimPolicy values.
+// Valid spec.persistence.reclaimPolicy values. ReclaimPolicyRetain has
+// only test consumers (production code compares against Delete alone,
+// and the kubebuilder default marker uses the string literal); it is
+// kept deliberately so the enum pair is documented in one place and
+// tests don't compare against raw strings (neo-dun item 7).
 const (
 	ReclaimPolicyRetain = "Retain"
 	ReclaimPolicyDelete = "Delete"
@@ -385,6 +400,12 @@ const (
 //	WaitingForReplicas        — StatefulSet below desired ready count
 //	LicenseExpired            — Nomad Enterprise license invalid
 //	AutopilotUnhealthy        — Raft autopilot reports unhealthy
+//	LicenseSecretNotFound     — referenced license Secret absent (neo-0zq)
+//	LicenseSecretInvalid      — license Secret present, key missing
+//	CAExpired                 — CA past expiry; TLS is broken cluster-wide
+//	                            (checked before WaitingForReplicas: an
+//	                            expired CA also breaks replicas, and the
+//	                            cause should be named, not the symptom)
 //	PhaseFailed               — a reconcile phase returned an error
 //	Reconciling               — generic requeue (phase asked to wait)
 //	ScaleDownBlocked          — scale-down waiting on a Raft leader (D2d)
@@ -449,19 +470,22 @@ type CertificateAuthorityStatus struct {
 	// +optional
 	Subject string `json:"subject,omitempty"`
 
-	// RenewalRequiredBy is the deadline by which the CA should be
-	// renewed (expiry minus the renewal warning window). Crossing it
-	// surfaces a one-shot Warning Event with reason CARenewalRequired;
-	// Ready stays True (C5 / AC-2.4.10 — informational, not failure).
+	// RenewalRequiredBy is the CA expiry minus the 30-day renewal
+	// window. Its meaning depends on source (neo-4s4): for
+	// operator-generated CAs it is when the operator STARTS automatic
+	// rotation (CARotationStarted/Completed Events); for user-provided
+	// CAs it is when a HUMAN must renew, signalled by the one-shot
+	// CARenewalRequired Warning Event. Ready stays True either way.
 	// +optional
 	RenewalRequiredBy string `json:"renewalRequiredBy,omitempty"`
 
-	// RenewalWarningEmitted debounces the CARenewalRequired Event: set
-	// when the Event fires, carried forward while the same CA remains in
-	// place, reset when the CA rotates. Same per-cluster status-field
-	// debounce pattern as InitialReconcileEventEmitted.
+	// RenewalWarningThreshold debounces the escalating CARenewalRequired
+	// Events for user-provided CAs (neo-ru9): records the last emitted
+	// threshold bucket — "30d", "14d", or "7d:<date>" for the daily
+	// cadence inside the final week. Carried while the same CA is in
+	// place (survives operator restarts); a replaced CA resets it.
 	// +optional
-	RenewalWarningEmitted bool `json:"renewalWarningEmitted,omitempty"`
+	RenewalWarningThreshold string `json:"renewalWarningThreshold,omitempty"`
 }
 
 // ServerStatus represents the status of a single Nomad server in the cluster
@@ -540,9 +564,10 @@ type NomadClusterStatus struct {
 	OperatorStatusSecretName string `json:"operatorStatusSecretName,omitempty"`
 
 	// OperatorManagementSecretName is the name of the Secret containing
-	// the least-privilege management ACL token (acl:write,
-	// operator:write) used for all day-2 management writes (C4). Cache
-	// only: cleanup on deletion uses the deterministic name
+	// the dedicated management-type ACL token used for all day-2
+	// management writes (C4). Management-type because Nomad has no
+	// ACL-write policy grammar — only management tokens can write ACL
+	// state. Cache only: cleanup on deletion uses the deterministic name
 	// `<cluster>-operator-management`, not this field (AC-2.4.7).
 	// +optional
 	OperatorManagementSecretName string `json:"operatorManagementSecretName,omitempty"`
@@ -599,15 +624,6 @@ type NomadClusterStatus struct {
 	// one-shot Events.
 	// +optional
 	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
-
-	// AuditPVCMigrated records whether the operator has observed the
-	// audit PVC Bound and emitted the one-shot "AuditPVCCreated" Event
-	// for this cluster (B6 / AC-4.5.4). Same per-cluster debounce
-	// pattern as InitialReconcileEventEmitted: the flag survives
-	// operator restarts so the Event fires exactly once across the
-	// cluster's lifetime.
-	// +optional
-	AuditPVCMigrated bool `json:"auditPVCMigrated,omitempty"`
 
 	// ScaleDown tracks an in-flight Raft scale-down operation
 	// (D2 / neo-1ve). Non-nil while peers are being removed from

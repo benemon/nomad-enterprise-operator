@@ -39,6 +39,7 @@ import (
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 )
 
@@ -47,22 +48,46 @@ const (
 	snapshotRequeueDefault = 30 * time.Second
 )
 
-// NomadSnapshotReconciler reconciles a NomadSnapshot object
+// NomadSnapshotReconciler reconciles a NomadSnapshot object.
+//
+// Ensure-idiom note (neo-t1l): this controller uses
+// controllerutil.CreateOrUpdate throughout, while the NomadCluster
+// phases hand-roll Get-then-Create/Update. Both are internally
+// consistent and the split is deliberate: phases predate CreateOrUpdate
+// adoption and several need mid-flight decisions between Get and write
+// (immutable StatefulSet fields, scale-down replica gating) that
+// CreateOrUpdate's mutate-callback shape makes awkward. Match the file
+// you are editing.
 type NomadSnapshotReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	// NomadClientFactory overrides Nomad API client construction for
+	// tests (same shape as NomadClusterReconciler). nil in production —
+	// nomad.NewClient wrapped with the D4b request counter is used.
+	NomadClientFactory func(cfg nomad.ClientConfig) (nomad.NomadAPI, error)
 }
 
+// Deterministic names of the resources a NomadSnapshot owns (neo-08p):
+// each is built in one place so construction sites and status-write
+// sites cannot disagree.
+func snapshotJobName(s *nomadv1alpha1.NomadSnapshot) string       { return s.Name + "-snapshot" }
+func snapshotAgentName(s *nomadv1alpha1.NomadSnapshot) string     { return s.Name + "-snapshot-agent" }
+func snapshotConfigMapName(s *nomadv1alpha1.NomadSnapshot) string { return s.Name + "-snapshot-config" }
+func snapshotTokenName(s *nomadv1alpha1.NomadSnapshot) string     { return s.Name + "-snapshot-token" }
+func snapshotPVCName(s *nomadv1alpha1.NomadSnapshot) string       { return s.Name + "-snapshots" }
+
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots/status,verbs=patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 
 // Reconcile handles NomadSnapshot reconciliation.
 //
@@ -154,7 +179,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Get the cluster's management token (C4 / neo-pfx): the bootstrap
 	// token is sealed after minting it, so snapshot-agent policy/token
-	// creation authenticates with the management token (acl:write). The
+	// creation authenticates with the management token. The
 	// Secret appears one reconcile after ACL bootstrap — wait for it.
 	managementSecretName := phases.OperatorManagementSecretName(cluster.Name)
 	managementSecret := &corev1.Secret{}
@@ -176,7 +201,7 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
-	managementToken := string(managementSecret.Data["secret-id"])
+	managementToken := string(managementSecret.Data[phases.SecretKeySecretID])
 	if managementToken == "" {
 		log.Info("Management token secret has no secret-id", "secret", managementSecretName)
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
@@ -251,7 +276,7 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 
 	// Mode switch: remove a leftover one-shot Job.
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
-		Name: snapshot.Name + "-snapshot", Namespace: snapshot.Namespace,
+		Name: snapshotJobName(snapshot), Namespace: snapshot.Namespace,
 	}}
 	if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !k8serrors.IsNotFound(err) {
 		return ctrl.Result{}, err
@@ -262,7 +287,7 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 		return ctrl.Result{}, err
 	}
 
-	deploymentName := snapshot.Name + "-snapshot-agent"
+	deploymentName := snapshotAgentName(snapshot)
 
 	patchBase := snapshot.DeepCopy()
 	snapshot.Status.ObservedGeneration = snapshot.Generation
@@ -270,7 +295,7 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 	snapshot.Status.Phase = ""
 	snapshot.Status.JobName = ""
 	snapshot.Status.DeploymentName = deploymentName
-	snapshot.Status.ConfigMapName = snapshot.Name + "-snapshot-config"
+	snapshot.Status.ConfigMapName = snapshotConfigMapName(snapshot)
 	snapshot.Status.NomadAddress = internalAddr
 
 	// Fetch deployment to get replica status
@@ -329,13 +354,13 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 
 	// Mode switch: remove a leftover recurring Deployment.
 	staleDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
-		Name: snapshot.Name + "-snapshot-agent", Namespace: snapshot.Namespace,
+		Name: snapshotAgentName(snapshot), Namespace: snapshot.Namespace,
 	}}
 	if err := r.Delete(ctx, staleDeploy, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !k8serrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
 
-	jobName := snapshot.Name + "-snapshot"
+	jobName := snapshotJobName(snapshot)
 	job := &batchv1.Job{}
 	err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: snapshot.Namespace}, job)
 	if k8serrors.IsNotFound(err) {
@@ -356,7 +381,7 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 	snapshot.Status.ObservedGeneration = snapshot.Generation
 	snapshot.Status.Operation = nomadv1alpha1.SnapshotOperationJob
 	snapshot.Status.JobName = jobName
-	snapshot.Status.ConfigMapName = snapshot.Name + "-snapshot-config"
+	snapshot.Status.ConfigMapName = snapshotConfigMapName(snapshot)
 	snapshot.Status.NomadAddress = internalAddr
 	snapshot.Status.DeploymentName = ""
 	snapshot.Status.NextScheduled = nil
@@ -473,9 +498,41 @@ func (r *NomadSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *
 	return ctrl.Result{}, nil
 }
 
+// runNomadWithFallback mirrors phases.runNomadWithFallback for the
+// snapshot controller's differently-sourced client config (the TLS CA
+// is read from the cluster's Secret per call): run fn against the
+// internal-Service client, retrying ONCE via the LoadBalancer address
+// on a network error. fn must be idempotent. The best-effort deletes in
+// cleanupNomadResources intentionally keep their per-op
+// log-and-continue fallbacks instead (neo-6al).
+func (r *NomadSnapshotReconciler) runNomadWithFallback(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace string, fn func(nomad.NomadAPI) error) error {
+	nomadClient, err := r.snapshotNomadClient(ctx, cluster, clusterNamespace,
+		nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true))
+	if err != nil {
+		return err
+	}
+
+	err = fn(nomadClient)
+	if err == nil || !nomad.IsNetworkError(err) {
+		return err
+	}
+
+	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true)
+	if loadBalancerAddr == "" {
+		return err
+	}
+	nomadClient, cerr := r.snapshotNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr)
+	if cerr != nil {
+		return cerr
+	}
+	return fn(nomadClient)
+}
+
 // snapshotNomadClient creates a Nomad client for snapshot controller operations.
 // Since verify_https_client is off, only the CA cert is needed for TLS verification.
-func (r *NomadSnapshotReconciler) snapshotNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace, address string) (*nomad.Client, error) {
+// The production path carries the D4b request counter like every other
+// operator Nomad client; tests inject via NomadClientFactory.
+func (r *NomadSnapshotReconciler) snapshotNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace, address string) (nomad.NomadAPI, error) {
 	cfg := nomad.ClientConfig{
 		Address:    address,
 		TLSEnabled: true,
@@ -483,14 +540,21 @@ func (r *NomadSnapshotReconciler) snapshotNomadClient(ctx context.Context, clust
 
 	tlsSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
-		Name:      cluster.Name + "-tls",
+		Name:      phases.TLSSecretName(cluster.Name),
 		Namespace: clusterNamespace,
 	}, tlsSecret); err != nil {
 		return nil, fmt.Errorf("failed to get TLS secret: %w", err)
 	}
 	cfg.CACert = tlsSecret.Data["ca.crt"]
 
-	return nomad.NewClient(cfg)
+	if r.NomadClientFactory != nil {
+		return r.NomadClientFactory(cfg)
+	}
+	c, err := nomad.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return metrics.InstrumentNomadAPI(c), nil
 }
 
 // SnapshotAgentPolicyRules defines the ACL policy for the snapshot agent.
@@ -508,54 +572,43 @@ func (r *NomadSnapshotReconciler) ensureSnapshotToken(
 ) (string, error) {
 	log := logf.FromContext(ctx)
 
-	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
-	loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true)
+	policyName := fmt.Sprintf("snapshot-agent-%s-%s", snapshot.Namespace, snapshot.Name)
 
-	// Try internal service first, fall back to LoadBalancer
-	nomadClient, err := r.snapshotNomadClient(ctx, cluster, clusterNamespace, internalAddr)
+	// One idempotent sequence against Nomad: reuse the recorded token if
+	// it still exists, else upsert the policy and mint a fresh token.
+	// runNomadWithFallback retries the whole sequence once via the
+	// LoadBalancer on a network error (neo-6al).
+	var existingSecretID string
+	var newToken *nomad.ACLTokenResult
+	err := r.runNomadWithFallback(ctx, cluster, clusterNamespace, func(nomadClient nomad.NomadAPI) error {
+		if snapshot.Status.TokenAccessorID != "" {
+			token, terr := nomadClient.GetACLToken(authToken, snapshot.Status.TokenAccessorID)
+			if terr != nil {
+				return terr
+			}
+			if token != nil {
+				existingSecretID = token.SecretID
+				return nil
+			}
+			log.Info("Existing token not found, creating new one", "accessor", snapshot.Status.TokenAccessorID)
+		}
+
+		if perr := nomadClient.CreateACLPolicy(authToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules); perr != nil {
+			return fmt.Errorf("failed to create snapshot agent policy: %w", perr)
+		}
+		t, terr := nomadClient.CreateACLTokenWithPolicies(authToken, policyName, []string{policyName})
+		if terr != nil {
+			return fmt.Errorf("failed to create snapshot agent token: %w", terr)
+		}
+		newToken = t
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-
-	policyName := fmt.Sprintf("snapshot-agent-%s-%s", snapshot.Namespace, snapshot.Name)
-
-	// If we already have a token, try to look it up
-	if snapshot.Status.TokenAccessorID != "" {
-		token, err := nomadClient.GetACLToken(authToken, snapshot.Status.TokenAccessorID)
-		if err == nil && token != nil {
-			log.V(1).Info("Using existing snapshot agent token", "accessor", snapshot.Status.TokenAccessorID)
-			return token.SecretID, nil
-		}
-		if nomad.IsNetworkError(err) && loadBalancerAddr != "" {
-			nomadClient, err = r.snapshotNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr)
-			if err != nil {
-				return "", err
-			}
-			token, err = nomadClient.GetACLToken(authToken, snapshot.Status.TokenAccessorID)
-			if err == nil && token != nil {
-				return token.SecretID, nil
-			}
-		}
-		log.Info("Existing token not found, creating new one", "accessor", snapshot.Status.TokenAccessorID)
-	}
-
-	// Create the policy (upsert, idempotent)
-	err = nomadClient.CreateACLPolicy(authToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules)
-	if nomad.IsNetworkError(err) && loadBalancerAddr != "" {
-		nomadClient, err = r.snapshotNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr)
-		if err != nil {
-			return "", err
-		}
-		err = nomadClient.CreateACLPolicy(authToken, policyName, "Snapshot agent policy for "+snapshot.Name, snapshotAgentPolicyRules)
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to create snapshot agent policy: %w", err)
-	}
-
-	// Create a client token bound to the policy
-	newToken, err := nomadClient.CreateACLTokenWithPolicies(authToken, policyName, []string{policyName})
-	if err != nil {
-		return "", fmt.Errorf("failed to create snapshot agent token: %w", err)
+	if existingSecretID != "" {
+		log.V(1).Info("Using existing snapshot agent token", "accessor", snapshot.Status.TokenAccessorID)
+		return existingSecretID, nil
 	}
 
 	log.Info("Created snapshot agent token", "accessor", newToken.AccessorID, "policy", policyName)
@@ -598,12 +651,12 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 		Name:      phases.OperatorManagementSecretName(cluster.Name),
 		Namespace: clusterNamespace,
 	}, managementSecret); err == nil {
-		authToken = string(managementSecret.Data["secret-id"])
+		authToken = string(managementSecret.Data[phases.SecretKeySecretID])
 	}
 	if authToken == "" {
 		bootstrapSecretName := cluster.Status.ACLBootstrapSecretName
 		if bootstrapSecretName == "" {
-			bootstrapSecretName = cluster.Name + "-acl-bootstrap"
+			bootstrapSecretName = phases.BootstrapSecretName(cluster.Name)
 		}
 		bootstrapSecret := &corev1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{
@@ -612,7 +665,7 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 		}, bootstrapSecret); err != nil {
 			return fmt.Errorf("failed to get a cleanup auth token (management and bootstrap secrets both unavailable): %w", err)
 		}
-		authToken = string(bootstrapSecret.Data["secret-id"])
+		authToken = string(bootstrapSecret.Data[phases.SecretKeySecretID])
 	}
 
 	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
@@ -656,7 +709,7 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 
 // reconcileConfigMap creates or updates the snapshot agent ConfigMap
 func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, config string) error {
-	configMapName := snapshot.Name + "-snapshot-config"
+	configMapName := snapshotConfigMapName(snapshot)
 
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -763,7 +816,7 @@ local_storage {
 // reconcileTokenSecret creates or updates the Secret holding the snapshot agent's Nomad token.
 // Uses the same key convention as the bootstrap and operator-status Secrets.
 func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, nomadToken string) error {
-	secretName := snapshot.Name + "-snapshot-token"
+	secretName := snapshotTokenName(snapshot)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -775,7 +828,7 @@ func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snap
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
 		secret.Type = corev1.SecretTypeOpaque
 		secret.Data = map[string][]byte{
-			"secret-id":                []byte(nomadToken),
+			phases.SecretKeySecretID:   []byte(nomadToken),
 			phases.SecretKeyAccessorID: []byte(snapshot.Status.TokenAccessorID),
 		}
 		return controllerutil.SetControllerReference(snapshot, secret, r.Scheme)
@@ -786,11 +839,13 @@ func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snap
 
 // snapshotAgentLabels returns the selector labels for the snapshot
 // agent workload (shared by the Deployment and Job pod templates).
+// managed-by matches phases.GetLabels — one operator, one identity
+// (neo-e3y); a test pins the two helpers to the same value.
 func snapshotAgentLabels(snapshot *nomadv1alpha1.NomadSnapshot) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "nomad-snapshot-agent",
 		"app.kubernetes.io/instance":   snapshot.Name,
-		"app.kubernetes.io/managed-by": "nomad-enterprise-operator",
+		"app.kubernetes.io/managed-by": "nomad-operator",
 	}
 }
 
@@ -802,11 +857,12 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 	snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster,
 	nomadAddr, configChecksum string,
 ) corev1.PodTemplateSpec {
-	configMapName := snapshot.Name + "-snapshot-config"
-	tokenSecretName := snapshot.Name + "-snapshot-token"
+	configMapName := snapshotConfigMapName(snapshot)
+	tokenSecretName := snapshotTokenName(snapshot)
 
-	// Image defaults set via kubebuilder tags on ImageSpec
-	image := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
+	// Image defaults set via kubebuilder tags on ImageSpec; digest
+	// pinning takes precedence (neo-4xj)
+	image := phases.ImageRef(cluster)
 
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -814,6 +870,8 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 			Annotations: map[string]string{"checksum/config": configChecksum},
 		},
 		Spec: corev1.PodSpec{
+			// PSS restricted (neo-8xu), same profile as the server pods.
+			SecurityContext: phases.PodSecurityContext(cluster.Spec.OpenShift.Enabled),
 			Containers: []corev1.Container{
 				{
 					Name:  "snapshot-agent",
@@ -838,12 +896,18 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 									LocalObjectReference: corev1.LocalObjectReference{
 										Name: tokenSecretName,
 									},
-									Key: "secret-id",
+									Key: phases.SecretKeySecretID,
 								},
 							},
 						},
 					},
 					VolumeMounts: []corev1.VolumeMount{
+						// Snapshot staging before upload happens under
+						// /tmp; the root filesystem is read-only.
+						{
+							Name:      "tmp",
+							MountPath: "/tmp",
+						},
 						{
 							Name:      "config",
 							MountPath: "/config",
@@ -855,10 +919,17 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 							ReadOnly:  true,
 						},
 					},
-					Resources: snapshot.Spec.Resources,
+					Resources:       snapshot.Spec.Resources,
+					SecurityContext: phases.ContainerSecurityContext(),
 				},
 			},
 			Volumes: []corev1.Volume{
+				{
+					Name: "tmp",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 				{
 					Name: "config",
 					VolumeSource: corev1.VolumeSource{
@@ -873,7 +944,7 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 					Name: "tls",
 					VolumeSource: corev1.VolumeSource{
 						Secret: &corev1.SecretVolumeSource{
-							SecretName: cluster.Name + "-tls",
+							SecretName: phases.TLSSecretName(cluster.Name),
 						},
 					},
 				},
@@ -898,7 +969,7 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 func (r *NomadSnapshotReconciler) reconcileDeployment(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster, nomadAddr, configChecksum string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      snapshot.Name + "-snapshot-agent",
+			Name:      snapshotAgentName(snapshot),
 			Namespace: snapshot.Namespace,
 		},
 	}
@@ -1013,7 +1084,7 @@ func (r *NomadSnapshotReconciler) addStorageCredentials(snapshot *nomadv1alpha1.
 // reconcilePVC creates or updates the PVC for local snapshot storage
 func (r *NomadSnapshotReconciler) reconcilePVC(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot) error {
 	local := snapshot.Spec.Target.Local
-	pvcName := snapshot.Name + "-snapshots"
+	pvcName := snapshotPVCName(snapshot)
 
 	// Parse size
 	size := local.Size
@@ -1033,8 +1104,11 @@ func (r *NomadSnapshotReconciler) reconcilePVC(ctx context.Context, snapshot *no
 	}
 
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		// Only set spec on create (PVC spec is immutable)
-		if pvc.CreationTimestamp.IsZero() {
+		// Only set spec on create — PVC spec is immutable. Guarded on
+		// ResourceVersion (set on every persisted object) rather than
+		// CreationTimestamp, which some clients (notably the fake test
+		// client) do not populate (neo-tih).
+		if pvc.ResourceVersion == "" {
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
 				AccessModes: []corev1.PersistentVolumeAccessMode{
 					corev1.ReadWriteOnce,
@@ -1061,7 +1135,7 @@ func (r *NomadSnapshotReconciler) addLocalStorage(snapshot *nomadv1alpha1.NomadS
 		path = "/snapshots"
 	}
 
-	pvcName := snapshot.Name + "-snapshots"
+	pvcName := snapshotPVCName(snapshot)
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: "snapshots",
