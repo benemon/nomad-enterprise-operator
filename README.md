@@ -13,7 +13,7 @@ A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise serv
 
 ## Contributing
 
-Contributions follow the workflow and standards defined in [`CONTRIBUTING.md`](CONTRIBUTING.md). Work is tracked in [`bd`](https://github.com/gastownhall/beads) (issue prefix: `neo-`); the full backlog is mirrored in [`docs/bd-backlog-2026-06-06.md`](docs/bd-backlog-2026-06-06.md). Per-issue templates: [`.bd/issue-template.md`](.bd/issue-template.md); PR descriptions: [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
+Work is tracked in [`bd`](https://github.com/gastownhall/beads) (issue prefix: `neo-`). Contribution guidelines will be published when the project opens for external contributions.
 
 ## Architectural boundaries
 
@@ -90,10 +90,11 @@ require a periodic cluster-wide sweep, which is out of scope.
 
 ## Prerequisites
 
-- Go v1.25.0+ (development only)
-- Docker v17.03+
-- kubectl v1.11.3+
-- Access to a Kubernetes v1.11.3+ cluster
+- Go v1.26+ (development only)
+- Docker v20.10+
+- kubectl v1.28+
+- Access to a Kubernetes v1.28+ cluster (matches the CSV's
+  minKubeVersion; the CRD CEL validation rules need a modern apiserver)
 - A Nomad Enterprise license
 
 ## Getting Started
@@ -360,7 +361,10 @@ Upgrading a cluster to a new Nomad version is a user-driven
 `spec.image.tag` change. **Snapshot before you upgrade** — the operator
 deliberately does not do it for you. The full procedure, including the
 pre-upgrade one-shot snapshot and rollback guidance, is in
-[docs/runbooks/upgrade.md](docs/runbooks/upgrade.md).
+an operations runbook (publication pending). The short form: take a
+one-shot `NomadSnapshot`, wait for `status.phase: Succeeded`, then patch
+`spec.image.tag`; the operator rolls the StatefulSet one pod at a time
+behind the PodDisruptionBudget.
 
 **Why a pinned default matters.** Nomad is a Raft consensus cluster. A floating tag (one that resolves to "whatever the latest patch happens to be at this instant") combined with the operator's default `imagePullPolicy: Always` means a registry-side retag during a rolling restart can produce version-mismatched peers. Two servers running 2.0.3 and one server running 2.0.4 may interact in ways that produce silent quorum loss or replication anomalies. By pinning the default to a single concrete version per operator release, every server in every Raft cluster runs the same Nomad binary unless the user explicitly opts out.
 
@@ -390,7 +394,7 @@ immutable, so `pullPolicy: Always` becomes redundant — harmless, but
 `IfNotPresent` avoids pointless registry round-trips. The snapshot
 agent uses the same image reference as the cluster.
 
-**Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. The release procedure is documented in [`docs/release-process.md`](docs/release-process.md) §1. Upgrade behaviour: existing NomadClusters that do not override `spec.image.tag` receive the new default on next reconcile, which triggers a rolling restart of the StatefulSet.
+**Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. Upgrade behaviour: existing NomadClusters that do not override `spec.image.tag` receive the new default on next reconcile, which triggers a rolling restart of the StatefulSet.
 
 ## TLS Configuration
 
@@ -398,7 +402,6 @@ mTLS is always enabled — no configuration is required. The operator automatica
 
 - Generates a self-signed ECDSA P-256 CA (or uses a user-provided CA)
 - Issues server certificates with correct Nomad SANs (`server.<region>.nomad`, pod FQDNs, service FQDNs)
-- Issues an operator client certificate for mTLS when querying the Nomad API
 - Distributes a CA bundle ConfigMap for external consumers
 - Rotates certificates approaching expiry (30-day warning window)
 - Configures `verify_server_hostname = true` in the Nomad HCL for RPC mTLS
@@ -413,7 +416,6 @@ The operator creates the following resources in the cluster namespace:
 |----------|------|-------------|
 | `<cluster>-ca` | Secret | CA certificate and private key (`tls.crt`, `tls.key`). Not created when using a user-provided CA |
 | `<cluster>-tls` | Secret | Server certificate and key (`tls.crt`, `tls.key`, `ca.crt`) |
-| `<cluster>-operator-client` | Secret | Operator client certificate for mTLS API calls (`tls.crt`, `tls.key`, `ca.crt`) |
 | `<cluster>-ca-bundle` | ConfigMap | CA certificate for external consumers |
 
 ### Operator-managed CA (default)
@@ -498,9 +500,11 @@ effectively sealed after minting the management token; writes ride the
 management token (dedicated, independently revocable and rotatable —
 delete its Secret to force a re-mint); reads ride the least-privilege
 status token. The operator also keeps
-the three operator-owned policies (`anonymous`,
-`<cluster>-operator-management`, `<cluster>-operator-status`) in their
-desired state on every reconcile — manual edits to them are reverted.
+the two operator-owned policies (`anonymous` and
+`<cluster>-operator-status`) in their desired state on every
+reconcile — manual edits to them are reverted. The management
+credential has no policy: it is a management-type token, because Nomad
+has no ACL-write policy grammar.
 
 On cluster deletion, the finalizer revokes the management and status
 tokens and deletes their policies from Nomad (authenticating with the
@@ -578,7 +582,7 @@ always runs the current config. A failed one-shot Job sets the
 `Degraded` condition and emits a `SnapshotDegraded` Warning Event.
 
 For restoring from a snapshot, see
-[docs/runbooks/restore.md](docs/runbooks/restore.md).
+an operations runbook (publication pending).
 
 ### Spec
 
@@ -587,7 +591,7 @@ For restoring from a snapshot, see
 | `clusterRef.name` | `string` | | Name of the target NomadCluster |
 | `clusterRef.namespace` | `string` | | Namespace of the target NomadCluster. Defaults to the NomadSnapshot's namespace |
 | `schedule` | `object` | | Optional. Present = recurring agent Deployment; omitted = one-shot Job |
-| `schedule.interval` | `string` | `1h` | Interval between snapshots (e.g. `1h`, `24h`) |
+| `schedule.interval` | `string` | `1h` | Interval between snapshots. Must be a Go duration string (e.g. `1h`, `90m`, `1h30m`) — pattern-validated at admission |
 | `schedule.retain` | `int` | `24` | Number of snapshots to retain (minimum 1) |
 | `schedule.stale` | `bool` | `false` | Allow reading from a non-leader for snapshots |
 | `resources` | `ResourceRequirements` | | CPU/memory requests and limits for the snapshot agent |

@@ -18,13 +18,9 @@ package tls
 
 import "time"
 
-// Shared TTL constants used by both cert trees:
-//   - Tree 1: operator webhook TLS (internal/webhook)
-//   - Tree 2: per-NomadCluster Nomad server certs (internal/controller/phases)
-//
-// Both trees use the same renewal cadence so the rotation behaviour is uniform
-// across the operator. Do not introduce tree-specific TTL constants without a
-// documented reason.
+// Shared TTL constants for the per-NomadCluster certificate tree. Do
+// not introduce purpose-specific TTL constants without a documented
+// reason.
 const (
 	// CALifetime is the validity duration of the operator-generated CA
 	// (C5 / AC-2.4.8): capped at 2 years so a compromised or leaked CA
