@@ -480,8 +480,8 @@ func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity
 
 // needsUpdate reports whether the desired StatefulSet differs from
 // the existing one in any of the fields the phase manages. The
-// second return value is a human-readable summary of the drift, used
-// for log diagnostics — multi-replica rolling restarts triggered by
+// second return value is a human-readable drift summary used in
+// log diagnostics — multi-replica rolling restarts triggered by
 // unexpected drift are extremely hard to debug without it (see
 // neo-8oy for the canonical case). Empty when no drift.
 func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (bool, string) {

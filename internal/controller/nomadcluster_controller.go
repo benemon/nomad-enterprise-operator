@@ -601,7 +601,7 @@ func (r *NomadClusterReconciler) maybeAdvanceLastReconcileTime(cluster *nomadv1a
 	}
 	// else: leave cluster.Status.LastReconcileTime as the snapshot value.
 	// The caller still issues Status().Patch with client.MergeFrom(patchBase);
-	// if no Status fields changed at all, the merge patch is empty and the
+	// when no Status fields changed at all, the merge patch is empty and the
 	// server-side write is a no-op.
 }
 

@@ -41,8 +41,8 @@ var serviceMonitorGVK = schema.GroupVersionKind{
 // ServiceMonitor scraping the operator's own :8443/metrics endpoint
 // (AC-F4.4). Gated on Prometheus Operator CRD availability via the shared
 // discovery helper — on clusters without the CRDs it is a clean no-op.
-// The static equivalent ships at config/prometheus/operator-monitor.yaml
-// for GitOps flows that prefer declarative installation.
+// The static equivalent ships at config/prometheus/operator-monitor.yaml,
+// serving GitOps flows that prefer declarative installation.
 func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespace string) error {
 	if !discovery.HasGVK(c.RESTMapper(), serviceMonitorGVK) {
 		return nil

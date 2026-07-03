@@ -294,8 +294,8 @@ func GetSelectorLabels(cluster *nomadv1alpha1.NomadCluster) map[string]string {
 }
 
 // BuildClientConfig assembles a nomad.ClientConfig from the phase
-// context. Since verify_https_client is off, only the CA cert is needed
-// for TLS verification; callers set cfg.Address themselves.
+// context. Since verify_https_client is off, only the CA cert is needed to
+// verify TLS; callers set cfg.Address themselves.
 func (pc *PhaseContext) BuildClientConfig(timeout time.Duration, token string) nomad.ClientConfig {
 	return nomad.ClientConfig{
 		Token:      token,
@@ -306,7 +306,7 @@ func (pc *PhaseContext) BuildClientConfig(timeout time.Duration, token string) n
 }
 
 // NewNomadClient constructs a Nomad API client using PhaseContext.NomadClientFactory
-// if set, falling back to nomad.NewClient. The return type is the NomadAPI
+// when set, falling back to nomad.NewClient. The return type is the NomadAPI
 // interface so phases depend on the interface rather than the concrete *Client.
 // The production path is instrumented with the D4b request counter;
 // factory-injected clients (tests) are returned as-is.

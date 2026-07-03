@@ -64,7 +64,12 @@ jobs:
       # between `//` and the trailing punctuation candidate — i.e. the line
       # has to look like indented commented Go. This is a heuristic; tune
       # the regex if it produces false positives.
-      RULE_COMMENTED_CODE_REGEX: '^[[:space:]]*//[[:space:]]*(if|for|switch|func|return|var|const|type|go|defer|select|range|case|default)[[:space:]].*[{};]?[[:space:]]*$|^[[:space:]]*//[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(:?=|<-|\+\+|--)'
+      # Tightened after round-2 CI (2026-07-03): the original pattern
+      # flagged prose — comment lines starting with "if/for/case ...",
+      # "Ready=False", "--focus" flags. Now requires code shape: a
+      # keyword line must end in "{" or ";", and the assignment arm only
+      # matches Go-specific tokens (:= and <-), which prose doesn't use.
+      RULE_COMMENTED_CODE_REGEX: '^[[:space:]]*//[[:space:]]*(if|for|switch|func|return|var|const|type|go|defer|select)[[:space:]].*[{;][[:space:]]*$|^[[:space:]]*//[[:space:]]*[A-Za-z_][A-Za-z0-9_.\[\]]*[[:space:]]*(:=|<-)'
       # Rule 4 — Serf force-leave is delegated to Nomad autopilot
       # (AC-2.3.4e, D2 / neo-1ve.2). The operator must not call
       # ForceLeave / force-leave / ForceLeaveNode under any circumstance;
