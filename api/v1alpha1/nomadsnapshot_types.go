@@ -62,8 +62,7 @@ type ClusterReference struct {
 // SnapshotSchedule defines when and how often to take snapshots.
 type SnapshotSchedule struct {
 	// Interval between snapshots (e.g., "1h", "24h"). Must be a Go
-	// duration string — validated at admission (neo-f7j; previously any
-	// string was accepted and surfaced only as a broken agent config).
+	// duration string — validated at admission.
 	// +kubebuilder:default="1h"
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
 	Interval string `json:"interval,omitempty"`
@@ -183,7 +182,7 @@ type NomadSnapshotStatus struct {
 	// Operation names the child workload currently reconciled for this
 	// NomadSnapshot: "Job" (one-shot, spec.schedule omitted) or
 	// "Deployment" (recurring, spec.schedule set). Status reflects the
-	// operation, not the storage artifact (D3 / AC-2.7.7).
+	// operation, not the storage artifact.
 	// +kubebuilder:validation:Enum=Job;Deployment
 	// +optional
 	Operation string `json:"operation,omitempty"`

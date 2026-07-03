@@ -121,7 +121,7 @@ type ImageSpec struct {
 type LicenseSpec struct {
 	// SecretName is the name of an existing secret containing the license.
 	// The license must be stored under the key "license" (the key name is
-	// operator-owned per ADR 0003). Mutually exclusive with Value.
+	// operator-owned). Mutually exclusive with Value.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
 
@@ -147,7 +147,7 @@ type TopologySpec struct {
 type GossipSpec struct {
 	// SecretName is the name of secret containing gossip key (auto-created
 	// if empty). The key must be stored under "gossip-key" (the key name
-	// is operator-owned per ADR 0003).
+	// is operator-owned).
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
 }
@@ -235,7 +235,7 @@ type CertificateSecretKeys struct {
 }
 
 // MonitoringSpec defines Prometheus monitoring configuration. Scrape
-// interval (30s) and timeout (10s) are operator-owned per ADR 0003;
+// interval (30s) and timeout (10s) are operator-owned;
 // advanced scrape tuning belongs in Prometheus, not this CR.
 type MonitoringSpec struct {
 	// Enabled determines if monitoring resources are created
@@ -248,7 +248,7 @@ type MonitoringSpec struct {
 }
 
 // ServerSpec defines Nomad server configuration. Autopilot tuning is
-// operator-owned per ADR 0003 (cleanup_dead_servers=true, 200ms last
+// operator-owned (cleanup_dead_servers=true, 200ms last
 // contact, 250 trailing logs, 10s stabilization — Nomad's defaults).
 type ServerSpec struct {
 	// ACL configuration
@@ -265,7 +265,7 @@ type ServerSpec struct {
 }
 
 // ACLSpec defines ACL configuration. The bootstrap token Secret name is
-// operator-owned per ADR 0003: always `<cluster>-acl-bootstrap`.
+// operator-owned: always `<cluster>-acl-bootstrap`.
 type ACLSpec struct {
 	// Enabled determines if ACLs are enabled (defaults to true for security)
 	// +kubebuilder:default=true
@@ -313,7 +313,7 @@ type CASecretKeys struct {
 
 // AuditSpec defines audit logging configuration. Delivery guarantee
 // (enforced), format (json), and rotation (24h × 15 files) are
-// operator-owned per ADR 0003 — users needing different log shipping
+// operator-owned — users needing different log shipping
 // should ship via sidecar, not rotation tuning.
 type AuditSpec struct {
 	// Enabled determines if audit logging is enabled.
@@ -578,10 +578,9 @@ type NomadClusterStatus struct {
 	ScaleDown *ScaleDownStatus `json:"scaleDown,omitempty"`
 }
 
-// ScaleDownStatus tracks the in-flight Raft scale-down operation.
-// Owned by D2 (neo-1ve); the status field is established here in D2a
-// so D2b's reconcile loop and D2c's admission rule can both depend
-// on a stable shape.
+// ScaleDownStatus tracks the in-flight Raft scale-down operation; the
+// reconcile loop and the replicas-freeze admission rule both depend on
+// its shape.
 type ScaleDownStatus struct {
 	// RemovedPeers lists Raft server IDs already removed this
 	// operation; never re-removed, even across operator restarts.

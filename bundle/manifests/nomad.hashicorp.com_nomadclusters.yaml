@@ -67,7 +67,7 @@ spec:
                     description: |-
                       SecretName is the name of secret containing gossip key (auto-created
                       if empty). The key must be stored under "gossip-key" (the key name
-                      is operator-owned per ADR 0003).
+                      is operator-owned).
                     type: string
                 type: object
               image:
@@ -132,7 +132,7 @@ spec:
                     description: |-
                       SecretName is the name of an existing secret containing the license.
                       The license must be stored under the key "license" (the key name is
-                      operator-owned per ADR 0003). Mutually exclusive with Value.
+                      operator-owned). Mutually exclusive with Value.
                     type: string
                   value:
                     description: |-

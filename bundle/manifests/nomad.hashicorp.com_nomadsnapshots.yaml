@@ -153,8 +153,7 @@ spec:
                     default: 1h
                     description: |-
                       Interval between snapshots (e.g., "1h", "24h"). Must be a Go
-                      duration string — validated at admission (neo-f7j; previously any
-                      string was accepted and surfaced only as a broken agent config).
+                      duration string — validated at admission.
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   retain:
@@ -438,7 +437,7 @@ spec:
                   Operation names the child workload currently reconciled for this
                   NomadSnapshot: "Job" (one-shot, spec.schedule omitted) or
                   "Deployment" (recurring, spec.schedule set). Status reflects the
-                  operation, not the storage artifact (D3 / AC-2.7.7).
+                  operation, not the storage artifact.
                 enum:
                 - Job
                 - Deployment
