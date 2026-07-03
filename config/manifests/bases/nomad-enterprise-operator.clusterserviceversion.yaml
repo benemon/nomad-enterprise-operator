@@ -79,7 +79,8 @@ spec:
   - name: Nomad Documentation
     url: https://developer.hashicorp.com/nomad
   maintainers:
-  - name: benemon
+  - email: benjamin.holmes@gmail.com
+    name: benemon
   maturity: alpha
   minKubeVersion: 1.28.0
   provider:
