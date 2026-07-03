@@ -25,6 +25,14 @@ linters:
     goconst:
       ignore-tests: true
       min-occurrences: 10
+      # "Ready" stays a literal by design (AC-C9.5: no ConditionType
+      # constants); the others are PrometheusRule map keys where a
+      # constant adds indirection, not meaning.
+      ignore-string-values:
+        - Ready
+        - severity
+        - summary
+        - description
     revive:
       rules:
         - name: comment-spacings

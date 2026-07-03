@@ -109,7 +109,7 @@ func TestAuditPVCIndependent(t *testing.T) {
 
 			templates := phase.buildVolumeClaimTemplates(cluster)
 
-			var got []string
+			got := make([]string, 0, len(templates))
 			for _, tmpl := range templates {
 				got = append(got, tmpl.Name)
 			}
