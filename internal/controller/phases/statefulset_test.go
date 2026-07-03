@@ -30,18 +30,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-// TestBuildStatefulSet_ChecksumExcludesReplicas covers AC-2.3.4f
-// (D2f / neo-1ve.6 / neo-8oy): scale operations must not regenerate
-// the pod template's checksum/config annotation. Without this, every
-// spec.replicas change triggers a rolling restart of all existing
-// pods — neo-8oy is the canonical break, where the rolling restart
-// of a 3-replica cluster racing with the scale-down loop causes Raft
-// quorum loss and unrecoverable cluster state.
-//
-// The test builds two StatefulSets from clusters that differ ONLY in
-// spec.replicas (3 vs 1) and asserts checksum/config is identical.
-// Any future input added to ConfigChecksum's map must preserve this
-// invariant or carry its own regression test justifying the choice.
+// TestBuildStatefulSet_ChecksumExcludesReplicas: clusters differing
+// only in spec.replicas must produce identical checksum/config — a
+// scale-triggered rolling restart races the scale-down loop and can
+// break quorum. New ConfigChecksum inputs must preserve this.
 func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	phaseCtx := &PhaseContext{
 		Client:           fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
@@ -73,12 +65,9 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	}
 }
 
-// TestAuditPVCIndependent covers AC-4.5.1 (B6 / neo-av7): the audit
-// PVC claim template must be present whenever audit is enabled,
-// regardless of whether data persistence is enabled. Before B6 the
-// audit PVC was nested inside the persistence-enabled branch, so
-// audit-enabled clusters with persistence.size="" produced a pod spec
-// that mounted an "audit" volume with no backing claim template.
+// The audit claim template must exist whenever audit is enabled,
+// independent of data persistence — nesting it under persistence once
+// produced audit mounts with no backing claim.
 func TestAuditPVCIndependent(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -163,13 +152,8 @@ func TestStatefulSetScaleUp(t *testing.T) {
 	}
 }
 
-// TestPodSecurityContexts covers neo-8xu: both workload pod specs meet
-// PSS "restricted" — runAsNonRoot + RuntimeDefault seccomp at pod
-// level, no privilege escalation + ALL capabilities dropped +
-// read-only root at container level. Identity fields (runAsUser,
-// fsGroup) are set explicitly on vanilla Kubernetes and deliberately
-// LEFT UNSET on OpenShift, where the SCC injects them from the
-// namespace's allocated range.
+// Both workloads meet PSS restricted; identity fields are explicit on
+// vanilla and deliberately unset on OpenShift (SCC injects them).
 func TestPodSecurityContexts(t *testing.T) {
 	build := func(openshift bool) *appsv1.StatefulSet {
 		cluster := newTestCluster("ns", "sec")

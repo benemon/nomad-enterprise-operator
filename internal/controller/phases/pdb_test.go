@@ -67,17 +67,8 @@ func runPDBPhase(t *testing.T, cluster *nomadv1alpha1.NomadCluster, seeds ...*po
 	return pdb, true
 }
 
-// TestPDBShape covers AC-2.3.1 — the PDB shape across the enum of
-// supported replica counts. N=1 must produce no PDB; N=3/5 must
-// produce a PDB with maxUnavailable=N/2 and a selector that matches
-// the operator's pod labels.
-//
-// The phase logic is deterministic from spec.replicas and uses
-// standard client-go primitives, so a fake client is sufficient
-// here — the existing phase tests in this package
-// (acl_bootstrap_test.go, cluster_status_test.go) follow the same
-// pattern. AC-2.3.2 / AC-2.3.3 are exercised in dedicated tests
-// below using the same approach.
+// PDB shape across the replica enum: one replica produces no PDB;
+// 3/5 produce maxUnavailable=N/2 with the operator's pod selector.
 func TestPDBShape(t *testing.T) {
 	type tc struct {
 		name              string

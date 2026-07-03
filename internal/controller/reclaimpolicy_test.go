@@ -33,16 +33,9 @@ import (
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
 )
 
-// C1 (neo-bjd): spec.persistence.reclaimPolicy gates finalizer PVC deletion.
-//
-//	AC-2.3.12 — enum Retain|Delete, default Retain (admission defaulting).
-//	AC-2.3.13 — under Retain the finalizer does not delete PVCs.
-//	AC-2.3.14 — under Delete the finalizer deletes selector-matching PVCs.
-//	AC-2.3.15 — the value at deletion time wins (not retroactive).
-//
-// Note: envtest has no kube-controller-manager, so a "deleted" PVC stays
-// Terminating behind the pvc-protection finalizer. "Deleted" is therefore
-// asserted as NotFound OR non-nil DeletionTimestamp.
+// reclaimPolicy gates finalizer PVC deletion: Retain keeps, Delete
+// removes, deletion-time value wins. Envtest has no KCM, so "deleted"
+// is asserted as NotFound OR a non-nil DeletionTimestamp.
 var _ = Describe("Finalizer reclaimPolicy gating", func() {
 	ctx := context.Background()
 

@@ -186,15 +186,11 @@ type ACLTokenResult struct {
 	ExpirationTime *time.Time
 }
 
-// CreateManagementACLToken creates a management-type ACL token (C4 /
-// neo-ikf). Nomad — unlike Consul — has NO ACL-management policy
-// grammar: there is no `acl { policy = "write" }` rule block, and only
-// management-type tokens can create or modify policies and tokens
-// (verified empirically; a policy with an `acl` key is rejected with
-// "Invalid or duplicate policy keys"). The operator's day-2 management
-// token is therefore a dedicated management token: same capabilities as
-// bootstrap, but independently revocable and rotatable while the
-// bootstrap token stays sealed.
+// CreateManagementACLToken creates a management-type token. Nomad,
+// unlike Consul, has no ACL-management policy grammar — only
+// management-type tokens can write ACL state (verified empirically) —
+// so the operator's day-2 token is management-type, independently
+// revocable while the bootstrap token stays sealed.
 func (c *Client) CreateManagementACLToken(authToken, name string) (*ACLTokenResult, error) {
 	token := &nomadapi.ACLToken{
 		Name: name,
@@ -324,13 +320,8 @@ func (c *Client) GetLicense(ctx context.Context, token string) (*LicenseResult, 
 	}, nil
 }
 
-// AgentSelf queries /v1/agent/self for the Nomad agent's reported
-// version. Requires the client's configured token (SecretID) to hold
-// `agent:read` capability — see OperatorStatusPolicyRules.
-//
-// The Nomad SDK call (Agent().Self()) does not accept QueryOptions, so
-// the token cannot be overridden per-call here as it can for license
-// and autopilot probes.
+// AgentSelf queries /v1/agent/self (needs agent:read). The SDK call
+// takes no QueryOptions, so the token cannot be overridden per-call.
 func (c *Client) AgentSelf(_ context.Context) (*AgentSelfResult, error) {
 	self, err := c.api.Agent().Self()
 	if err != nil {
@@ -342,12 +333,8 @@ func (c *Client) AgentSelf(_ context.Context) (*AgentSelfResult, error) {
 	return &AgentSelfResult{Version: extractNomadVersion(self)}, nil
 }
 
-// extractNomadVersion pulls the agent version from the AgentSelf
-// response, trying the two well-known locations in the wire format:
-// `stats.nomad.version` (the values surfaced by the Nomad UI status
-// banner) and `member.tags.build` (the serf gossip tag). Returns "" if
-// neither is present; callers treat empty as a probe miss, not an
-// error, per AC-4.7.2.
+// extractNomadVersion tries stats.nomad.version, then
+// member.tags.build. Empty means probe miss, not error.
 func extractNomadVersion(self *nomadapi.AgentSelf) string {
 	if nomadStats, ok := self.Stats["nomad"]; ok {
 		if v := nomadStats["version"]; v != "" {
@@ -429,16 +416,9 @@ type AgentSelfResult struct {
 	Version string
 }
 
-// RaftPeer is the projection of nomadapi.RaftServer used by the
-// operator's scale-down phase (D2 / neo-1ve). Fields are kept to what
-// the loop actually consumes today; expand with caution.
-//
-// Node carries the Nomad server's node name (the pod hostname for
-// StatefulSet-managed servers — e.g. "<cluster>-2"). This is the
-// per-replica identifier the scale-down loop uses to map peers to
-// ordinals; Address is shared across all replicas because the
-// operator's HCL template advertises the cluster's LoadBalancer IP
-// as advertise.rpc (see pkg/hcl/generator.go).
+// RaftPeer projects nomadapi.RaftServer down to what scale-down
+// consumes. Node (the pod hostname) is the only per-replica
+// identifier — Address is the shared advertise address.
 type RaftPeer struct {
 	ID      string
 	Node    string
@@ -467,11 +447,8 @@ func (c *Client) RaftListPeers(ctx context.Context, token string) ([]*RaftPeer, 
 	return peers, nil
 }
 
-// RaftRemovePeer removes a peer from the Raft quorum by server ID.
-// Requires a token with operator:write capability. Used by D2b's
-// scale-down loop; do not call from other code paths without
-// re-evaluating the safety story (peer removal is irreversible
-// within a single Raft generation).
+// RaftRemovePeer removes a peer by server ID (needs operator:write).
+// Irreversible within a Raft generation — scale-down only.
 func (c *Client) RaftRemovePeer(ctx context.Context, token, id string) error {
 	w := (&nomadapi.WriteOptions{AuthToken: token}).WithContext(ctx)
 	if err := c.api.Operator().RaftRemovePeerByID(id, w); err != nil {
@@ -500,16 +477,10 @@ type AutopilotServer struct {
 	LastContact string
 }
 
-// OperatorStatusPolicyRules defines the minimal permissions required by the
-// operator for day-2 status API calls (autopilot health, license, leader,
-// and the C7 agent-self version probe). operator:read covers autopilot,
-// license, and CheckHealth; /v1/status/leader needs no token; agent:read
-// is the new addition required by /v1/agent/self.
-//
-// Since C2 (neo-95g), edits to this constant propagate to EXISTING
-// clusters too: the observed-state diff in reconcileOperatorPolicies
-// rewrites any policy whose rules drift from this text on the next
-// reconcile.
+// OperatorStatusPolicyRules is the minimal day-2 status policy:
+// operator:read (autopilot, license) plus agent:read (/v1/agent/self).
+// Edits propagate to existing clusters via the observed-state diff in
+// reconcileOperatorPolicies.
 const OperatorStatusPolicyRules = `
 operator {
   policy = "read"

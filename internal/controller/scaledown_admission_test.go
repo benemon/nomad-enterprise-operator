@@ -29,17 +29,9 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
-// D2c (neo-1ve.3): CEL admission rule on the NomadCluster type for
-// AC-2.3.5a — spec.replicas cannot be edited while a scale-down is in
-// flight (status.scaleDown.removedPeers non-empty).
-//
-// AC-2.3.5 / 2.3.6 (degraded-quorum opt-in) were originally designed
-// as a CEL rule too, but CRD validation rules on K8s 1.36 cannot
-// access metadata.annotations or metadata.labels — only structural
-// schema fields. Those ACs are therefore enforced by the operator's
-// ScaleDownPhase, with dedicated unit tests under
-// internal/controller/phases/scaledown_test.go. The annotation
-// remains the public contract.
+// CEL rule: spec.replicas is frozen while scale-down is in flight.
+// The degraded-quorum opt-in is operator-enforced instead (CEL cannot
+// read annotations); see scaledown_test.go.
 var _ = Describe("Scale-down admission rules (D2c)", func() {
 	const namespace = "scaledown-admission-test"
 
@@ -69,13 +61,9 @@ var _ = Describe("Scale-down admission rules (D2c)", func() {
 		}
 		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
 
-		// Attempt each kind of replica change; all must fail with the
-		// in-flight message. Covers AC-2.3.5a's "any value" clause:
-		// scale up (5) and scale down further (1). The enum
-		// {1, 3, 5} prevents intermediate values, and a no-op patch to
-		// the current value (3) trivially passes the rule's
-		// "self.spec.replicas == oldSelf.spec.replicas" clause so we
-		// don't test that — it isn't what AC-2.3.5a guards against.
+		// Every replica change (up and down) must fail while in
+		// flight; a no-op patch trivially passes the rule and is not
+		// what it guards.
 		attempts := []int32{5, 1}
 		for _, target := range attempts {
 			refetched := &nomadv1alpha1.NomadCluster{}

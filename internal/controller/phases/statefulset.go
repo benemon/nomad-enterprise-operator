@@ -71,11 +71,9 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		return Error(err, "Failed to get StatefulSet")
 	}
 
-	// During an active scale-down, ScaleDownPhase (D2b / neo-1ve.2) is
-	// the authoritative writer for sts.spec.replicas — it patches the
-	// count only after the corresponding Raft peers have been removed.
-	// Preserve the existing replica count here so the two phases don't
-	// race; ScaleDownPhase clears the gate when the operation completes.
+	// During scale-down, ScaleDownPhase owns sts.spec.replicas (it
+	// patches only after peer removal) — preserve the existing count
+	// here so the phases don't race.
 	if existing.Spec.Replicas != nil && *existing.Spec.Replicas > cluster.Spec.Replicas {
 		sts.Spec.Replicas = existing.Spec.Replicas
 	}
@@ -186,15 +184,10 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		podSpec.TopologySpreadConstraints = cluster.Spec.TopologySpreadConstraints
 	}
 
-	// Get config checksum for pod annotation - include only
-	// non-scale-dependent fields so spec.replicas changes do not trigger
-	// rolling restarts (AC-2.3.4f / D2f / neo-1ve.6). Scale-dependent
-	// HCL fields (bootstrap_expect, server_join.retry_join) DO change in
-	// the rendered ConfigMap but are startup-only in Nomad — the
-	// running servers ignore further mutations after initial bootstrap.
-	// Restarting pods on every scale is the bug pattern neo-8oy
-	// surfaced: 3-replica rolling restarts triggered by scale-down
-	// break Raft quorum before the operator can finish the operation.
+	// Checksum only non-scale-dependent config: the scale-dependent
+	// HCL (bootstrap_expect, retry_join) is startup-only in Nomad, and
+	// including it would roll pods — and break quorum — on every
+	// replica change.
 	configChecksum := ConfigChecksum(map[string]string{
 		"advertise":  p.AdvertiseAddress,
 		"gossip":     p.GossipKey,
@@ -455,11 +448,8 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 	return templates
 }
 
-// buildOperatorAffinity returns the operator-owned pod anti-affinity
-// (ADR 0003): preferred scheduling, weight 100, hostname topology.
-// Preferred (not required) so small clusters degrade to co-location
-// instead of Pending pods; multi-zone distribution belongs to the
-// user-facing spec.topologySpreadConstraints.
+// buildOperatorAffinity returns preferred (not required) hostname
+// anti-affinity so small clusters co-locate instead of going Pending.
 func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity {
 	return &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
@@ -478,12 +468,9 @@ func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity
 	}
 }
 
-// needsUpdate reports whether the desired StatefulSet differs from
-// the existing one in any of the fields the phase manages. The
-// second return value is a human-readable drift summary used in
-// log diagnostics — multi-replica rolling restarts triggered by
-// unexpected drift are extremely hard to debug without it (see
-// neo-8oy for the canonical case). Empty when no drift.
+// needsUpdate reports drift in phase-managed fields; the summary
+// names the drifted field, without which unexpected rolling restarts
+// are nearly undebuggable.
 func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (bool, string) {
 	if *existing.Spec.Replicas != *desired.Spec.Replicas {
 		return true, fmt.Sprintf("replicas %d -> %d", *existing.Spec.Replicas, *desired.Spec.Replicas)

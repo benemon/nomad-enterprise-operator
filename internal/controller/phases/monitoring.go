@@ -220,11 +220,9 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 							},
 						},
 						{
-							// neo-ru9: operator-gauge-backed cert alerts. The CA
-							// warning uses for:6h so a healthy automatic rotation
-							// (which starts exactly at the 30d mark and completes
-							// in minutes) never fires it — only a STUCK rotation
-							// or an unrenewed user-provided CA does.
+							// for:6h keeps a healthy auto-rotation (minutes at
+							// the 30d mark) from firing this — only stuck
+							// rotations and unrenewed user CAs alert.
 							Alert: "NomadCACertExpiringSoon",
 							Expr: intstr.FromString(fmt.Sprintf(
 								`(nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time()) / 86400 < 30 and (nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time()) > 0`,

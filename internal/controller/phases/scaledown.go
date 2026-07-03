@@ -33,32 +33,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ScaleDownPhase implements the Raft-aware scale-down loop (D2 / D2b
-// neo-1ve.2). The flow per reconcile when sts.spec.replicas exceeds
-// cluster.spec.replicas:
-//
-//  1. Initialise status.scaleDown if not yet present.
-//  2. List Raft peers from Nomad; map each to a server ordinal.
-//  3. Pick the highest-ordinal peer that is (a) above the desired
-//     replica count and (b) not already recorded in
-//     status.scaleDown.removedPeers.
-//  4. Call RaftRemovePeer; verify the peer is gone by re-listing.
-//  5. Append the server ID to status.scaleDown.removedPeers and
-//     requeue immediately to remove the next peer.
-//  6. When len(removedPeers) covers the full gap, patch
-//     sts.spec.replicas to cluster.spec.replicas and clear
-//     status.scaleDown in the same reconcile.
-//
-// Leader-loss handling (AC-2.3.8 / 2.3.8a) is intentionally minimal
-// here — any Nomad-API error is logged at V(1) and the phase returns
-// OK so the next reconcile retries. D2d (neo-1ve.4) refines this with
-// explicit ScaleDownBlocked condition handling and silent-pause
-// semantics on mid-operation leader loss. The metric
-// nomad_operator_scale_down_in_progress (AC-8.1.6) is wired in D2e.
-//
-// PVC preservation (AC-2.3.4c): this phase never touches PVCs.
-// reclaimPolicy governs cluster-delete only; the StatefulSet
-// controller does not garbage-collect PVCs on replica reduction.
+// ScaleDownPhase removes Raft peers serially — one per reconcile,
+// highest ordinal first, tracked in status.scaleDown.removedPeers —
+// then patches the StatefulSet once the gap is covered. PVCs are never
+// touched: reclaimPolicy governs cluster-delete only.
 type ScaleDownPhase struct {
 	*PhaseContext
 }
@@ -118,11 +96,8 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	gap := currentReplicas - desiredReplicas
 	p.Log.Info("ScaleDown: gap detected", "from", currentReplicas, "to", desiredReplicas, "gap", gap)
 
-	// D2e (neo-1ve.5): operation in flight. Set unconditionally on
-	// every gap-detected reconcile so an operator pod restart inherits
-	// the correct gauge value on its first reconcile (the in-process
-	// metric is lost on restart; status.scaleDown is the durable
-	// source of truth).
+	// Set unconditionally each gap-detected reconcile so a restarted
+	// operator inherits the correct gauge value.
 	metrics.ScaleDownInProgress.WithLabelValues(cluster.Name, cluster.Namespace).Set(1)
 
 	token, err := p.getManagementToken(ctx, cluster)
@@ -137,11 +112,8 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		return OK()
 	}
 
-	// Pre-start gates: leader available, and (if scaling below 3) the
-	// user has opted in to degraded quorum via annotation. Both are
-	// only checked once per operation, before status.scaleDown is
-	// initialised; the gates surface via the Ready condition so the
-	// user sees what is blocking progress.
+	// Pre-start gates, checked once per operation before
+	// status.scaleDown initialises; both surface via Ready.
 	if cluster.Status.ScaleDown == nil {
 		// AC-2.3.8 (D2d / neo-1ve.4): leader probe.
 		leader, lerr := nomadClient.GetLeader()
@@ -152,11 +124,9 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 				"Scale-down blocked: no Raft leader available")
 		}
 
-		// AC-2.3.5 / 2.3.6 (D2c / neo-1ve.3): degraded-quorum opt-in.
-		// Required when transitioning from >= 3 down to < 3 (clusters
-		// already below the floor are exempt — same shape the design
-		// doc's CEL rule had). Enforced operator-side because CRD CEL
-		// on K8s 1.36 cannot access metadata.annotations.
+		// Degraded-quorum opt-in: required only when crossing from
+		// >=3 to <3. Operator-side because CRD CEL cannot read
+		// metadata.annotations.
 		if desiredReplicas < 3 && currentReplicas >= 3 && !hasAcceptDegradedQuorumAnnotation(cluster) {
 			p.Log.Info("ScaleDown: blocked — degraded-quorum opt-in missing; deferring",
 				"target", desiredReplicas, "annotation", acceptDegradedQuorumAnnotation)
@@ -282,11 +252,8 @@ func (p *ScaleDownPhase) finalize(
 	return OK()
 }
 
-// pickNextPeer returns the candidate to remove this reconcile pass.
-// It picks the highest-ordinal peer that (a) maps to our cluster,
-// (b) has ordinal >= desiredReplicas (so it's above the floor),
-// and (c) is not already in status.scaleDown.removedPeers. Returns
-// nil if no candidate qualifies.
+// pickNextPeer returns the highest-ordinal peer above the desired
+// count not already removed, or nil.
 func (p *ScaleDownPhase) pickNextPeer(
 	cluster *nomadv1alpha1.NomadCluster,
 	peers []*nomad.RaftPeer,
@@ -307,11 +274,8 @@ func (p *ScaleDownPhase) pickNextPeer(
 		}
 		ordinal, err := nodeNameToOrdinal(peer.Node, cluster.Name)
 		if err != nil {
-			// Peer doesn't match this cluster — log at V(1) and skip.
-			// This is expected when there are foreign peers in the
-			// configuration (e.g. multi-cluster lab setups), and also
-			// when a peer's Node is "(unknown)" because the Nomad
-			// server has not yet populated its node name.
+			// Expected for foreign peers and for "(unknown)" node
+			// names not yet populated by Nomad — skip.
 			p.Log.V(1).Info("Skipping peer that does not map to a cluster ordinal",
 				"node", peer.Node, "address", peer.Address,
 				"cluster", cluster.Name, "error", err)
@@ -328,14 +292,9 @@ func (p *ScaleDownPhase) pickNextPeer(
 	return best
 }
 
-// getManagementToken returns the C4 (neo-ikf) least-privilege
-// management token (acl:write, operator:write), needed for
-// RaftRemovePeer. The bootstrap token is no longer used for scale-down
-// (AC-2.4.5). If the management Secret does not exist yet — first
-// reconcile after an operator upgrade, before ACLBootstrapPhase (which
-// runs later in the phase order) has minted it — the caller defers to
-// the next reconcile. Returns the empty string with no error when ACLs
-// are disabled.
+// getManagementToken returns the operator management token needed for
+// RaftRemovePeer, empty with no error when ACLs are disabled. A
+// missing Secret defers the caller to the next reconcile.
 func (p *ScaleDownPhase) getManagementToken(
 	ctx context.Context,
 	cluster *nomadv1alpha1.NomadCluster,
@@ -358,11 +317,8 @@ func (p *ScaleDownPhase) getManagementToken(
 	return token, nil
 }
 
-// newNomadClientForScaleDown builds a Nomad client targeted at the
-// in-cluster Service. Address fallback to LoadBalancer (the pattern
-// ClusterStatusPhase uses) is not added here because scale-down only
-// runs from inside the cluster; if the internal Service is
-// unreachable the phase defers anyway.
+// newNomadClientForScaleDown targets the internal Service only — no
+// LB fallback; an unreachable Service just defers the phase.
 func (p *ScaleDownPhase) newNomadClientForScaleDown(
 	cluster *nomadv1alpha1.NomadCluster,
 	token string,
@@ -372,26 +328,12 @@ func (p *ScaleDownPhase) newNomadClientForScaleDown(
 	return p.NewNomadClient(cfg)
 }
 
-// nodeNameToOrdinal maps a Nomad server's node name to the
-// StatefulSet pod ordinal it represents. Returns an error for any
-// name the operator cannot positively identify as one of its own
-// server pods — never silently treats unrecognised input as ordinal
-// 0. This is the AC-2.3.4a contract.
+// nodeNameToOrdinal maps a server's node name (the only per-replica
+// field — Address is the shared advertise IP) to its pod ordinal.
+// Unrecognised input errors; it is never silently ordinal 0.
 //
-// Why node name and not the autopilot Address field: the operator's
-// HCL template (pkg/hcl/generator.go) sets advertise.rpc to the
-// cluster's LoadBalancer IP, which is shared across all replicas, so
-// the autopilot Address field cannot be used to distinguish peers.
-// The Node field carries the pod hostname suffixed with the region
-// (Nomad's convention), which is per-replica.
-//
-// Recognised input shapes:
-//   - <cluster>-<integer>             (e.g. "scaledown-test-2")
-//   - <cluster>-<integer>.<region>    (e.g. "scaledown-test-2.global" — Nomad's autopilot output)
-//
-// Rejected: empty, "(unknown)" (Nomad's not-yet-set sentinel), names
-// whose prefix does not match the cluster, names with a non-integer
-// ordinal segment.
+// Recognised: <cluster>-<int> and <cluster>-<int>.<region>.
+// Rejected: empty, "(unknown)", foreign prefixes, non-integer ordinals.
 // acceptDegradedQuorumAnnotation is the opt-in signal users set on
 // the NomadCluster CR to authorise a scale-down below the 3-replica
 // quorum floor (AC-2.3.5 / 2.3.6). Enforced by ScaleDownPhase because
@@ -404,16 +346,9 @@ func hasAcceptDegradedQuorumAnnotation(cluster *nomadv1alpha1.NomadCluster) bool
 	return cluster.Annotations[acceptDegradedQuorumAnnotation] == "true"
 }
 
-// isNoLeaderError reports whether err names a transient
-// "no Raft leader" condition rather than a real failure. Nomad and
-// the SDK surface this as several distinct strings depending on which
-// endpoint the call hit; substring match is the minimum sufficient
-// detection given the SDK does not export a typed sentinel.
-//
-// Used by AC-2.3.8a's silent-pause path. Conservative on purpose: a
-// false negative (real error mis-classified) just logs a generic
-// "deferring" message; a false positive (no-leader mis-classified as
-// real error) is harmless because both branches return OK and retry.
+// isNoLeaderError detects transient no-Raft-leader errors by
+// substring (the SDK exports no typed sentinel). Misclassification
+// either way is harmless: both branches return OK and retry.
 func isNoLeaderError(err error) bool {
 	if err == nil {
 		return false

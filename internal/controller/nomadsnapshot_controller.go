@@ -49,15 +49,8 @@ const (
 )
 
 // NomadSnapshotReconciler reconciles a NomadSnapshot object.
-//
-// Ensure-idiom note (neo-t1l): this controller uses
-// controllerutil.CreateOrUpdate throughout, while the NomadCluster
-// phases hand-roll Get-then-Create/Update. Both are internally
-// consistent and the split is deliberate: phases predate CreateOrUpdate
-// adoption and several need mid-flight decisions between Get and write
-// (immutable StatefulSet fields, scale-down replica gating) that
-// CreateOrUpdate's mutate-callback shape makes awkward. Match the file
-// you are editing.
+// Ensure idiom: this controller uses controllerutil.CreateOrUpdate; the
+// cluster phases hand-roll Get-then-write. Match the file you edit.
 type NomadSnapshotReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -91,19 +84,9 @@ func snapshotPVCName(s *nomadv1alpha1.NomadSnapshot) string       { return s.Nam
 
 // Reconcile handles NomadSnapshot reconciliation.
 //
-// Status-write contract (audited under neo-4iu): every helper that mutates
-// snapshot.Status must also issue its own Status().Patch with a patchBase
-// snapshotted immediately before the mutation. The final patch at the
-// bottom of this function only captures the local mutations within its
-// own patchBase window — it does NOT serve as a catch-all for fields that
-// earlier helpers may have written. This is intentionally different from
-// the cluster controller's top-of-Reconcile snapshot pattern (neo-ilz) and
-// works here because the snapshot controller has no phase framework: every
-// status mutation is local to the function performing it. When adding a
-// new helper, follow the per-phase Patch pattern or add a Status().Patch
-// at the call site — relying on the final patch to capture mutations made
-// before its patchBase is the bug pattern neo-ilz fixed in the cluster
-// controller.
+// Status-write contract: every helper mutating snapshot.Status issues
+// its own Status().Patch with a patchBase snapshotted just before the
+// mutation — the final patch is NOT a catch-all for earlier writes.
 func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -255,11 +238,9 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	// D3 (neo-kk7): branch on schedule presence. With a schedule the
-	// agent runs as a long-lived Deployment (recurring); without one it
-	// runs as a one-shot Job (interval = "0"). Mode switch deletes the
-	// other mode's workload (AC-2.7.3); switching away from a RUNNING
-	// one-shot Job is rejected at admission (AC-2.7.3a CEL rule).
+	// Schedule present: long-lived Deployment. Absent: one-shot Job
+	// (interval "0"). Mode switch deletes the other mode's workload;
+	// switching away from a running Job is CEL-rejected at admission.
 	if snapshot.Spec.Schedule != nil {
 		return r.reconcileRecurring(ctx, snapshot, cluster, internalAddr, configChecksum)
 	}
@@ -314,11 +295,9 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 			Message: "Snapshot agent deployment is running",
 		})
 
-		// AC-2.7.9: NextScheduled for recurring mode. The agent snapshots
-		// on its own clock which the operator cannot observe directly, so
-		// this is the operator's best projection: advanced by one interval
-		// whenever the previous projection lapses (at most one status
-		// write per interval, not per reconcile).
+		// The agent snapshots on its own clock; NextScheduled is the
+		// operator's projection, advanced only when the previous one
+		// lapses — one status write per interval, not per reconcile.
 		if interval, perr := time.ParseDuration(snapshot.Spec.Schedule.Interval); perr == nil {
 			if snapshot.Status.NextScheduled == nil || snapshot.Status.NextScheduled.Time.Before(time.Now()) {
 				snapshot.Status.NextScheduled = &metav1.Time{Time: time.Now().Add(interval)}
@@ -341,11 +320,8 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-// reconcileOneShot runs the schedule-absent mode: a single snapshot Job
-// (agent with interval = "0"), status from Job observation
-// (AC-2.7.1 / 2.7.5). One NomadSnapshot without a schedule performs one
-// snapshot operation; delete and recreate the CR (or switch modes) to
-// take another.
+// reconcileOneShot runs the schedule-absent mode: one snapshot Job,
+// status from Job observation. Another snapshot needs a new CR.
 func (r *NomadSnapshotReconciler) reconcileOneShot(
 	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
 	cluster *nomadv1alpha1.NomadCluster, internalAddr, configChecksum string,
@@ -498,13 +474,9 @@ func (r *NomadSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *
 	return ctrl.Result{}, nil
 }
 
-// runNomadWithFallback mirrors phases.runNomadWithFallback for the
-// snapshot controller's differently-sourced client config (the TLS CA
-// is read from the cluster's Secret per call): run fn against the
-// internal-Service client, retrying ONCE via the LoadBalancer address
-// on a network error. fn must be idempotent. The best-effort deletes in
-// cleanupNomadResources intentionally keep their per-op
-// log-and-continue fallbacks instead (neo-6al).
+// runNomadWithFallback mirrors phases.runNomadWithFallback with this
+// controller's client config: internal Service first, one LB retry on
+// network error. fn must be idempotent.
 func (r *NomadSnapshotReconciler) runNomadWithFallback(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace string, fn func(nomad.NomadAPI) error) error {
 	nomadClient, err := r.snapshotNomadClient(ctx, cluster, clusterNamespace,
 		nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true))
@@ -728,11 +700,8 @@ func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapsh
 	return err
 }
 
-// generateSnapshotConfig generates the HCL config for the snapshot agent.
-// The target stanzas are identical across modes (AC-2.7.4); only the
-// snapshot block differs: interval = "0" runs the agent as a one-shot
-// process that takes a single snapshot and exits (Job mode), a real
-// interval runs it as a long-lived daemon (Deployment mode).
+// generateSnapshotConfig renders the agent HCL. Target stanzas are
+// mode-agnostic; only the interval differs ("0" = one-shot).
 func (r *NomadSnapshotReconciler) generateSnapshotConfig(snapshot *nomadv1alpha1.NomadSnapshot) string {
 	var config string
 	if snapshot.Spec.Schedule == nil {
@@ -1153,11 +1122,9 @@ func (r *NomadSnapshotReconciler) addLocalStorage(snapshot *nomadv1alpha1.NomadS
 	})
 }
 
-// setCondition updates a condition on the snapshot. LastTransitionTime is
-// intentionally left to meta.SetStatusCondition: it advances the timestamp
-// only on a real Status transition and leaves it alone on steady state.
-// Hand-stamping metav1.Now() here was the A1 anti-pattern surfaced in
-// nomadcluster_controller.go; the same fix applies here (A1.1).
+// setCondition updates a condition, leaving LastTransitionTime to
+// meta.SetStatusCondition — hand-stamping metav1.Now() churns steady
+// state.
 func (r *NomadSnapshotReconciler) setCondition(snapshot *nomadv1alpha1.NomadSnapshot, condition metav1.Condition) {
 	meta.SetStatusCondition(&snapshot.Status.Conditions, condition)
 }

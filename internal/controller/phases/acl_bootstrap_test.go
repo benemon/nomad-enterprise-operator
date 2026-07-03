@@ -34,13 +34,8 @@ import (
 
 const testOperatorStatusName = "test-cluster-operator-status"
 
-// TestACLBootstrapPhase_CreatesOperatorStatusToken is the F1 demonstration of
-// the NomadAPI mock pattern. The behaviour is unchanged from the previous
-// HTTPS-server-on-:4646 version: it asserts the same outcomes (no error / no
-// requeue, Secret created with the expected accessor and secret IDs, status
-// fields populated, owner reference set) but injects a mocks.MockNomadAPI via
-// PhaseContext.NomadClientFactory rather than standing up a real Nomad
-// endpoint.
+// Bootstrap creates the operator-status token Secret with the
+// expected IDs, status fields, and owner reference (mocked NomadAPI).
 func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Server.ACL.Enabled = true
@@ -220,20 +215,9 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 	}
 }
 
-// TestObservedStateDiff_NoWriteWhenMatches covers C2 (neo-95g) /
-// AC-2.5.1–3: the operator-owned ACL policies are reconciled via
-// GET-then-write-on-diff, not unconditional upsert. The phase is driven
-// through three reconcile invocations in the already-bootstrapped
-// steady state:
-//
-//  1. policies missing → both written (bootstrap-equivalent create);
-//  2. observed matches desired → ZERO write-method calls (AC-2.5.1);
-//  3. manual edit to the anonymous policy between reconciles → exactly
-//     that policy is written back to desired (AC-2.5.2 / AC-2.5.3).
-//
-// mocks.NewMockNomadAPI(t) fails the test on any call without a
-// matching expectation, so invocation 2 having no CreateACLPolicy
-// expectation IS the zero-writes assertion.
+// TestObservedStateDiff_NoWriteWhenMatches: policies write only when
+// missing or drifted. The mock fails on unexpected calls, so the
+// steady-state pass having no write expectation IS the assertion.
 func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	const managementToken = "mgmt-secret-id"
 
@@ -335,12 +319,9 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	}
 }
 
-// TestBootstrapSecretNoOwnerRef covers C3 (neo-gwt) / AC-2.4.1: the
-// bootstrap-token Secret (and the external-bootstrap marker variant,
-// which shares its name) is created WITHOUT an ownerReference — so
-// Kubernetes GC cannot delete it before the finalizer's Nomad-side
-// cleanup has used the token — and carries the cluster back-link label
-// that the README orphan-cleanup procedure selects on.
+// The bootstrap Secret must have NO ownerReference (GC would race the
+// finalizer's Nomad cleanup) and must carry the cluster back-link
+// label for orphan cleanup.
 func TestBootstrapSecretNoOwnerRef(t *testing.T) {
 	assertC3Shape := func(t *testing.T, secret *corev1.Secret) {
 		t.Helper()
@@ -402,15 +383,9 @@ func TestBootstrapSecretNoOwnerRef(t *testing.T) {
 	})
 }
 
-// TestBootstrapMintsManagementTokenFirst covers C4 (neo-ikf) /
-// AC-2.4.4: on first bootstrap the Nomad call order is
-// BootstrapACL → CreateACLPolicy(mgmt, bootstrap auth) →
-// CreateACLToken(mgmt, bootstrap auth) → ... → CreateACLToken(status,
-// MANAGEMENT auth). The bootstrap token's only writes are the two
-// management-mint calls — any other call authenticated with it has no
-// matching expectation and fails the test. Also asserts the three
-// Secrets (acl-bootstrap, operator-management, operator-status) and the
-// status cache fields.
+// First bootstrap must mint the management token before anything
+// else; the bootstrap token's only writes are the two mint calls (any
+// other use fails the mock). Asserts all three Secrets.
 func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 	const (
 		bootToken  = "boot-secret-id"

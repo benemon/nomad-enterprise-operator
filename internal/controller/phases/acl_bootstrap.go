@@ -46,21 +46,16 @@ const (
 	operatorStatusPolicyDescription = "Operator day-2 status API access (operator:read, agent:read)"
 )
 
-// OperatorManagementSecretName returns the deterministic name of the
-// Secret (and Nomad token) for the cluster's operator management token
-// (C4). The name is the durable truth for cleanup on deletion;
-// status.operatorManagementSecretName is cache only. There is no
-// matching Nomad policy: the token is management-type, because Nomad
-// has no ACL-management policy grammar (see nomad.CreateManagementACLToken).
+// OperatorManagementSecretName returns the deterministic Secret/token
+// name — the durable truth for deletion cleanup; the status field is
+// cache only. No matching policy: the token is management-type.
 func OperatorManagementSecretName(clusterName string) string {
 	return clusterName + "-operator-management"
 }
 
-// BootstrapSecretClusterLabel marks the bootstrap-token Secret with its
-// owning cluster (C3 / AC-2.4.1). The Secret deliberately has no
-// ownerReference — see bootstrapSecretLabels — so this label is the only
-// machine-readable link back to the NomadCluster, used for the orphan
-// cleanup documented in the README threat model.
+// BootstrapSecretClusterLabel links the bootstrap Secret to its
+// cluster. The Secret deliberately has no ownerReference, so this
+// label is the only machine-readable link (used for orphan cleanup).
 const BootstrapSecretClusterLabel = "nomad.hashicorp.com/cluster"
 
 // bootstrapSecretLabels returns the labels for the bootstrap-token
@@ -109,10 +104,8 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 		// feature was deployed. ensureOperatorStatusToken is idempotent.
 		bootstrapToken := string(existingSecret.Data[SecretKeySecretID])
 		if bootstrapToken != "" {
-			// C4 (AC-2.4.4/2.4.5): ensure the dedicated management
-			// token exists, then use IT — never the bootstrap token — for
-			// every downstream Nomad-side write. The bootstrap token's
-			// only remaining jobs are minting the management token and
+			// All downstream writes use the management token; the
+			// bootstrap token only mints it and authenticates
 			// finalizer cleanup.
 			managementToken, err := p.ensureOperatorManagementToken(ctx, cluster, bootstrapToken)
 			if err != nil {
@@ -295,11 +288,8 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 	return OK()
 }
 
-// reconcileOperatorPolicies enforces observed-state diff semantics
-// (C2 / AC-2.5.1–3) for the operator-owned ACL policies: GET each
-// policy and write only when it is missing or its description/rules
-// have drifted from desired. Manual edits are reverted on the next
-// reconcile; when observed matches desired, no write call is made.
+// reconcileOperatorPolicies writes each operator-owned policy only
+// when missing or drifted; manual edits revert next reconcile.
 func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.NomadCluster, token string) error {
 	desired := []nomad.ACLPolicyResult{
 		{
@@ -336,13 +326,9 @@ func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.Nom
 	})
 }
 
-// ensureOperatorManagementToken ensures the C4 dedicated management
-// token exists and returns its secret-id. The bootstrap
-// token authenticates the policy and token creation (its only remaining
-// write); all downstream Nomad-side writes use the returned token
-// (AC-2.4.5). Idempotent via the deterministic Secret name — if the
-// Secret exists its stored token is returned, and the status cache
-// field is (re)persisted when missing.
+// ensureOperatorManagementToken mints (or loads) the management token,
+// idempotent via the deterministic Secret name. Only the bootstrap
+// token may authenticate the mint.
 func (p *ACLBootstrapPhase) ensureOperatorManagementToken(
 	ctx context.Context,
 	cluster *nomadv1alpha1.NomadCluster,
@@ -439,12 +425,9 @@ func (p *ACLBootstrapPhase) ensureOperatorStatusToken(
 	credName := OperatorStatusName(cluster.Name)
 	policyName, tokenName, secretName := credName, credName, credName
 
-	// Secondary idempotency guard: Secret exists by deterministic name but
-	// status was never persisted (e.g. status update failed on a prior run).
-	// Skip token creation and only retry the status update, avoiding a
-	// leaked Nomad token per reconcile. Checked before any Nomad call —
-	// the policy itself is kept in desired state every reconcile by
-	// reconcileOperatorPolicies (C2), so nothing is lost by returning here.
+	// Secret exists but status was never persisted: retry only the
+	// status write — creating another token would leak one per
+	// reconcile. Checked before any Nomad call.
 	existingOpSecret := &corev1.Secret{}
 	if err := p.Client.Get(ctx, types.NamespacedName{
 		Name:      secretName,

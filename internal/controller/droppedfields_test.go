@@ -29,16 +29,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// B3 (neo-x8i): every field on ADR 0003's DROP list must be gone from the
-// CRD schema. A validating webhook cannot reject removed fields — the API
-// server prunes unknown CR fields during decode, BEFORE admission webhooks
-// run (same finding as B2). Empirically (envtest k8s 1.35), CR pruning
-// also takes precedence over server-side strict field validation: the
-// apiserver silently drops the field rather than erroring. kubectl users
-// still get an "unknown field" error from kubectl's own strict validation;
-// programmatic clients get silent pruning. This table therefore asserts
-// the enforceable invariant: each dropped field is PRUNED from the stored
-// object — proving it is absent from the served schema.
+// Every ADR 0003 dropped field must be pruned from the stored object.
+// Pruning happens before admission and wins over strict validation, so
+// PRUNED (not rejected) is the enforceable invariant.
 var _ = Describe("ADR 0003 dropped fields are pruned from the schema", func() {
 	const namespace = "dropped-fields-test"
 

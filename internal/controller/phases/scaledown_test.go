@@ -37,19 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-// TestNodeNameToOrdinal covers AC-2.3.4a's contract — the ID-mapping
-// function returns ordinal or error, never silently treats
-// unrecognised input as ordinal 0.
-//
-// The design doc's table assumed the autopilot Address field would
-// carry per-pod information (FQDN forms, short DNS) so the mapping
-// function would parse addresses. In this operator's actual HCL
-// (pkg/hcl/generator.go), all replicas advertise the cluster's
-// shared LoadBalancer IP, so Address is useless for per-replica
-// identification. The function therefore operates on the Node field
-// (the pod hostname, e.g. "<cluster>-2"), which IS per-replica. The
-// AC contract still holds — what changed is the shape of the input,
-// not the guarantee.
+// TestNodeNameToOrdinal: the mapping returns ordinal or error, never
+// silently ordinal 0. Operates on Node (pod hostname), the only
+// per-replica field — Address is the shared advertise IP.
 func TestNodeNameToOrdinal(t *testing.T) {
 	const clusterName = "nomad"
 
@@ -210,12 +200,8 @@ func fetchSTS(t *testing.T, f *scaleDownFixture) *appsv1.StatefulSet {
 	return updated
 }
 
-// peersAtReplicas returns a synthetic Raft peer list matching
-// `replicas` Nomad servers named nomad-0..N-1. Useful for the
-// removal-order assertions. Node carries the per-replica identifier
-// the scale-down loop uses; Address is the shared LB IP form (a
-// realistic stand-in for production output, though irrelevant to
-// the mapping function).
+// peersAtReplicas returns a synthetic peer list, nomad-0..N-1, with
+// the production Address shape.
 func peersAtReplicas(replicas int32) []*nomad.RaftPeer {
 	peers := make([]*nomad.RaftPeer, 0, replicas)
 	for i := int32(0); i < replicas; i++ {
@@ -414,12 +400,8 @@ func TestScaleDown_DefersWhenVerificationShowsPeerStillPresent(t *testing.T) {
 	}
 }
 
-// TestScaleDown_PreStartLeaderEmptyBlocks covers AC-2.3.8 (D2d /
-// neo-1ve.4): when the operator is about to start a scale-down but
-// GetLeader returns empty, the phase must return Requeue carrying
-// Reason="ScaleDownBlocked" and MUST NOT initialise
-// status.scaleDown. The reason is what the controller uses to set
-// Ready=False, surfacing the cause on the CR.
+// No leader before start: Requeue with Reason=ScaleDownBlocked and
+// status.scaleDown NOT initialised.
 func TestScaleDown_PreStartLeaderEmptyBlocks(t *testing.T) {
 	f := newScaleDownFixture(t, 5, 3)
 
@@ -465,13 +447,8 @@ func TestScaleDown_PreStartLeaderErrorBlocks(t *testing.T) {
 	}
 }
 
-// TestScaleDown_MidOpLeaderLossPausesSilently covers AC-2.3.8a: when
-// a scale-down is already in progress (status.scaleDown.removedPeers
-// populated) and a subsequent Nomad call returns a "no leader" error,
-// the phase must pause silently — no Error, no Requeue with a
-// Reason (which would change the Ready condition), no Event. The
-// status.scaleDown field stays intact so the next reconcile resumes
-// per AC-2.3.7.
+// Leader loss MID-operation pauses silently — no Error, no Reason, no
+// Event — with status.scaleDown intact so the next reconcile resumes.
 func TestScaleDown_MidOpLeaderLossPausesSilently(t *testing.T) {
 	f := newScaleDownFixture(t, 5, 3)
 
@@ -511,12 +488,8 @@ func TestScaleDown_MidOpLeaderLossPausesSilently(t *testing.T) {
 	}
 }
 
-// TestScaleDown_MetricLifecycle covers AC-8.1.6 (D2e / neo-1ve.5):
-// the nomad_operator_scale_down_in_progress gauge tracks the cluster's
-// scale-down state across the operation lifecycle. Set to 1 when a
-// gap exists (so operator restart inherits the right value on first
-// reconcile), set to 0 when the gap closes or finalisation clears
-// status.scaleDown.
+// The in-progress gauge is 1 while a gap exists (restart-safe) and 0
+// once it closes or finalisation clears status.scaleDown.
 func TestScaleDown_MetricLifecycle(t *testing.T) {
 	// Unique namespace keeps the gauge's label set isolated from
 	// other tests (cluster name stays "nomad" so the synthetic peers
@@ -597,14 +570,9 @@ func TestScaleDown_MetricLifecycle(t *testing.T) {
 	}
 }
 
-// TestScaleDown_DegradedQuorumOptInRequired covers AC-2.3.5 (D2c /
-// neo-1ve.3): scaling from >= 3 down to < 3 without the opt-in
-// annotation surfaces Reason=DegradedQuorumNotAccepted on the Ready
-// condition and does not initialise status.scaleDown.
-//
-// CRD CEL on K8s 1.36 cannot read metadata.annotations, so the gate
-// is enforced operator-side. The unit asserts the gate behaves like
-// the D2d leader probe: Requeue + Reason, no Event, no status mutation.
+// Scaling >=3 to <3 without the opt-in annotation surfaces
+// DegradedQuorumNotAccepted and never initialises status.scaleDown
+// (operator-side gate: CEL cannot read annotations).
 func TestScaleDown_DegradedQuorumOptInRequired(t *testing.T) {
 	f := newScaleDownFixture(t, 3, 1) // 3 → 1, no annotation
 	// Pre-start: GetLeader runs first and must succeed before the
@@ -664,12 +632,8 @@ func TestScaleDown_DegradedQuorumOptInPresent(t *testing.T) {
 	}
 }
 
-// TestScaleDown_DegradedQuorumExemptForLegacyBelowFloor mirrors the
-// CEL rule's intended "oldSelf.spec.replicas < 3" exemption: clusters
-// whose current replica count is already below the floor are exempt
-// from re-validating the opt-in on every reconcile. Without this, a
-// 2-replica cluster could not be reduced to 1 without first
-// scaling up to 3 (operationally awkward).
+// Clusters already below the 3-replica floor are exempt from the
+// opt-in — otherwise 2 -> 1 would require scaling up to 3 first.
 func TestScaleDown_DegradedQuorumExemptForLegacyBelowFloor(t *testing.T) {
 	// Current sts has 2 replicas (already below floor), target is 1.
 	f := newScaleDownFixture(t, 2, 1)

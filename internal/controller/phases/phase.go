@@ -54,11 +54,9 @@ func BootstrapSecretName(clusterName string) string {
 	return clusterName + "-acl-bootstrap"
 }
 
-// TLSSecretName returns the operator-owned name of the server TLS
-// Secret for a cluster: `<cluster>-tls`. Single definition (neo-08p) —
-// the name is consumed by the certificate phase (writer), the
-// StatefulSet mount, checksum inputs, and both controllers' Nomad
-// client construction, which must all agree.
+// TLSSecretName returns the server TLS Secret name, `<cluster>-tls`.
+// Single definition: writer, mounts, checksums, and both controllers
+// must agree.
 func TLSSecretName(clusterName string) string {
 	return clusterName + "-tls"
 }
@@ -99,11 +97,9 @@ type PhaseResult struct {
 	// Message is the message for status update.
 	Message string
 
-	// Reason overrides the default "Reconciling" reason on the Ready
-	// condition the controller sets when this phase requests requeue.
-	// Used by phases that need a specific reason surfaced on the CR
-	// (e.g. ScaleDownPhase's AC-2.3.8 "ScaleDownBlocked"). Empty
-	// preserves the default.
+	// Reason overrides the default Ready-condition reason
+	// ("Reconciling" on requeue, "PhaseFailed" on error) when a phase
+	// has a specific user-facing cause. Empty preserves the default.
 	Reason string
 }
 
@@ -159,13 +155,10 @@ type Phase interface {
 	Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult
 }
 
-// Pod security (neo-8xu): both workload families (Nomad servers,
-// snapshot agents) target the PSS "restricted" profile. The identity
-// fields are conditional on platform: on OpenShift the SCC injects
-// runAsUser/fsGroup from the namespace's allocated range and setting
-// them explicitly would fight it; on vanilla Kubernetes the Nomad image
-// has no USER directive, so runAsNonRoot needs an explicit non-root
-// UID, and fsGroup makes the PVCs writable by it.
+// Both workload families target PSS "restricted". Identity fields are
+// platform-conditional: OpenShift's SCC injects runAsUser/fsGroup and
+// explicit values would fight it; vanilla needs them because the Nomad
+// image has no USER directive.
 const nonRootUserID = int64(65532)
 
 // ImageRef returns the Nomad container image reference for the
@@ -305,11 +298,8 @@ func (pc *PhaseContext) BuildClientConfig(timeout time.Duration, token string) n
 	}
 }
 
-// NewNomadClient constructs a Nomad API client using PhaseContext.NomadClientFactory
-// when set, falling back to nomad.NewClient. The return type is the NomadAPI
-// interface so phases depend on the interface rather than the concrete *Client.
-// The production path is instrumented with the D4b request counter;
-// factory-injected clients (tests) are returned as-is.
+// NewNomadClient returns a NomadAPI from the factory when set (tests),
+// else an instrumented production client.
 func (pc *PhaseContext) NewNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, error) {
 	if pc.NomadClientFactory != nil {
 		return pc.NomadClientFactory(cfg)
@@ -321,17 +311,10 @@ func (pc *PhaseContext) NewNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, 
 	return metrics.InstrumentNomadAPI(c), nil
 }
 
-// runNomadWithFallback builds a Nomad API client for the cluster's
-// internal Service address and runs fn against it. If fn fails with a
-// network error and a LoadBalancer address is known, the client is
-// rebuilt for the LB address and fn re-run ONCE (neo-6al — the shared
-// core of the previously hand-rolled per-site fallbacks). fn must be
-// idempotent against the Nomad API; every caller is (policy upserts,
-// reads, and token creation retried only when the first attempt never
-// reached the server). Not used by executeBootstrap (bespoke per-address
-// error guidance for the one-shot critical path), ClusterStatusPhase's
-// createNomadClient (probe-and-keep shape), or the snapshot controller's
-// best-effort cleanup (per-op log-and-continue semantics).
+// runNomadWithFallback runs fn against the internal Service address,
+// retrying once via the LoadBalancer address on a network error.
+// fn must be idempotent. Deliberately unused by executeBootstrap,
+// createNomadClient, and best-effort cleanup, whose shapes differ.
 func (pc *PhaseContext) runNomadWithFallback(cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string, fn func(nomad.NomadAPI) error) error {
 	cfg := pc.BuildClientConfig(timeout, token)
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)

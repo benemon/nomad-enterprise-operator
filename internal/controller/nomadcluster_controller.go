@@ -50,14 +50,9 @@ const (
 	// Finalizer name
 	nomadClusterFinalizer = "nomad.hashicorp.com/finalizer"
 
-	// defaultRequeueInterval governs the steady-state timer-driven requeue cadence.
-	// Watches handle most reconcile triggers; this timer only catches things watches
-	// can't see (LoadBalancer IP allocation, license expiry, periodic status enrichment).
-	// 5 minutes is a sensible balance: long enough that healthy clusters do not produce
-	// per-30s reconcile churn at fleet scale, short enough that LB-IP and license
-	// transitions are picked up within a single human attention span.
-	// Shorter requeues for "waiting on resource" scenarios (LB IP not yet assigned,
-	// pod not yet ready) continue to use Requeue(15*time.Second, …) from phase.go.
+	// Steady-state timer requeue: catches only what watches can't see
+	// (LB IP allocation, license expiry). Waiting-on-resource paths use
+	// the shorter Requeue(15s) from phase.go.
 	defaultRequeueInterval = 5 * time.Minute
 )
 
@@ -93,11 +88,9 @@ func (r *NomadClusterReconciler) newNomadClient(cfg nomad.ClientConfig) (nomad.N
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/status,verbs=patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters/finalizers,verbs=update
 
-// RBAC trimmed to observed runtime usage (neo-6xm.3 audit). Every
-// resource the cache-backed client reads keeps get;list;watch (a Get
-// through the default client starts an informer); write verbs exist
-// only where a call site does. Owned resources are garbage-collected
-// via ownerReferences, so most delete verbs are unnecessary.
+// RBAC is trimmed to observed usage: cache-backed reads keep
+// get;list;watch (any Get starts an informer); write verbs exist only
+// where a call site does; owned resources rely on GC, not delete.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
@@ -150,12 +143,8 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// Snapshot the cluster at the top of Reconcile so phase-internal
-	// status mutations (e.g. CertificatePhase.updateCAStatus) are captured
-	// in the final Status().Patch diff. Snapshotting only inside
-	// updateFinalStatus misses anything a phase wrote before it ran —
-	// previously caught silently because envtest happy-path didn't assert
-	// on phase-written status fields, exposed by e2e.
+	// Snapshot before the phases run: the final Status().Patch must
+	// include status fields phases write mid-reconcile.
 	reconcileStartSnapshot := cluster.DeepCopy()
 
 	// Create phase context
@@ -260,13 +249,10 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 	if controllerutil.ContainsFinalizer(cluster, nomadClusterFinalizer) {
 		log.Info("Handling NomadCluster deletion")
 
-		// Attempt to clean up Nomad-side ACL resources. The bootstrap
-		// Secret is read here (AC-2.4.2), before anything deletes it —
-		// it carries no ownerReference (C3), precisely so this cleanup
-		// can still authenticate against Nomad during deletion.
-		// Gated on spec (not status): cleanup uses deterministic names,
-		// so it must run even when the status cache fields were never
-		// persisted (AC-2.4.7 leak window).
+		// The bootstrap Secret carries no ownerReference precisely so
+		// this cleanup can still authenticate during deletion. Gated on
+		// spec, not status: deterministic names must be revoked even if
+		// the status cache was never persisted.
 		// Non-fatal — Kubernetes-owned resources are cleaned up via owner references
 		if cluster.Spec.Server.ACL.Enabled {
 			if err := r.cleanupNomadACLResources(ctx, cluster); err != nil {
@@ -274,12 +260,9 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 			}
 		}
 
-		// Clean up PVCs created by StatefulSet volumeClaimTemplates.
-		// These are not owned by the NomadCluster so won't be garbage
-		// collected automatically. Gated on spec.persistence.reclaimPolicy:
-		// under Retain (the default) the PVCs survive deletion so Raft
-		// state outlives accidental CR removal; the value in effect at
-		// deletion time wins (AC-2.3.15 — not retroactive).
+		// volumeClaimTemplate PVCs are not owned by the CR, so no GC.
+		// Under Retain (default) they survive deletion — Raft state
+		// outlives accidental CR removal. Deletion-time value wins.
 		if cluster.Spec.Persistence.ReclaimPolicy == nomadv1alpha1.ReclaimPolicyDelete {
 			if err := r.cleanupPVCs(ctx, cluster); err != nil {
 				log.Error(err, "Failed to cleanup PVCs")
@@ -338,12 +321,9 @@ func (r *NomadClusterReconciler) cleanupPVCs(ctx context.Context, cluster *nomad
 	return nil
 }
 
-// cleanupNomadACLResources revokes the operator-created Nomad-side ACL
-// tokens and policies — management first, then status (C4 / AC-2.4.7).
-// Deterministic names are the source of truth, NOT the status cache
-// fields: a cluster deleted between Nomad-side creation and the status
-// write must still get its policy revoked. Per-resource failures are
-// logged and cleanup continues (best-effort).
+// cleanupNomadACLResources revokes operator-created Nomad ACL state,
+// management token first. Deterministic names, not status fields, are
+// the source of truth. Best-effort per resource.
 func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) error {
 	log := logf.FromContext(ctx)
 
@@ -394,11 +374,9 @@ func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, c
 		return fmt.Errorf("failed to create Nomad client for cleanup: %w", err)
 	}
 
-	// Revoke each derived credential, management first (AC-2.4.7 order).
-	// The token accessor ID lives in the Secret of the same deterministic
-	// name; a missing Secret or Nomad-side not-found just means there is
-	// nothing to revoke. The management token has no policy — it is
-	// management-type (Nomad has no ACL-write policy grammar).
+	// Missing Secret or Nomad-side not-found means nothing to revoke.
+	// The management token has no policy: Nomad has no ACL-write policy
+	// grammar, so it is management-type.
 	for _, cred := range []struct {
 		name      string
 		hasPolicy bool
@@ -434,19 +412,9 @@ func (r *NomadClusterReconciler) cleanupNomadACLResources(ctx context.Context, c
 }
 
 func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, phaseCtx *phases.PhaseContext, reconcileStartSnapshot *nomadv1alpha1.NomadCluster) error {
-	// Use the top-of-Reconcile snapshot so phase-internal mutations
-	// (e.g. CertificatePhase.updateCAStatus) are captured in the patch
-	// diff alongside everything updateFinalStatus writes below.
-	//
-	// Two purposes:
-	//   (1) client.MergeFrom(patchBase) — the merge patch sent to the
-	//       server contains only the status fields changed during this
-	//       reconcile, so concurrent reconciles or external mutations
-	//       to other fields do not race on resourceVersion
-	//       (A3 / design review §5.5).
-	//   (2) The .Status sub-copy feeds AC-2.8.4's lastReconcileTime
-	//       gate: only advance the field when something other than
-	//       itself changed, or when the heartbeat threshold has elapsed.
+	// The top-of-Reconcile snapshot serves two purposes: MergeFrom sends
+	// only this reconcile's status changes (no resourceVersion races),
+	// and the .Status sub-copy feeds the lastReconcileTime gate.
 	patchBase := reconcileStartSnapshot
 	statusSnapshot := &patchBase.Status
 
@@ -531,12 +499,8 @@ func (r *NomadClusterReconciler) updateFinalStatus(ctx context.Context, cluster 
 	}
 	meta.SetStatusCondition(&cluster.Status.Conditions, ready)
 
-	// One-shot Event: emit the first time we observe Ready=True for this
-	// cluster. The debounce field on Status survives operator restart so
-	// we never re-emit. Downstream issues (B6 audit migration, etc.) use
-	// the same status-field pattern for their per-cluster one-shots.
-	// The flag mutation falls within updateFinalStatus's existing
-	// patchBase/Status().Patch window, so it lands in the merge patch.
+	// One-shot Event on first Ready=True; the status flag survives
+	// operator restarts and lands in this reconcile's merge patch.
 	if ready.Status == metav1.ConditionTrue &&
 		!cluster.Status.InitialReconcileEventEmitted && r.Recorder != nil {
 		r.Recorder.Event(cluster, corev1.EventTypeNormal, "Reconciled",
@@ -572,15 +536,9 @@ func caExpired(cluster *nomadv1alpha1.NomadCluster) bool {
 	return time.Now().After(expiry)
 }
 
-// maybeAdvanceLastReconcileTime applies the AC-2.8.4 gate: advance
-// status.lastReconcileTime only if any other status field changed this
-// reconcile, OR if defaultRequeueInterval/2 (the heartbeat threshold) has
-// elapsed since the previous update.
-//
-// The heartbeat threshold ensures the field continues to advance even when
-// the cluster is idle — operators watching .status.lastReconcileTime for
-// "is the operator alive?" still see updates, just at half-requeue cadence
-// rather than every loop.
+// maybeAdvanceLastReconcileTime advances status.lastReconcileTime only
+// when another status field changed, or on the half-requeue heartbeat —
+// idle clusters still show liveness without per-loop status writes.
 func (r *NomadClusterReconciler) maybeAdvanceLastReconcileTime(cluster *nomadv1alpha1.NomadCluster, snapshot *nomadv1alpha1.NomadClusterStatus) {
 	// Compute "did anything other than lastReconcileTime change". Cheapest
 	// way to compare is to copy the current and the snapshot, zero out the
@@ -634,11 +592,9 @@ func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, c
 	}
 }
 
-// SetupWithManager sets up the controller with the Manager.
-// secretRefIndexes maps a field-index key to the extractor pulling that
-// Secret reference out of a NomadCluster spec (D5 / neo-380). Shared by
-// SetupWithManager (real manager cache) and unit tests (fake client
-// WithIndex) so the two cannot drift.
+// secretRefIndexes maps field-index keys to Secret-reference
+// extractors. Shared by SetupWithManager and fake-client tests so the
+// two cannot drift.
 var secretRefIndexes = map[string]func(*nomadv1alpha1.NomadCluster) string{
 	"spec.license.secretName": func(c *nomadv1alpha1.NomadCluster) string {
 		return c.Spec.License.SecretName
@@ -679,23 +635,12 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&appsv1.StatefulSet{}).
-		// Watch external secrets (not owned by NomadCluster) for rolling restarts.
-		//
-		// D5 (neo-380) deliberately does NOT add a cache.Options.ByObject
-		// filter for Secrets, deviating from the design doc's AC-D5.2.
-		// The filter needs union semantics — operator-labelled OR
-		// named-per-convention OR dynamically user-referenced (license/CA/
-		// gossip Secrets with arbitrary names, possibly cross-namespace) —
-		// and controller-runtime selectors are static: they cannot express
-		// "referenced by some NomadCluster". A label-only filter would
-		// silently break both the phases' Get calls for unlabelled user
-		// Secrets (cache-backed reads return NotFound for uncached
-		// objects) and this rolling-restart watch. The reconcile-storm
-		// concern is already solved by the field-indexed map function
-		// (zero requests for unreferenced Secrets); what remains is
-		// informer memory, acceptable at the documented ≤200-cluster
-		// scale. Revisit only with a mechanism like operator-applied
-		// reference labels plus an APIReader migration for user Secrets.
+		// Watch external Secrets for rolling restarts. Deliberately no
+		// cache filter: selectors are static and cannot express
+		// "referenced by some NomadCluster", and a label filter would
+		// make cache-backed Gets of user Secrets return NotFound. The
+		// field-indexed map function already prevents reconcile storms;
+		// the cost is informer memory, fine at ≤200 clusters.
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findClustersReferencingSecret),

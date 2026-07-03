@@ -24,15 +24,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestSetStatusConditionPreservesTransitionTimeOnSteadyState verifies the
-// invariant A1 depends on: meta.SetStatusCondition leaves LastTransitionTime
-// unchanged when called repeatedly with the same Status/Reason. This is the
-// reason the explicit `LastTransitionTime: metav1.Now()` was removed from
-// every call site (the helper handles it).
-//
-// AC-2.8.2 partial coverage: a fully controller-driven steady-state test
-// (asserting zero Status().Update calls on no-op reconcile) requires the
-// mockable NomadAPI from F1; that broader test will land as part of F1.
+// meta.SetStatusCondition must leave LastTransitionTime unchanged on
+// steady state — the invariant that justified removing hand-stamped
+// metav1.Now() from every call site.
 func TestSetStatusConditionPreservesTransitionTimeOnSteadyState(t *testing.T) {
 	conditions := []metav1.Condition{}
 

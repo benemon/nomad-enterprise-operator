@@ -30,12 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestCleanupNomadACLResourcesOrder covers C4 (neo-ikf) / AC-2.4.7:
-// deletion revokes BOTH derived credentials — management token+policy
-// first, then status token+policy — authenticated with the bootstrap
-// token, and resolves everything by deterministic name (the status
-// cache fields are deliberately left empty here to prove the leak
-// window is closed).
+// Deletion revokes both derived credentials, management first, by
+// deterministic name — status cache fields are left empty here to
+// prove the leak window is closed.
 func TestCleanupNomadACLResourcesOrder(t *testing.T) {
 	const bootToken = "boot-secret-id"
 	mgmtName := phases.OperatorManagementSecretName("test-cluster")

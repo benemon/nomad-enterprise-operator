@@ -30,14 +30,9 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
-// neo-f7j: systematic admission-invariant suite. Every rule documented
-// in the README "Spec invariants" table gets at least one rejection and
-// one acceptance case against the real envtest apiserver, so a
-// controller-gen / marker regression cannot silently drop a rule.
-//
-// Rules covered elsewhere and deliberately not duplicated here:
-// the scale-down replicas transition CEL (scaledown_admission_test.go)
-// and the NomadSnapshot mode-switch gate (nomadsnapshot_oneshot_test.go).
+// Every README spec-invariant gets a rejection and an acceptance case
+// against the real apiserver, so a marker regression cannot silently
+// drop a rule. Transition CELs are covered in their own suites.
 var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 	const namespace = "admission-invariants-test"
 	ctx := context.Background()

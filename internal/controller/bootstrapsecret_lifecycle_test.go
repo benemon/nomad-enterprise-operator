@@ -32,18 +32,9 @@ import (
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
 )
 
-// C3 (neo-gwt): the bootstrap-token Secret has no ownerReference, so the
-// deletion finalizer must delete it explicitly — last, after the
-// best-effort Nomad-side ACL cleanup (AC-2.4.2 / AC-2.4.3). Two
-// scenarios:
-//
-//   - no Nomad-side resources recorded on status: deletion proceeds
-//     straight to the Secret delete;
-//   - Nomad-side cleanup fails (status names a policy but Nomad is
-//     unreachable from envtest): failure is non-fatal and the Secret is
-//     still deleted.
-//
-// In both cases the finalizer is released (cluster gone).
+// The bootstrap Secret has no ownerReference, so the finalizer must
+// delete it explicitly — last, after Nomad-side cleanup, whose failure
+// is non-fatal. Both paths release the finalizer.
 var _ = Describe("C3 bootstrap Secret finalizer lifecycle", func() {
 	ctx := context.Background()
 

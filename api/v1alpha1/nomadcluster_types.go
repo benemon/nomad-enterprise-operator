@@ -51,9 +51,8 @@ type NomadClusterSpec struct {
 	OpenShift OpenShiftSpec `json:"openshift,omitempty"`
 
 	// Monitoring configures ServiceMonitor and PrometheusRule creation.
-	// Resources are created when enabled AND the Prometheus Operator CRDs
-	// are installed — independent of openshift.enabled, so vanilla
-	// Kubernetes clusters running Prometheus Operator get monitoring too.
+	// Resources are created when enabled AND the Prometheus Operator
+	// CRDs are installed; independent of openshift.enabled.
 	// +optional
 	Monitoring MonitoringSpec `json:"monitoring,omitempty"`
 
@@ -92,32 +91,24 @@ type ImageSpec struct {
 	// +kubebuilder:default="hashicorp/nomad"
 	Repository string `json:"repository,omitempty"`
 
-	// Tag is the container image tag. The default is pinned to a concrete
-	// patch version rather than a floating tag, because Nomad is a Raft
-	// cluster — a registry-side retag during a rolling restart can produce
-	// version-mismatched peers and silent quorum loss. The operator's
-	// release process updates this default in deliberate increments per
-	// Nomad Enterprise release (see docs/release-process.md).
+	// Tag is the container image tag, default-pinned to a concrete
+	// patch version: a registry-side retag mid-roll can produce
+	// version-mismatched Raft peers and silent quorum loss.
 	// +kubebuilder:default="2.0.3-ent"
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
 
-	// Digest optionally pins the image by content digest for
-	// air-gapped/CISO deployments (neo-4xj). When set, the image
-	// reference is `repository@digest` and Tag is IGNORED (digest takes
-	// precedence — a CEL mutual-exclusion rule is not possible because
-	// Tag's default is materialised before validation runs). With a
-	// digest, pullPolicy Always is redundant but harmless: digests are
-	// content-addressed and immutable.
+	// Digest optionally pins the image by content digest. When set, the
+	// reference is `repository@digest` and Tag is ignored (defaulting
+	// materialises Tag before validation, so CEL exclusion is
+	// impossible).
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	// +optional
 	Digest string `json:"digest,omitempty"`
 
-	// PullPolicy defines when to pull the image. Defaults to Always as a
-	// safety measure against registry-side image content changes (a tag
-	// being re-pushed) even though the default tag is now pinned to a
-	// concrete patch version. Users on strict-pin workflows running fully
-	// air-gapped or using image digests can override to IfNotPresent.
+	// PullPolicy defaults to Always as a defence against registry-side
+	// retags; digest-pinned or air-gapped workflows can use
+	// IfNotPresent.
 	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
 	// +kubebuilder:default="Always"
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
@@ -224,12 +215,9 @@ type RouteTLSSpec struct {
 	// +optional
 	CertificateSecretName string `json:"certificateSecretName,omitempty"`
 
-	// SecretKeys allows overriding the key names within the certificate
-	// Secret, for Secrets populated by tooling (ESO, VSO) that does not
-	// follow the kubernetes.io/tls key convention. The {} default makes
-	// admission materialise the nested tls.crt/tls.key defaults even when
-	// secretKeys is omitted — kubebuilder nested defaults only apply
-	// inside objects that are present in the stored JSON.
+	// SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+	// that does not follow the kubernetes.io/tls convention. The {}
+	// default materialises the nested defaults when omitted.
 	// +kubebuilder:default={}
 	// +optional
 	SecretKeys CertificateSecretKeys `json:"secretKeys,omitempty"`
@@ -304,12 +292,9 @@ type CASpec struct {
 	// and private key. Expected keys: tls.crt (certificate), tls.key (private key).
 	SecretName string `json:"secretName"`
 
-	// SecretKeys allows overriding the key names within the CA secret,
-	// for Secrets populated by tooling (ESO, VSO) that does not follow
-	// the kubernetes.io/tls key convention. The {} default makes
-	// admission materialise the nested tls.crt/tls.key defaults even when
-	// secretKeys is omitted — kubebuilder nested defaults only apply
-	// inside objects that are present in the stored JSON.
+	// SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+	// that does not follow the kubernetes.io/tls convention. The {}
+	// default materialises the nested defaults when omitted.
 	// +kubebuilder:default={}
 	// +optional
 	SecretKeys CASecretKeys `json:"secretKeys,omitempty"`
@@ -356,23 +341,17 @@ type PersistenceSpec struct {
 	// +kubebuilder:default="10Gi"
 	Size string `json:"size,omitempty"`
 
-	// ReclaimPolicy controls what happens to the data PVCs when the
-	// NomadCluster is deleted. Retain (the default) leaves the PVCs in
-	// place so Raft state survives accidental CR deletion and can be
-	// re-adopted by a recreated cluster of the same name; Delete removes
-	// them with the cluster. The value in effect at deletion time wins —
-	// earlier values are not remembered.
+	// ReclaimPolicy controls data-PVC fate on cluster deletion. Retain
+	// (default) preserves Raft state for re-adoption by a same-name
+	// cluster; Delete removes it. Deletion-time value wins.
 	// +kubebuilder:validation:Enum=Retain;Delete
 	// +kubebuilder:default=Retain
 	// +optional
 	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
 }
 
-// Valid spec.persistence.reclaimPolicy values. ReclaimPolicyRetain has
-// only test consumers (production code compares against Delete alone,
-// and the kubebuilder default marker uses the string literal); it is
-// kept deliberately so the enum pair is documented in one place and
-// tests don't compare against raw strings (neo-dun item 7).
+// Valid spec.persistence.reclaimPolicy values. Retain has only test
+// consumers; kept so the enum pair is documented in one place.
 const (
 	ReclaimPolicyRetain = "Retain"
 	ReclaimPolicyDelete = "Delete"
@@ -388,34 +367,25 @@ const (
 	ClusterPhaseFailed   ClusterPhase = "Failed"
 )
 
-// Condition contract (C9 / neo-jmq, design review §2.5): NomadCluster
-// exposes exactly ONE condition, type "Ready". Everything a legacy
-// condition used to say lives in a dedicated status sub-field instead
-// (readyReplicas, gossipKeySecretName, advertiseAddress,
-// aclBootstrapped, routeHost, license, autopilot, certificateAuthority,
-// scaleDown). Ready=True requires: StatefulSet at desired replicas AND
-// license valid AND autopilot healthy (AC-2.5.5; unknown probe state
-// does not fail Ready). Ready=False reasons (AC-2.5.6):
+// Condition contract: exactly ONE condition, type "Ready"; sub-state
+// lives in dedicated status fields. Unknown probe state does not fail
+// Ready. Ready=False reasons:
 //
 //	WaitingForReplicas        — StatefulSet below desired ready count
 //	LicenseExpired            — Nomad Enterprise license invalid
 //	AutopilotUnhealthy        — Raft autopilot reports unhealthy
-//	LicenseSecretNotFound     — referenced license Secret absent (neo-0zq)
+//	LicenseSecretNotFound     — referenced license Secret absent
 //	LicenseSecretInvalid      — license Secret present, key missing
-//	CAExpired                 — CA past expiry; TLS is broken cluster-wide
-//	                            (checked before WaitingForReplicas: an
-//	                            expired CA also breaks replicas, and the
-//	                            cause should be named, not the symptom)
+//	CAExpired                 — CA past expiry (checked before
+//	                            WaitingForReplicas: name the cause,
+//	                            not the symptom)
 //	PhaseFailed               — a reconcile phase returned an error
-//	Reconciling               — generic requeue (phase asked to wait)
-//	ScaleDownBlocked          — scale-down waiting on a Raft leader (D2d)
-//	DegradedQuorumNotAccepted — scale-down below 3 lacks the opt-in annotation (D2c)
+//	Reconciling               — generic requeue
+//	ScaleDownBlocked          — scale-down waiting on a Raft leader
+//	DegradedQuorumNotAccepted — scale-down below 3 lacks the opt-in
 //
-// The design doc also listed PreUpgradeSnapshotFailed (retracted with
-// B5 — the operator no longer snapshots before upgrades) and
-// CARenewalRequired (superseded by C5 — a Warning Event with Ready
-// staying True). Condition types are string literals at the emission
-// sites; there are deliberately no ConditionType* constants (AC-C9.5).
+// Condition types stay string literals; deliberately no ConditionType
+// constants.
 
 // LicenseStatus represents the Nomad Enterprise license information
 type LicenseStatus struct {
@@ -470,20 +440,15 @@ type CertificateAuthorityStatus struct {
 	// +optional
 	Subject string `json:"subject,omitempty"`
 
-	// RenewalRequiredBy is the CA expiry minus the 30-day renewal
-	// window. Its meaning depends on source (neo-4s4): for
-	// operator-generated CAs it is when the operator STARTS automatic
-	// rotation (CARotationStarted/Completed Events); for user-provided
-	// CAs it is when a HUMAN must renew, signalled by the one-shot
-	// CARenewalRequired Warning Event. Ready stays True either way.
+	// RenewalRequiredBy is CA expiry minus the 30-day window. For
+	// operator CAs: when automatic rotation starts. For user CAs: when
+	// a human must renew (CARenewalRequired Events).
 	// +optional
 	RenewalRequiredBy string `json:"renewalRequiredBy,omitempty"`
 
-	// RenewalWarningThreshold debounces the escalating CARenewalRequired
-	// Events for user-provided CAs (neo-ru9): records the last emitted
-	// threshold bucket — "30d", "14d", or "7d:<date>" for the daily
-	// cadence inside the final week. Carried while the same CA is in
-	// place (survives operator restarts); a replaced CA resets it.
+	// RenewalWarningThreshold records the last emitted warning bucket
+	// ("30d", "14d", or "7d:<date>" daily), debouncing the escalating
+	// user-CA Events across operator restarts.
 	// +optional
 	RenewalWarningThreshold string `json:"renewalWarningThreshold,omitempty"`
 }
@@ -532,11 +497,8 @@ type NomadClusterStatus struct {
 	// CurrentReplicas is the current number of Nomad server pods
 	CurrentReplicas int32 `json:"currentReplicas,omitempty"`
 
-	// LeaderAddress is the host:port of the current Raft leader as
-	// reported by Nomad (if known). This is NOT the Raft server ID;
-	// it is the leader's RPC address. Consumers that need the actual
-	// Raft server ID should read it from
-	// `status.autopilot.servers[?(@.leader==true)].id`.
+	// LeaderAddress is the leader's RPC host:port (not its Raft server
+	// ID — that lives in status.autopilot.servers).
 	// +optional
 	LeaderAddress string `json:"leaderAddress,omitempty"`
 
@@ -563,12 +525,9 @@ type NomadClusterStatus struct {
 	// +optional
 	OperatorStatusSecretName string `json:"operatorStatusSecretName,omitempty"`
 
-	// OperatorManagementSecretName is the name of the Secret containing
-	// the dedicated management-type ACL token used for all day-2
-	// management writes (C4). Management-type because Nomad has no
-	// ACL-write policy grammar — only management tokens can write ACL
-	// state. Cache only: cleanup on deletion uses the deterministic name
-	// `<cluster>-operator-management`, not this field (AC-2.4.7).
+	// OperatorManagementSecretName names the Secret holding the
+	// management-type token for day-2 ACL writes. Cache only — cleanup
+	// uses the deterministic name, not this field.
 	// +optional
 	OperatorManagementSecretName string `json:"operatorManagementSecretName,omitempty"`
 
@@ -581,11 +540,8 @@ type NomadClusterStatus struct {
 	// +optional
 	RouteHost string `json:"routeHost,omitempty"`
 
-	// NomadVersion is the agent version reported by /v1/agent/self
-	// (e.g. "1.11.0+ent"). Probed each reconcile while at least one
-	// pod is Ready; empty if the probe failed or has not yet run.
-	// The version probe is non-fatal — failure does not gate other
-	// status enrichment (C7 / AC-4.7.2).
+	// NomadVersion is the agent version from /v1/agent/self; empty on
+	// probe miss. Non-fatal — never gates other enrichment.
 	// +optional
 	NomadVersion string `json:"nomadVersion,omitempty"`
 
@@ -604,35 +560,20 @@ type NomadClusterStatus struct {
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// LastReconcileTime is the timestamp of the most recent reconciliation
-	// that produced a status mutation or that crossed the heartbeat
-	// threshold of (defaultRequeueInterval / 2). It is NOT updated on
-	// every reconcile loop — that would produce per-loop status writes
-	// even when nothing observable changed (etcd write amplification and
-	// false GitOps drift). Consumers treating this as "is the operator
-	// alive?" should expect updates roughly every 2m30s at the operator's
-	// 5-minute steady-state requeue cadence, plus immediate updates on
-	// any real status transition.
+	// LastReconcileTime advances on status mutations and on the
+	// heartbeat threshold — NOT every loop, which would amplify etcd
+	// writes and fake GitOps drift. Liveness watchers see updates
+	// roughly every 2m30s when idle.
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
 
-	// InitialReconcileEventEmitted records whether the operator has
-	// emitted the one-shot "InitialReconcileComplete" Event for this
-	// cluster. Used as a per-cluster debounce so the Event fires
-	// exactly once across the cluster's lifetime, even across
-	// operator restarts. Downstream issues (B6 audit migration, etc.)
-	// use the same status-field pattern for their per-cluster
-	// one-shot Events.
+	// InitialReconcileEventEmitted debounces the one-shot
+	// InitialReconcileComplete Event across operator restarts.
 	// +optional
 	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
 
-	// ScaleDown tracks an in-flight Raft scale-down operation
-	// (D2 / neo-1ve). Non-nil while peers are being removed from
-	// the Raft quorum; cleared to nil when the operation completes
-	// (i.e., the StatefulSet's replica count matches spec.replicas).
-	// Used by the resume path so a crashed operator never re-removes
-	// a peer (AC-2.3.7), by the admission gate that blocks concurrent
-	// spec.replicas edits during scale-down (AC-2.3.5a), and by the
-	// scale-down-in-progress metric (D2e).
+	// ScaleDown tracks an in-flight Raft scale-down; nil when none.
+	// Drives crash-safe resume, the replicas-edit admission freeze,
+	// and the in-progress metric.
 	// +optional
 	ScaleDown *ScaleDownStatus `json:"scaleDown,omitempty"`
 }
@@ -642,11 +583,8 @@ type NomadClusterStatus struct {
 // so D2b's reconcile loop and D2c's admission rule can both depend
 // on a stable shape.
 type ScaleDownStatus struct {
-	// RemovedPeers is the list of Raft server IDs (as returned by
-	// the autopilot API) the operator has already removed during the
-	// current operation. The reconcile loop appends one ID per
-	// successful RaftRemovePeer call and never re-removes an entry
-	// in this list across operator restarts.
+	// RemovedPeers lists Raft server IDs already removed this
+	// operation; never re-removed, even across operator restarts.
 	// +optional
 	RemovedPeers []string `json:"removedPeers,omitempty"`
 }
@@ -660,21 +598,10 @@ type ScaleDownStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Advertise",type="string",JSONPath=".status.advertiseAddress"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// AC-2.3.5a (D2c / neo-1ve.3): spec.replicas cannot be modified while
-// a scale-down operation is in flight. Once the operator clears
-// status.scaleDown at completion, edits are accepted again. Defends
-// the resume contract (AC-2.3.7) — without this, a user who changes
-// spec.replicas mid-operation can desynchronise the gap calculation
-// from the recorded removed-peers list.
-//
-// Note on AC-2.3.5 / 2.3.6 (degraded-quorum opt-in): the design doc
-// expected CRD CEL to gate scale-down below 3 replicas on an
-// annotation. CRD validation rules on K8s 1.36 do NOT expose
-// metadata.annotations or metadata.labels to CEL — only structural
-// schema fields. AC-2.3.5 / 2.3.6 are therefore enforced by the
-// operator's ScaleDownPhase (see internal/controller/phases/scaledown.go)
-// via a ScaleDownBlocked-style Ready condition. The annotation
-// remains the public contract.
+// spec.replicas is frozen while a scale-down is in flight — an edit
+// mid-operation would desynchronise the gap calculation from the
+// removed-peers list. The degraded-quorum opt-in is enforced by
+// ScaleDownPhase instead: CRD CEL cannot read metadata.annotations.
 // +kubebuilder:validation:XValidation:rule="self.spec.replicas == oldSelf.spec.replicas || !has(self.status) || !has(self.status.scaleDown) || !has(self.status.scaleDown.removedPeers) || size(self.status.scaleDown.removedPeers) == 0",message="spec.replicas cannot be modified while a scale-down operation is in progress; wait for status.scaleDown to clear"
 
 // NomadCluster is the Schema for the nomadclusters API.

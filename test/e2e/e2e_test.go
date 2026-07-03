@@ -76,13 +76,9 @@ spec:
       size: 1Gi
 `
 
-// testClusterCR is the NomadCluster CR applied during reconciliation tests.
-// Uses replicas=1 to minimise Kind resource usage, loadBalancerIP to bypass
-// AdvertisePhase LB wait, and disables TLS to reduce dependencies.
-// Audit is enabled to exercise that feature path; the audit shape
-// (format=json, rotateDuration=24h, rotateMaxFiles=15) is operator-owned
-// per ADR 0003 and no longer settable from spec — the test asserts on
-// the operator-applied defaults instead.
+// testClusterCR: replicas=1 for cheap Kind runs, fixed loadBalancerIP
+// to skip the LB wait, audit enabled to exercise that path (its shape
+// is operator-owned; specs assert the applied defaults).
 const testClusterCR = `apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
 metadata:
@@ -970,12 +966,9 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(Equal("1"), "currentReplicas should be 1")
 
 			By("verifying InitialReconcileComplete Event was emitted (F5 / neo-76n)")
-			// AC-F5.1: one-shot Event when the cluster first becomes
-			// Ready=True. The status flag is the debounce; both must be
-			// asserted to prove the wiring (flag set + Event landed).
-			// EventRecorder behaviour against a real apiserver is the part
-			// envtest can't exercise — its FakeRecorder is a different
-			// code path that doesn't reach the events API.
+			// One-shot Event on first Ready=True: assert flag AND Event
+			// — real-apiserver EventRecorder behaviour is what envtest
+			// cannot exercise.
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
 					"-o", "jsonpath={.status.initialReconcileEventEmitted}")
@@ -1916,12 +1909,9 @@ spec:
 		})
 	})
 
-	// B4 / neo-76n: openshift.enabled=true on a cluster without Route CRDs
-	// must emit a RouteCRDMissing Warning Event and skip Route creation
-	// instead of erroring. Kind has no Route CRDs installed, so this
-	// scenario falls out naturally. Envtest covers the helper
-	// (TestRouteDiscoveryGated); e2e is here to prove the integration:
-	// real REST mapper + real Event emission.
+	// openshift.enabled without Route CRDs must warn and skip, not
+	// error — kind has no Route CRDs, so the scenario falls out
+	// naturally with a real REST mapper.
 	Context("NomadCluster with openshift.enabled on a non-OpenShift cluster", Ordered, func() {
 		const openshiftClusterName = "openshift-test"
 		openshiftClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
@@ -1976,13 +1966,9 @@ spec:
 		})
 	})
 
-	// C1 / neo-76n: spec.persistence.reclaimPolicy=Delete must actually
-	// remove the data PVC when the cluster is deleted. Envtest's
-	// reclaimpolicy_test.go covers the controller's Delete call; e2e is
-	// here to prove the kubelet + KCM finalizer chain actually releases
-	// the PVC under a real apiserver. Audit and ACL are disabled to keep
-	// the cluster cheap — we only need the StatefulSet far enough along
-	// to provision the data PVC.
+	// reclaimPolicy=Delete must actually remove the data PVC — e2e
+	// proves the kubelet+KCM finalizer chain releases it, which envtest
+	// cannot.
 	Context("NomadCluster with reclaimPolicy=Delete", Ordered, func() {
 		const reclaimClusterName = "reclaim-test"
 		reclaimClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
@@ -2041,23 +2027,9 @@ spec:
 		})
 	})
 
-	// D2b / neo-1ve.2: end-to-end proof of the Raft-aware scale-down loop
-	// against a real Nomad cluster. The unit tests under
-	// internal/controller/phases/scaledown_test.go cover the loop's
-	// deterministic logic with a mocked NomadAPI; this spec covers what
-	// the mock cannot — that real Nomad Raft actually removes the peers
-	// when the operator calls RaftRemovePeer, and that PVC preservation
-	// (AC-2.3.4c) holds against a real apiserver.
-	//
-	// Scenario: 3-replica cluster → spec.replicas=1. Expected sequence:
-	// the operator removes ordinals 2 and 1 from Raft one per reconcile,
-	// patches sts.spec.replicas to 1, and clears status.scaleDown. The
-	// data PVCs for the removed ordinals must survive because
-	// reclaimPolicy governs cluster-*delete* behaviour only.
-	//
-	// The accept-degraded-quorum annotation is set up-front so the spec
-	// keeps passing once D2c (neo-1ve.3) lands the CEL floor rule that
-	// rejects scale-down below 3 without opt-in.
+	// Raft-aware scale-down against real Nomad: 3 -> 1, serial peer
+	// removal, STS patched last, PVCs preserved. The opt-in annotation
+	// is set up-front to satisfy the sub-3 floor gate.
 	Context("NomadCluster scale-down (D2b)", Ordered, func() {
 		const scaleDownClusterName = "scaledown-test"
 		scaleDownClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
@@ -2211,20 +2183,14 @@ spec:
 		})
 	})
 
-	// neo-6xm.1: the upgrade path — a rolling Nomad version upgrade of
-	// a 3-replica Raft cluster, with the quorum floor asserted at every
-	// poll during the roll. CI wiring: this container plus scale-down
-	// are the slow lane (~8 min each); neo-g1o's smoke matrix may move
-	// them to a nightly lane — they are tagged by container name for
-	// ginkgo --focus/--skip selection.
+	// Rolling Nomad version upgrade with the quorum floor asserted at
+	// every poll. Slow lane: runs nightly, skipped on the PR lane by
+	// container name.
 	Context("Nomad version upgrade (neo-6xm.1)", Ordered, func() {
 		const upgradeClusterName = "upgrade-test"
-		// The pair is overridable so the nightly matrix can sweep
-		// consecutive minors (UPGRADE_FROM/UPGRADE_TO). Major.minor
-		// tags are deliberate for matrix use: HashiCorp recommends
-		// upgrading from the latest patch of a minor, and those tags
-		// always serve it — the matrix self-maintains as patches ship.
-		// Defaults keep a bare local run on the consecutive-minor path.
+		// Overridable for the nightly matrix. Major.minor tags serve
+		// each line's latest patch — HashiCorp's recommended upgrade
+		// origin — so the matrix self-maintains as patches ship.
 		fromTag := envOr("UPGRADE_FROM", "1.11-ent")
 		toTag := envOr("UPGRADE_TO", "2.0-ent")
 
@@ -2396,12 +2362,10 @@ spec:
 			}, 2*time.Minute, 3*time.Second).Should(Succeed())
 
 			By("proving the new leader reconciles: a canary CR gets its status set")
-			// A cluster referencing a missing license Secret parks at
-			// LicenseSecretNotFound (neo-0zq) within one reconcile — a
-			// cheap end-to-end liveness probe needing no Nomad boot.
-			// NodePort matters: the defaulted LoadBalancer would make
-			// AdvertisePhase (which runs before Secrets) requeue forever
-			// waiting for an IP, parking the canary at Reconciling.
+			// A missing-Secret canary parks at LicenseSecretNotFound in
+			// one reconcile — a liveness probe needing no Nomad boot.
+			// NodePort matters: a LoadBalancer canary would wait on an
+			// IP forever and never reach the license check.
 			canary := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
 metadata:

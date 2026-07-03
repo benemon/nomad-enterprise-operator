@@ -14,23 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package metrics declares the operator's seven Prometheus metric handles
-// (design review §8.1) and registers them on controller-runtime's default
-// registry, which is exposed on the existing :8443/metrics endpoint.
+// Package metrics declares the operator's Prometheus metric handles,
+// registered on controller-runtime's default registry (:8443/metrics).
 //
-// TEST ISOLATION (neo-9eq): the registry is process-global, shared by
-// every test in the binary. Tests asserting on these handles MUST use
-// label values unique to the test (e.g. "d4a-cluster"/"d4a-ns") — a
-// duplicated cluster/namespace pair across test files silently
-// cross-contaminates counters. Prefer delta assertions (read before,
-// act, read after) over absolute values where practical.
-//
-// The handles were scaffolded by F4 and are populated per-site: phase
-// durations by the controller's TimedExecute loop (D4a), API requests
-// by the InstrumentNomadAPI decorator (D4b), cert expiry by
-// CertificatePhase (D4c), license expiry and version info by
-// ClusterStatusPhase (D4d), bootstrap failures by ACLBootstrapPhase
-// (D4e), and scale-down-in-progress by ScaleDownPhase (D2e).
+// TEST ISOLATION: the registry is process-global across the whole test
+// binary — tests must use label values unique to the test, or delta
+// assertions, to avoid cross-contaminating counters.
 package metrics
 
 import (
@@ -83,10 +72,8 @@ var (
 	}, []string{"cluster", "namespace"})
 
 	// NomadVersionInfo is an info-style gauge (constant 1) carrying the
-	// observed Nomad server version as a label (AC-8.1.7, populated by
-	// D4d after C7's version probe). Single version label per cluster:
-	// the previous series is deleted on version change to bound
-	// cardinality.
+	// version as a label; the previous series is deleted on version
+	// change to bound cardinality.
 	NomadVersionInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "nomad_operator_nomad_version_info",
 		Help: "Observed Nomad server version per cluster; value is always 1, version carried as a label.",
@@ -104,13 +91,9 @@ func init() {
 		NomadVersionInfo,
 	)
 
-	// Seed each vec with one empty-label child so all seven metric
-	// families appear on /metrics (HELP/TYPE + zero value) from startup
-	// (AC-F4.3). A label-vec with no children exports nothing at all,
-	// which would make "is the metric registered?" unobservable until
-	// the first real sample. Empty label values are treated as absent
-	// labels by PromQL matchers, so the placeholders don't collide with
-	// the real per-cluster series Tranche D adds.
+	// Seed each vec with an empty-label child so every family appears
+	// on /metrics from startup (a child-less vec exports nothing).
+	// PromQL treats empty label values as absent, so no collisions.
 	PhaseDuration.WithLabelValues("", "", "").Observe(0)
 	NomadAPIRequests.WithLabelValues("", "").Add(0)
 	CertExpiry.WithLabelValues("", "", "").Set(0)

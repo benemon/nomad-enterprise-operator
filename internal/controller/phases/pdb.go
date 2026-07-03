@@ -28,18 +28,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// PDBPhase reconciles the PodDisruptionBudget for the Nomad server
-// StatefulSet. The operator owns the PDB (no spec field on
-// NomadCluster) — D1 design intent is that the disruption policy is a
-// platform-level concern, not user-tunable.
-//
-// Shape per AC-2.3.1:
-//   - N >= 3: a policy/v1 PodDisruptionBudget exists, named after the
-//     cluster, with maxUnavailable = N/2 (integer division: 1 for 3,
-//     2 for 5) and selector matching the operator's pod labels.
-//   - N == 1: no PDB. Single-instance clusters are not HA — the
-//     operator does not block node drains for them. If a PDB exists
-//     from a prior larger replica count, this phase deletes it.
+// PDBPhase reconciles the operator-owned PodDisruptionBudget (not
+// user-tunable): maxUnavailable = N/2 for N >= 3; no PDB at N == 1
+// (single instances are not HA, and a stale PDB is deleted).
 type PDBPhase struct {
 	*PhaseContext
 }

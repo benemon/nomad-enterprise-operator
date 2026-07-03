@@ -314,12 +314,8 @@ var _ = Describe("NomadSnapshot mode-switch admission rule (D3 / AC-2.7.3a)", fu
 	})
 })
 
-// TestEnsureSnapshotTokenWithMock covers neo-8qk: snapshotNomadClient
-// honours the injected factory (the production path routes through the
-// same function and is instrumented), so the token-mint flow is finally
-// drivable in a unit test: policy upsert + token creation, both
-// authenticated with the passed management token, and the accessor
-// persisted to status.
+// Token mint via the injected factory: policy upsert + token create,
+// both management-token-authenticated, accessor persisted to status.
 func TestEnsureSnapshotTokenWithMock(t *testing.T) {
 	snap := newOneShotSnapshot("tok")
 	cluster := newTestCluster("snap-ns", "test-cluster")
@@ -553,12 +549,9 @@ var _ = Describe("NomadSnapshot cross-namespace clusterRef (neo-tih)", func() {
 		snap.Spec.ClusterRef = nomadv1alpha1.ClusterReference{Name: "target", Namespace: "xns-cluster"}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
 
-		// Two reconciles: finalizer add, then the real pass. With no
-		// management Secret in xns-cluster the reconcile must park at
-		// WaitingForManagementToken — proving the cluster (and the
-		// namespace its secrets live in) resolved across namespaces;
-		// ClusterNotFound or WaitingForACLBootstrap would mean the
-		// lookup used the wrong namespace.
+		// Parking at WaitingForManagementToken proves the cluster and
+		// its Secrets resolved in the REFERENCED namespace; any other
+		// reason means the lookup used the wrong one.
 		for i := 0; i < 2; i++ {
 			_, err := reconcileSnapshot(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"})
 			Expect(err).NotTo(HaveOccurred())

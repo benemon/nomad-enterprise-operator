@@ -75,23 +75,18 @@ spec:
                 properties:
                   digest:
                     description: |-
-                      Digest optionally pins the image by content digest for
-                      air-gapped/CISO deployments (neo-4xj). When set, the image
-                      reference is `repository@digest` and Tag is IGNORED (digest takes
-                      precedence — a CEL mutual-exclusion rule is not possible because
-                      Tag's default is materialised before validation runs). With a
-                      digest, pullPolicy Always is redundant but harmless: digests are
-                      content-addressed and immutable.
+                      Digest optionally pins the image by content digest. When set, the
+                      reference is `repository@digest` and Tag is ignored (defaulting
+                      materialises Tag before validation, so CEL exclusion is
+                      impossible).
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   pullPolicy:
                     default: Always
                     description: |-
-                      PullPolicy defines when to pull the image. Defaults to Always as a
-                      safety measure against registry-side image content changes (a tag
-                      being re-pushed) even though the default tag is now pinned to a
-                      concrete patch version. Users on strict-pin workflows running fully
-                      air-gapped or using image digests can override to IfNotPresent.
+                      PullPolicy defaults to Always as a defence against registry-side
+                      retags; digest-pinned or air-gapped workflows can use
+                      IfNotPresent.
                     enum:
                     - Always
                     - IfNotPresent
@@ -104,12 +99,9 @@ spec:
                   tag:
                     default: 2.0.3-ent
                     description: |-
-                      Tag is the container image tag. The default is pinned to a concrete
-                      patch version rather than a floating tag, because Nomad is a Raft
-                      cluster — a registry-side retag during a rolling restart can produce
-                      version-mismatched peers and silent quorum loss. The operator's
-                      release process updates this default in deliberate increments per
-                      Nomad Enterprise release (see docs/release-process.md).
+                      Tag is the container image tag, default-pinned to a concrete
+                      patch version: a registry-side retag mid-roll can produce
+                      version-mismatched Raft peers and silent quorum loss.
                     pattern: ^[A-Za-z0-9._-]+$
                     type: string
                 type: object
@@ -159,9 +151,8 @@ spec:
               monitoring:
                 description: |-
                   Monitoring configures ServiceMonitor and PrometheusRule creation.
-                  Resources are created when enabled AND the Prometheus Operator CRDs
-                  are installed — independent of openshift.enabled, so vanilla
-                  Kubernetes clusters running Prometheus Operator get monitoring too.
+                  Resources are created when enabled AND the Prometheus Operator
+                  CRDs are installed; independent of openshift.enabled.
                 properties:
                   enabled:
                     default: true
@@ -210,12 +201,9 @@ spec:
                           secretKeys:
                             default: {}
                             description: |-
-                              SecretKeys allows overriding the key names within the certificate
-                              Secret, for Secrets populated by tooling (ESO, VSO) that does not
-                              follow the kubernetes.io/tls key convention. The {} default makes
-                              admission materialise the nested tls.crt/tls.key defaults even when
-                              secretKeys is omitted — kubebuilder nested defaults only apply
-                              inside objects that are present in the stored JSON.
+                              SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+                              that does not follow the kubernetes.io/tls convention. The {}
+                              default materialises the nested defaults when omitted.
                             properties:
                               certificate:
                                 default: tls.crt
@@ -237,12 +225,9 @@ spec:
                   reclaimPolicy:
                     default: Retain
                     description: |-
-                      ReclaimPolicy controls what happens to the data PVCs when the
-                      NomadCluster is deleted. Retain (the default) leaves the PVCs in
-                      place so Raft state survives accidental CR deletion and can be
-                      re-adopted by a recreated cluster of the same name; Delete removes
-                      them with the cluster. The value in effect at deletion time wins —
-                      earlier values are not remembered.
+                      ReclaimPolicy controls data-PVC fate on cluster deletion. Retain
+                      (default) preserves Raft state for re-adoption by a same-name
+                      cluster; Delete removes it. Deletion-time value wins.
                     enum:
                     - Retain
                     - Delete
@@ -371,12 +356,9 @@ spec:
                           secretKeys:
                             default: {}
                             description: |-
-                              SecretKeys allows overriding the key names within the CA secret,
-                              for Secrets populated by tooling (ESO, VSO) that does not follow
-                              the kubernetes.io/tls key convention. The {} default makes
-                              admission materialise the nested tls.crt/tls.key defaults even when
-                              secretKeys is omitted — kubebuilder nested defaults only apply
-                              inside objects that are present in the stored JSON.
+                              SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+                              that does not follow the kubernetes.io/tls convention. The {}
+                              default materialises the nested defaults when omitted.
                             properties:
                               certificate:
                                 default: tls.crt
@@ -734,20 +716,15 @@ spec:
                     type: string
                   renewalRequiredBy:
                     description: |-
-                      RenewalRequiredBy is the CA expiry minus the 30-day renewal
-                      window. Its meaning depends on source (neo-4s4): for
-                      operator-generated CAs it is when the operator STARTS automatic
-                      rotation (CARotationStarted/Completed Events); for user-provided
-                      CAs it is when a HUMAN must renew, signalled by the one-shot
-                      CARenewalRequired Warning Event. Ready stays True either way.
+                      RenewalRequiredBy is CA expiry minus the 30-day window. For
+                      operator CAs: when automatic rotation starts. For user CAs: when
+                      a human must renew (CARenewalRequired Events).
                     type: string
                   renewalWarningThreshold:
                     description: |-
-                      RenewalWarningThreshold debounces the escalating CARenewalRequired
-                      Events for user-provided CAs (neo-ru9): records the last emitted
-                      threshold bucket — "30d", "14d", or "7d:<date>" for the daily
-                      cadence inside the final week. Carried while the same CA is in
-                      place (survives operator restarts); a replaced CA resets it.
+                      RenewalWarningThreshold records the last emitted warning bucket
+                      ("30d", "14d", or "7d:<date>" daily), debouncing the escalating
+                      user-CA Events across operator restarts.
                     type: string
                   source:
                     description: |-
@@ -830,34 +807,21 @@ spec:
                 type: string
               initialReconcileEventEmitted:
                 description: |-
-                  InitialReconcileEventEmitted records whether the operator has
-                  emitted the one-shot "InitialReconcileComplete" Event for this
-                  cluster. Used as a per-cluster debounce so the Event fires
-                  exactly once across the cluster's lifetime, even across
-                  operator restarts. Downstream issues (B6 audit migration, etc.)
-                  use the same status-field pattern for their per-cluster
-                  one-shot Events.
+                  InitialReconcileEventEmitted debounces the one-shot
+                  InitialReconcileComplete Event across operator restarts.
                 type: boolean
               lastReconcileTime:
                 description: |-
-                  LastReconcileTime is the timestamp of the most recent reconciliation
-                  that produced a status mutation or that crossed the heartbeat
-                  threshold of (defaultRequeueInterval / 2). It is NOT updated on
-                  every reconcile loop — that would produce per-loop status writes
-                  even when nothing observable changed (etcd write amplification and
-                  false GitOps drift). Consumers treating this as "is the operator
-                  alive?" should expect updates roughly every 2m30s at the operator's
-                  5-minute steady-state requeue cadence, plus immediate updates on
-                  any real status transition.
+                  LastReconcileTime advances on status mutations and on the
+                  heartbeat threshold — NOT every loop, which would amplify etcd
+                  writes and fake GitOps drift. Liveness watchers see updates
+                  roughly every 2m30s when idle.
                 format: date-time
                 type: string
               leaderAddress:
                 description: |-
-                  LeaderAddress is the host:port of the current Raft leader as
-                  reported by Nomad (if known). This is NOT the Raft server ID;
-                  it is the leader's RPC address. Consumers that need the actual
-                  Raft server ID should read it from
-                  `status.autopilot.servers[?(@.leader==true)].id`.
+                  LeaderAddress is the leader's RPC host:port (not its Raft server
+                  ID — that lives in status.autopilot.servers).
                 type: string
               license:
                 description: License contains Nomad Enterprise license information
@@ -885,11 +849,8 @@ spec:
                 type: object
               nomadVersion:
                 description: |-
-                  NomadVersion is the agent version reported by /v1/agent/self
-                  (e.g. "1.11.0+ent"). Probed each reconcile while at least one
-                  pod is Ready; empty if the probe failed or has not yet run.
-                  The version probe is non-fatal — failure does not gate other
-                  status enrichment (C7 / AC-4.7.2).
+                  NomadVersion is the agent version from /v1/agent/self; empty on
+                  probe miss. Non-fatal — never gates other enrichment.
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the last observed generation
@@ -897,12 +858,9 @@ spec:
                 type: integer
               operatorManagementSecretName:
                 description: |-
-                  OperatorManagementSecretName is the name of the Secret containing
-                  the dedicated management-type ACL token used for all day-2
-                  management writes (C4). Management-type because Nomad has no
-                  ACL-write policy grammar — only management tokens can write ACL
-                  state. Cache only: cleanup on deletion uses the deterministic name
-                  `<cluster>-operator-management`, not this field (AC-2.4.7).
+                  OperatorManagementSecretName names the Secret holding the
+                  management-type token for day-2 ACL writes. Cache only — cleanup
+                  uses the deterministic name, not this field.
                 type: string
               operatorStatusPolicyName:
                 description: |-
@@ -933,22 +891,14 @@ spec:
                 type: string
               scaleDown:
                 description: |-
-                  ScaleDown tracks an in-flight Raft scale-down operation
-                  (D2 / neo-1ve). Non-nil while peers are being removed from
-                  the Raft quorum; cleared to nil when the operation completes
-                  (i.e., the StatefulSet's replica count matches spec.replicas).
-                  Used by the resume path so a crashed operator never re-removes
-                  a peer (AC-2.3.7), by the admission gate that blocks concurrent
-                  spec.replicas edits during scale-down (AC-2.3.5a), and by the
-                  scale-down-in-progress metric (D2e).
+                  ScaleDown tracks an in-flight Raft scale-down; nil when none.
+                  Drives crash-safe resume, the replicas-edit admission freeze,
+                  and the in-progress metric.
                 properties:
                   removedPeers:
                     description: |-
-                      RemovedPeers is the list of Raft server IDs (as returned by
-                      the autopilot API) the operator has already removed during the
-                      current operation. The reconcile loop appends one ID per
-                      successful RaftRemovePeer call and never re-removes an entry
-                      in this list across operator restarts.
+                      RemovedPeers lists Raft server IDs already removed this
+                      operation; never re-removed, even across operator restarts.
                     items:
                       type: string
                     type: array

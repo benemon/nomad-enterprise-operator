@@ -90,13 +90,9 @@ func drainEvents(recorder *record.FakeRecorder) []string {
 	}
 }
 
-// TestCARenewalWarningEscalation covers C5 as amended by neo-4s4 and
-// neo-ru9: user-provided CAs get ESCALATING CARenewalRequired Warnings
-// (one per threshold crossing at 30d and 14d, then daily inside the
-// final week — a single Event evaporates from etcd within the hour),
-// debounced via the status bucket marker which survives operator
-// restarts and resets when the CA is replaced. Operator-generated CAs
-// emit rotation Events instead, never this warning.
+// User CAs get escalating CARenewalRequired Warnings (30d/14d, then
+// daily), bucket-debounced across restarts, reset on CA replacement.
+// Operator CAs emit rotation Events instead, never this warning.
 func TestCARenewalWarningEscalation(t *testing.T) {
 	newPhase := func() (*CertificatePhase, *record.FakeRecorder) {
 		recorder := record.NewFakeRecorder(10)

@@ -53,12 +53,8 @@ func (p *CertificatePhase) Name() string {
 }
 
 // Execute ensures all TLS certificates are present and valid.
-//
-// caBundle is the ACTIVE signing CA; trustPEM is the full trust bundle
-// pods and clients must accept. Outside rotation the two certificates
-// are identical. During an operator-driven CA rotation (neo-4s4) the
-// trust bundle is the UNION of active + incoming + unexpired previous
-// CAs, so peers never disagree on the trust root mid-roll.
+// caBundle is the active signing CA; trustPEM is the union of every CA
+// pods must trust (identical outside rotation).
 func (p *CertificatePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	var caBundle *tlspkg.CABundle
 	var trustPEM []byte
@@ -203,26 +199,10 @@ func (p *CertificatePhase) ensureGeneratedCA(ctx context.Context, cluster *nomad
 	return OK(), ca, ca.CACertPEM
 }
 
-// rotateCAIfDue drives the neo-4s4 rotation state machine. All state
-// lives in the CA Secret's keys — a restarted operator resumes wherever
-// the Secret says it left off. The lifecycle:
-//
-//	Phase A (introduce): at renewalRequiredBy (expiry - 30d window),
-//	  generate the NEXT CA into tls-next.*. The trust union grows to
-//	  active+next, the secrets checksum changes, and the StatefulSet
-//	  rolls every pod onto dual trust.
-//	Phase B (cutover): once the StatefulSet is fully rolled AND the
-//	  mounted TLS secret provably carries the next CA, promote: the old
-//	  certificate moves to tls-previous.crt (its key is destroyed — a
-//	  retired CA never signs again), next becomes active, and
-//	  ensureServerCertificate reissues the leaf from the new CA
-//	  (issuer-checked, not expiry-checked). Second roll.
-//	Phase C (retire): passive — caTrustUnion includes tls-previous.crt
-//	  only while it is unexpired; this function deletes the key once
-//	  expired. The union shrinks and the final roll happens on its own.
-//
-// User-provided CAs never reach this function (rotation of a CA the
-// operator does not own stays a human decision).
+// rotateCAIfDue drives CA rotation: introduce next CA at the renewal
+// deadline, promote it once every pod trusts it, drop the previous CA
+// when it expires. All state lives in the Secret's keys, so a restarted
+// operator resumes where it left off. Never called for user CAs.
 func (p *CertificatePhase) rotateCAIfDue(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secret *corev1.Secret) PhaseResult {
 	activeCert, err := tlspkg.ParseCertificate(secret.Data[caSecretCertKey])
 	if err != nil {
@@ -336,15 +316,9 @@ func (p *CertificatePhase) trustDelivered(ctx context.Context, cluster *nomadv1a
 	return bytes.Contains(tlsSecret.Data["ca.crt"], caCertPEM)
 }
 
-// updateCAStatus updates the CertificateAuthorityStatus on the cluster,
-// including the C5 renewal signal (AC-2.4.9 / AC-2.4.10): expiry and
-// renewal deadline are always populated. Crossing the deadline emits a
-// one-shot CARenewalRequired Warning for USER-PROVIDED CAs only — for
-// operator-generated CAs the deadline is when rotation triggers
-// (neo-4s4) and the CARotationStarted/Completed Events carry the
-// signal instead. renewalRequiredBy therefore reads as "when the
-// operator will rotate" (operator-generated) vs "when a human must
-// act" (user-provided). Ready is untouched either way.
+// updateCAStatus refreshes status.certificateAuthority. The
+// CARenewalRequired Warning fires for user-provided CAs only —
+// operator CAs rotate themselves and emit rotation Events instead.
 func (p *CertificatePhase) updateCAStatus(cluster *nomadv1alpha1.NomadCluster, source string, ca *tlspkg.CABundle) {
 	prev := cluster.Status.CertificateAuthority
 
@@ -364,13 +338,9 @@ func (p *CertificatePhase) updateCAStatus(cluster *nomadv1alpha1.NomadCluster, s
 		renewalRequiredBy := cert.NotAfter.Add(-tlspkg.CertWarningWindow)
 		status.RenewalRequiredBy = renewalRequiredBy.Format(time.RFC3339)
 
-		// Escalating cadence for user-provided CAs (neo-ru9): one Event
-		// per threshold crossing (30d, 14d, 7d), then daily inside the
-		// final week — a single Event evaporates from etcd within the
-		// hour, so re-emission is what makes it visible. Debounced via
-		// the bucket marker, carried while the same CA (matching
-		// expiry) is in place; a replaced CA starts a fresh struct, so
-		// the cadence resets naturally.
+		// Events escalate (30d/14d/7d, then daily) because a single
+		// Event expires from etcd within the hour. The bucket marker
+		// debounces; a replaced CA resets it via the fresh struct.
 		if prev != nil && prev.ExpiryTime == status.ExpiryTime {
 			status.RenewalWarningThreshold = prev.RenewalWarningThreshold
 		}
@@ -392,10 +362,9 @@ func (p *CertificatePhase) updateCAStatus(cluster *nomadv1alpha1.NomadCluster, s
 	cluster.Status.CertificateAuthority = status
 }
 
-// renewalWarningBucket maps time-to-expiry onto the escalating warning
-// cadence (neo-ru9, user-decided): nothing outside 30 days, one bucket
-// per crossing at 30d and 14d, then date-stamped buckets inside the
-// final 7 days (and past expiry) so the Event re-emits daily.
+// renewalWarningBucket maps time-to-expiry onto the warning cadence:
+// one bucket per crossing at 30d and 14d, then date-stamped buckets
+// inside the final week (and past expiry) so the Event re-emits daily.
 func renewalWarningBucket(notAfter, now time.Time) string {
 	left := notAfter.Sub(now)
 	switch {
@@ -488,11 +457,8 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 		return Error(err, "Failed to issue server certificate")
 	}
 
-	// tls.crt contains the full chain: leaf cert followed by the CA chain.
-	// This allows TLS clients to verify the chain back to a trusted root
-	// without needing the intermediate CA pre-installed. ca.crt carries
-	// the trust UNION, which is a superset of the signing CA during
-	// rotation and identical to it otherwise.
+	// tls.crt is the full chain (leaf + signing CA); ca.crt is the
+	// trust union, a superset of the signing CA during rotation.
 	fullChain := append(issued.CertPEM, issued.CACertPEM...)
 
 	setServerCertExpiryGauge(cluster, issued.CertPEM)
@@ -504,11 +470,9 @@ func (p *CertificatePhase) ensureServerCertificate(ctx context.Context, cluster 
 	})
 }
 
-// leafSignedBy reports whether the first certificate in pemData was
-// signed by the given CA. Used to force leaf reissue at rotation
-// cutover — signature-checked rather than name-compared so two CAs
-// with the same CommonName (rotation generates them that way) still
-// distinguish.
+// leafSignedBy reports whether the leaf in pemData was signed by the
+// given CA. Signature-checked, not name-compared: rotation generates
+// CAs with identical CommonNames.
 func leafSignedBy(pemData []byte, caCert *x509.Certificate) bool {
 	leaf, err := tlspkg.ParseCertificate(pemData)
 	if err != nil {
@@ -528,11 +492,9 @@ func leafPEM(pemData []byte) []byte {
 	return pem.EncodeToMemory(block)
 }
 
-// setServerCertExpiryGauge exports the server leaf certificate's
-// NotAfter (D4c / AC-8.1.3). Both the valid-existing and fresh-issue
-// paths call it so the gauge tracks whichever certificate the pods are
-// actually mounting. Unparseable PEM is skipped — ValidateCertificate
-// or IssueCertificate error out on those paths anyway.
+// setServerCertExpiryGauge exports the leaf's NotAfter to the
+// CertExpiry gauge. Unparseable PEM is skipped; the issue paths
+// already error on it.
 func setServerCertExpiryGauge(cluster *nomadv1alpha1.NomadCluster, certPEM []byte) {
 	if cert, err := tlspkg.ParseCertificate(certPEM); err == nil {
 		metrics.CertExpiry.WithLabelValues(cluster.Name, cluster.Namespace, "server").

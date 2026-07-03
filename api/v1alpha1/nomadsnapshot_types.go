@@ -27,13 +27,9 @@ type NomadSnapshotSpec struct {
 	// ClusterRef references the NomadCluster to snapshot
 	ClusterRef ClusterReference `json:"clusterRef"`
 
-	// Schedule defines recurring snapshot timing (D3 / AC-2.7.1–2).
-	// When set, the operator runs a long-lived snapshot-agent Deployment
-	// taking snapshots at the given interval. When omitted, the operator
-	// runs a one-shot Job that takes a single snapshot and exits.
-	// Adding or removing this field on an existing NomadSnapshot switches
-	// modes; the switch is blocked while a one-shot Job is still running
-	// (AC-2.7.3a, CEL-enforced).
+	// Schedule, when set, runs a recurring snapshot-agent Deployment;
+	// when omitted, a one-shot Job. Adding or removing it switches
+	// modes — blocked while a one-shot Job is running (CEL).
 	// +optional
 	Schedule *SnapshotSchedule `json:"schedule,omitempty"`
 
@@ -192,11 +188,8 @@ type NomadSnapshotStatus struct {
 	// +optional
 	Operation string `json:"operation,omitempty"`
 
-	// Phase tracks the one-shot Job lifecycle: Pending, Running,
-	// Succeeded, or Failed. Empty in recurring (Deployment) mode, whose
-	// liveness is expressed via readyReplicas and the Ready condition.
-	// Also the AC-2.7.3a gate: adding/removing spec.schedule is rejected
-	// at admission while phase is Running.
+	// Phase tracks the one-shot Job lifecycle; empty in recurring mode.
+	// Running also gates the mode-switch CEL rule.
 	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
 	// +optional
 	Phase string `json:"phase,omitempty"`
@@ -261,13 +254,9 @@ type SnapshotInfo struct {
 
 // NomadSnapshot is the Schema for the nomadsnapshots API.
 //
-// AC-2.7.3a (D3 / neo-kk7): the XValidation transition rule below
-// blocks a mode switch — adding or removing spec.schedule — while a
-// one-shot snapshot Job is still running. Enforced as CRD CEL (the
-// design doc predates neo-bqb's webhook removal; same shape as the D2c
-// scale-down gate). Recurring-mode deployments are long-lived, so
-// switching away from them is always a steady-state edit and never
-// blocked.
+// The XValidation rule below blocks a mode switch (adding/removing
+// spec.schedule) while a one-shot Job is running; recurring mode is
+// never blocked.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status

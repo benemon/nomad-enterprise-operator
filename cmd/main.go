@@ -109,13 +109,9 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// All validation rules live on the CRD schema as kubebuilder enum tags
-	// and CEL x-kubernetes-validations (replicas enum, license XOR, etc.).
-	// Cross-resource validation that previously would have been a webhook
-	// (license Secret existence, etc.) is surfaced via status conditions
-	// from the controller — admission-time cross-resource lookups race
-	// against object updates and are not the right shape for this operator.
-	// See neo-bqb for the decision to delete the webhook scaffolding.
+	// No webhooks: validation lives on the CRD schema (enums, CEL);
+	// cross-resource checks surface as status conditions because
+	// admission-time lookups race object updates.
 
 	// Create watcher for the metrics certificate.
 	var metricsCertWatcher *certwatcher.CertWatcher

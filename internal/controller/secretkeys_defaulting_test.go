@@ -27,16 +27,9 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
-// A7 (neo-1u5): the in-code defaultTLSCertKey/defaultTLSKeyKey fallbacks were
-// removed in favour of CRD defaulting. That removal is only safe if admission
-// materialises the nested tls.crt/tls.key defaults when `secretKeys` is
-// omitted entirely — which requires +kubebuilder:default={} on the parent
-// field. This test pins that contract: if the {} default is ever dropped from
-// the CRD, an omitted secretKeys would reach the controller with empty key
-// names and certificate loading would silently look up "" in the Secret.
-//
-// SecretKeys stay user-configurable (B3 review decision): ESO/VSO-populated
-// Secrets often don't follow the kubernetes.io/tls key convention.
+// Pins the +kubebuilder:default={} contract: without it, an omitted
+// secretKeys reaches the controller with empty key names and cert
+// loading silently looks up "" in the Secret.
 var _ = Describe("CASecretKeys CRD defaulting", func() {
 	const namespace = "secretkeys-defaulting-test"
 

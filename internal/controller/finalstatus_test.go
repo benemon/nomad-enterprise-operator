@@ -323,12 +323,9 @@ func TestFindClustersReferencingSecret(t *testing.T) {
 	}
 }
 
-// TestLicenseSecretNotFoundReason covers neo-0zq (the C6f replacement):
-// a CR referencing a missing license Secret is ACCEPTED at admission
-// (cross-resource lookups are racy there) and surfaces the dedicated
-// LicenseSecretNotFound Ready-reason with a Warning Event on the next
-// reconcile; when the Secret appears, the reason clears. The D5 Secret
-// watch (TestFindClustersReferencingSecret) provides the trigger.
+// A missing license Secret is accepted at admission but surfaces the
+// LicenseSecretNotFound reason + one Warning Event; the reason clears
+// when the Secret appears.
 func TestLicenseSecretNotFoundReason(t *testing.T) {
 	cluster := newTestCluster("lsnf-ns", "lsnf")
 	cluster.Spec.License.SecretName = "does-not-exist-yet"

@@ -29,13 +29,9 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
-// D2a (neo-1ve.1): the scale-down status field is established here so
-// D2b's reconcile loop and D2c's admission rule can both depend on a
-// stable shape. The tests verify the field round-trips through the
-// apiserver via the status subresource and that clearing to nil is
-// preserved on re-read — that nil-clear behaviour is the contract
-// D2b will rely on when scale-down completes (AC-2.3.7's final clause:
-// "operator clears status.scaleDown entirely").
+// status.scaleDown round-trips through the status subresource, and
+// clearing to nil survives re-read — the completion contract the
+// scale-down loop relies on.
 var _ = Describe("status.scaleDown round-trip (D2a)", func() {
 	const namespace = "scaledown-status-test"
 
