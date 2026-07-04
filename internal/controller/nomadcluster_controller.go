@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -659,6 +660,11 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
+		// One slow cluster must not starve the rest: reconciles hit
+		// Nomad APIs with multi-second timeouts, and the default single
+		// worker serializes every cluster behind the sickest one
+		// (observed: a mid-boot cluster starving another's deletion).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		For(&nomadv1alpha1.NomadCluster{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.ConfigMap{}).

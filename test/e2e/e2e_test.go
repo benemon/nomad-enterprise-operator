@@ -1992,6 +1992,23 @@ spec:
 `, reclaimClusterName, namespace)
 		pvcName := "data-" + reclaimClusterName + "-0"
 
+		JustAfterEach(func() {
+			if !CurrentSpecReport().Failed() {
+				return
+			}
+			for _, args := range [][]string{
+				{"get", "nomadcluster", reclaimClusterName, "-n", namespace, "-o", "yaml"},
+				{"get", "sts,pods,pvc", "-n", namespace, "-l", "app.kubernetes.io/instance=" + reclaimClusterName},
+			} {
+				out, _ := utils.Run(exec.Command("kubectl", args...))
+				_, _ = fmt.Fprintf(GinkgoWriter, "--- kubectl %v ---\n%s\n", args, out)
+			}
+			out, _ := utils.Run(exec.Command("sh", "-c",
+				"kubectl logs -n "+namespace+" deploy/nomad-enterprise-operator-controller-manager --tail=400"+
+					" | grep -E 'reclaim-test|deletion|Waiting for StatefulSet' | tail -60"))
+			_, _ = fmt.Fprintf(GinkgoWriter, "--- operator log (deletion path) ---\n%s\n", out)
+		})
+
 		BeforeAll(func() {
 			By("applying the reclaimPolicy=Delete NomadCluster CR")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
