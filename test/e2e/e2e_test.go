@@ -528,7 +528,7 @@ var _ = Describe("Manager", Ordered, func() {
 				{"role", testClusterName},
 				{"rolebinding", testClusterName},
 				{"secret", testClusterName + "-gossip"},
-				{"configmap", testClusterName + "-config"},
+				{"secret", testClusterName + "-config"},
 				{"service", testClusterName + "-headless"},
 				{"service", testClusterName + "-internal"},
 				{"service", testClusterName + "-external"},
@@ -668,8 +668,9 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		It("should generate valid HCL in the ConfigMap", func() {
-			cmd := exec.Command("kubectl", "get", "configmap", testClusterName+"-config", "-n", namespace,
-				`-o`, `jsonpath={.data.server\.hcl}`)
+			cmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl get secret %s-config -n %s -o jsonpath='{.data.server\.hcl}' | base64 -d`,
+				testClusterName, namespace))
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(ContainSubstring("server {"), "missing server block")
@@ -1495,7 +1496,7 @@ spec:
 				name string
 			}{
 				{"statefulset", testClusterName},
-				{"configmap", testClusterName + "-config"},
+				{"secret", testClusterName + "-config"},
 				{"secret", testClusterName + "-gossip"},
 				{"secret", testClusterName + "-acl-bootstrap"},
 			}
@@ -1631,8 +1632,9 @@ spec:
 
 		It("should generate HCL with operator-managed TLS paths", func() {
 			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "configmap", opTLSClusterName+"-config", "-n", namespace,
-					`-o`, `jsonpath={.data.server\.hcl}`)
+				cmd := exec.Command("sh", "-c", fmt.Sprintf(
+					`kubectl get secret %s-config -n %s -o jsonpath='{.data.server\.hcl}' | base64 -d`,
+					opTLSClusterName, namespace))
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(ContainSubstring("tls {"), "missing tls block")
