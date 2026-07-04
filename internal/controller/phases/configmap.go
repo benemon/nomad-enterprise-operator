@@ -17,14 +17,15 @@ limitations under the License.
 package phases
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"maps"
 	"sort"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,7 +48,10 @@ func (p *ConfigMapPhase) Name() string {
 	return "ConfigMap"
 }
 
-// Execute creates or updates the Nomad server configuration ConfigMap.
+// Execute creates or updates the rendered server configuration. The
+// artifact is a SECRET, not a ConfigMap: server.hcl carries the gossip
+// encryption key (and inline keyring tokens), so it needs Secret-class
+// custody — etcd encryption scope, RBAC class, tmpfs volume mounts.
 func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	// Generate server.hcl configuration
 	generator := hcl.NewGenerator(cluster, p.AdvertiseAddress, p.GossipKey)
@@ -57,50 +61,80 @@ func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		return Error(err, "Failed to generate server.hcl")
 	}
 
-	data := map[string]string{
-		serverConfigKey: serverHCL,
-	}
-
-	cm := &corev1.ConfigMap{
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name + "-config",
 			Namespace: cluster.Namespace,
 			Labels:    GetLabels(cluster),
 		},
-		Data: data,
+		Data: map[string][]byte{serverConfigKey: []byte(serverHCL)},
 	}
 
-	if err := controllerutil.SetControllerReference(cluster, cm, p.Scheme); err != nil {
-		return Error(err, "Failed to set owner reference on ConfigMap")
+	if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
+		return Error(err, "Failed to set owner reference on config Secret")
 	}
 
-	existing := &corev1.ConfigMap{}
-	err = p.Client.Get(ctx, types.NamespacedName{Name: cm.Name, Namespace: cm.Namespace}, existing)
+	existing := &corev1.Secret{}
+	err = p.Client.Get(ctx, types.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}, existing)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			p.Log.Info("Creating ConfigMap", "name", cm.Name)
-			if err := p.Client.Create(ctx, cm); err != nil {
-				return Error(err, "Failed to create ConfigMap")
+			p.Log.Info("Creating config Secret", "name", secret.Name)
+			if err := p.Client.Create(ctx, secret); err != nil {
+				return Error(err, "Failed to create config Secret")
 			}
-			return OK()
+			return p.reapLegacyConfigMap(ctx, cluster)
 		}
-		return Error(err, "Failed to get ConfigMap")
+		return Error(err, "Failed to get config Secret")
 	}
 
 	// Auto-remediate: Update if content changed (handles config drift)
-	if !maps.Equal(existing.Data, cm.Data) {
+	if !bytes.Equal(existing.Data[serverConfigKey], secret.Data[serverConfigKey]) {
 		// Diagnostic for neo-8oy: surface which key drifted so future
 		// regressions are visible without a separate debug cycle. The
 		// dump is bounded to ~1KB excerpts to keep the operator log
 		// readable on large rendered configs.
-		drift := configMapDriftSummary(existing.Data, cm.Data)
-		existing.Data = cm.Data
-		p.Log.Info("Auto-remediating ConfigMap drift", "name", cm.Name, "drift", drift)
+		drift := configMapDriftSummary(
+			map[string]string{serverConfigKey: string(existing.Data[serverConfigKey])},
+			map[string]string{serverConfigKey: serverHCL})
+		existing.Data = secret.Data
+		p.Log.Info("Auto-remediating config drift", "name", secret.Name, "drift", drift)
 		if err := p.Client.Update(ctx, existing); err != nil {
-			return Error(err, "Failed to update ConfigMap")
+			return Error(err, "Failed to update config Secret")
 		}
 	}
 
+	return p.reapLegacyConfigMap(ctx, cluster)
+}
+
+// reapLegacyConfigMap deletes the pre-Secret rendered-config ConfigMap
+// once the StatefulSet is fully rolled onto the Secret-backed template.
+// Deleting it earlier risks kubelet volume-sync errors on old pods
+// still mounting it.
+func (p *ConfigMapPhase) reapLegacyConfigMap(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	cm := &corev1.ConfigMap{}
+	err := p.Client.Get(ctx, types.NamespacedName{Name: cluster.Name + "-config", Namespace: cluster.Namespace}, cm)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return OK()
+		}
+		return Error(err, "Failed to check legacy config ConfigMap")
+	}
+	sts := &appsv1.StatefulSet{}
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, sts); err != nil {
+		return OK() // no StatefulSet yet: keep the CM until the roll is provable
+	}
+	usesSecret := false
+	for _, v := range sts.Spec.Template.Spec.Volumes {
+		if v.Name == "config" && v.Secret != nil {
+			usesSecret = true
+		}
+	}
+	if usesSecret && statefulSetFullyRolled(ctx, p.Client, cluster) {
+		p.Log.Info("Deleting legacy config ConfigMap", "name", cm.Name)
+		if err := p.Client.Delete(ctx, cm); err != nil && !errors.IsNotFound(err) {
+			return Error(err, "Failed to delete legacy config ConfigMap")
+		}
+	}
 	return OK()
 }
 

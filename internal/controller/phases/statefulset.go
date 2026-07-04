@@ -245,8 +245,7 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 	// Get the effective license secret name (handles inline vs external)
 	licenseSecretName := getLicenseSecretName(cluster)
 
-	env := p.buildKeyringEnv(cluster)
-	env = append(env, []corev1.EnvVar{
+	env := []corev1.EnvVar{
 		{
 			Name: "NOMAD_LICENSE",
 			ValueFrom: &corev1.EnvVarSource{
@@ -293,49 +292,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 			Name:  "NOMAD_CACERT",
 			Value: "/nomad/tls/ca.crt",
 		},
-	}...)
-
-	return env
-}
-
-// buildKeyringEnv wires keyring credentials as environment variables,
-// per each provider's documented env contract. Omitted refs mean
-// ambient identity.
-func (p *StatefulSetPhase) buildKeyringEnv(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
-	var env []corev1.EnvVar
-	secretEnv := func(name, secret, key string, optional bool) corev1.EnvVar {
-		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secret},
-				Key:                  key,
-				Optional:             &optional,
-			},
-		}}
 	}
-	for _, e := range p.KeyringEntries {
-		switch {
-		case e.AWSKMS != nil && e.AWSKMS.CredentialsSecretRef != nil:
-			n := e.AWSKMS.CredentialsSecretRef.Name
-			env = append(env,
-				secretEnv("AWS_ACCESS_KEY_ID", n, "AWS_ACCESS_KEY_ID", false),
-				secretEnv("AWS_SECRET_ACCESS_KEY", n, "AWS_SECRET_ACCESS_KEY", false),
-				secretEnv("AWS_SESSION_TOKEN", n, "AWS_SESSION_TOKEN", true))
-		case e.AzureKeyVault != nil && e.AzureKeyVault.CredentialsSecretRef != nil:
-			n := e.AzureKeyVault.CredentialsSecretRef.Name
-			env = append(env,
-				secretEnv("AZURE_CLIENT_ID", n, "AZURE_CLIENT_ID", false),
-				secretEnv("AZURE_CLIENT_SECRET", n, "AZURE_CLIENT_SECRET", false))
-		case e.GCPCKMS != nil && e.GCPCKMS.CredentialsSecretRef != nil:
-			env = append(env, corev1.EnvVar{
-				Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: KeyringGCPCredentialsPath})
-		case e.Transit != nil && e.Transit.Auth != nil && e.Transit.Auth.Method == "token":
-			env = append(env,
-				secretEnv("VAULT_TOKEN", e.Transit.Auth.Token.SecretRef.Name, "VAULT_TOKEN", false))
-		case e.Transit != nil && e.Transit.Auth != nil:
-			env = append(env,
-				secretEnv("VAULT_TOKEN", KeyringTokenSecretName(cluster.Name), "VAULT_TOKEN", false))
-		}
-	}
+
 	return env
 }
 
@@ -354,7 +312,7 @@ func buildKeyringVolumes(entries []nomadv1alpha1.KeyringEntry) ([]corev1.Volume,
 				},
 			})
 			mounts = append(mounts, corev1.VolumeMount{
-				Name: "keyring-gcp-" + e.Name, MountPath: "/nomad/keyring-gcp", ReadOnly: true})
+				Name: "keyring-gcp-" + e.Name, MountPath: "/nomad/keyring-gcp/" + e.Name, ReadOnly: true})
 		}
 		if e.Transit != nil && e.Transit.CASecretRef != nil {
 			vols = append(vols, corev1.Volume{
@@ -423,10 +381,8 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 		{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: cluster.Name + "-config",
-					},
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cluster.Name + "-config",
 				},
 			},
 		},
@@ -643,9 +599,6 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 
 	// Keyring credential/TLS secrets: rotation must roll pods
 	secretNames = append(secretNames, KeyringSecretNamesFromEntries(p.KeyringEntries)...)
-	if authEntry(p.KeyringEntries) != nil {
-		secretNames = append(secretNames, KeyringTokenSecretName(cluster.Name))
-	}
 
 	// Sort for deterministic ordering
 	sort.Strings(secretNames)

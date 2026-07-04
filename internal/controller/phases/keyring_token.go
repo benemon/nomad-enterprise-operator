@@ -25,9 +25,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	vaultapi "github.com/hashicorp/vault/api"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -158,18 +160,17 @@ func vaultRenewSelf(ctx context.Context, cfg VaultCallConfig, token string) (*va
 	return authResult(secret, token)
 }
 
-// authEntry finds the transit entry whose method needs operator-managed
-// login (kubernetes/jwt) in the pod-wiring union. method=token entries
-// have no operator lifecycle. The identical-auth validation makes any
-// match representative.
-func authEntry(entries []nomadv1alpha1.KeyringEntry) *nomadv1alpha1.KeyringEntry {
+// authEntries returns the transit entries in the pod-wiring union,
+// each of which carries its own credential (per-entry Vaults are
+// supported: one entry per Vault cluster).
+func authEntries(entries []nomadv1alpha1.KeyringEntry) []*nomadv1alpha1.KeyringEntry {
+	var out []*nomadv1alpha1.KeyringEntry
 	for i := range entries {
-		t := entries[i].Transit
-		if t != nil && t.Auth != nil && t.Auth.Method != "token" {
-			return &entries[i]
+		if entries[i].Transit != nil && entries[i].Transit.Auth != nil {
+			out = append(out, &entries[i])
 		}
 	}
-	return nil
+	return out
 }
 
 // saAuthBlock returns the ServiceAccount-JWT config for the entry's
@@ -181,55 +182,153 @@ func saAuthBlock(auth *nomadv1alpha1.TransitAuth) *nomadv1alpha1.TransitAuthKube
 	return auth.Kubernetes
 }
 
-// ensureVaultToken reconciles the managed token for the auth-mode
-// transit entry: mint when absent or stale-config, renew inside the
-// renewal window, re-mint when renewal fails. Returns the requeue
-// interval for the next check (0 when no auth entry exists).
-func (p *KeyringPhase) ensureVaultToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (time.Duration, PhaseResult) {
-	entry := authEntry(entriesUnion(state))
-	if entry == nil {
-		return 0, OK()
+// resolveCloudArgs reads each cloud entry's static credentials (when
+// credentialsSecretRef is set) and returns per-entry inline block
+// arguments. Process-global env delivery is not used: same-type HA
+// pairs with distinct credentials would collide. Ambient identity
+// (no secretRef) contributes nothing here and nothing in the pod.
+func (p *KeyringPhase) resolveCloudArgs(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState) (map[string][]hcl.KeyringArg, PhaseResult) {
+	out := map[string][]hcl.KeyringArg{}
+	read := func(entryName, secretName string, keys map[string]string, optional map[string]string) PhaseResult {
+		secret := &corev1.Secret{}
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cluster.Namespace}, secret); err != nil {
+			return ErrorWithReason(err, "KeyringCredentialsUnavailable",
+				fmt.Sprintf("entry %q: credentials Secret %q: %v", entryName, secretName, err))
+		}
+		var args []hcl.KeyringArg
+		for k, param := range keys {
+			v := string(secret.Data[k])
+			if v == "" {
+				return ErrorWithReason(
+					fmt.Errorf("secret %q has no %s key", secretName, k),
+					"KeyringCredentialsUnavailable",
+					fmt.Sprintf("entry %q: credentials Secret %q has no %s key", entryName, secretName, k))
+			}
+			args = append(args, hcl.KeyringArg{Key: param, Value: v})
+		}
+		for k, param := range optional {
+			if v := string(secret.Data[k]); v != "" {
+				args = append(args, hcl.KeyringArg{Key: param, Value: v})
+			}
+		}
+		sort.Slice(args, func(i, j int) bool { return args[i].Key < args[j].Key })
+		out[entryName] = args
+		return OK()
 	}
+	for _, sk := range append(append([]storedKeyring{}, state.Active...), state.Retiring...) {
+		if sk.Entry == nil {
+			continue
+		}
+		e := sk.Entry
+		switch {
+		case e.AWSKMS != nil && e.AWSKMS.CredentialsSecretRef != nil:
+			if r := read(e.Name, e.AWSKMS.CredentialsSecretRef.Name,
+				map[string]string{"AWS_ACCESS_KEY_ID": "access_key", "AWS_SECRET_ACCESS_KEY": "secret_key"},
+				map[string]string{"AWS_SESSION_TOKEN": "session_token"}); r.Error != nil {
+				return out, r
+			}
+		case e.AzureKeyVault != nil && e.AzureKeyVault.CredentialsSecretRef != nil:
+			if r := read(e.Name, e.AzureKeyVault.CredentialsSecretRef.Name,
+				map[string]string{"AZURE_CLIENT_ID": "client_id", "AZURE_CLIENT_SECRET": "client_secret"},
+				nil); r.Error != nil {
+				return out, r
+			}
+		}
+	}
+	return out, OK()
+}
+
+// ensureVaultTokens resolves every transit entry's token: method=token
+// reads the user's Secret (user-owned lifecycle); login methods run the
+// per-entry mint/renew/re-mint machinery. Returns the resolved token
+// values (rendered inline into the keyring blocks), the earliest
+// renewal revisit, and the first error.
+func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (map[string]string, time.Duration, PhaseResult) {
+	tokens := map[string]string{}
+	var revisit time.Duration
+	for _, entry := range authEntries(entriesUnion(state)) {
+		auth := entry.Transit.Auth
+		if auth.Method == "token" {
+			secret := &corev1.Secret{}
+			if err := p.Client.Get(ctx, types.NamespacedName{
+				Name: auth.Token.SecretRef.Name, Namespace: cluster.Namespace}, secret); err != nil {
+				return tokens, 0, ErrorWithReason(err, "KeyringVaultLoginFailed",
+					fmt.Sprintf("entry %q: token Secret %q: %v", entry.Name, auth.Token.SecretRef.Name, err))
+			}
+			tok := string(secret.Data["VAULT_TOKEN"])
+			if tok == "" {
+				return tokens, 0, ErrorWithReason(
+					fmt.Errorf("secret %q has no VAULT_TOKEN key", auth.Token.SecretRef.Name),
+					"KeyringVaultLoginFailed",
+					fmt.Sprintf("entry %q: token Secret %q has no VAULT_TOKEN key", entry.Name, auth.Token.SecretRef.Name))
+			}
+			tokens[entry.Name] = tok
+			continue
+		}
+		tok, entryRevisit, result := p.ensureManagedToken(ctx, cluster, state, cm, entry)
+		if result.Error != nil {
+			return tokens, 0, result
+		}
+		tokens[entry.Name] = tok
+		if entryRevisit > 0 && (revisit == 0 || entryRevisit < revisit) {
+			revisit = entryRevisit
+		}
+	}
+	return tokens, revisit, OK()
+}
+
+// ensureManagedToken runs one entry's lifecycle: mint when absent or
+// stale-config, renew inside the renewal window, re-mint when renewal
+// fails. The minted token's canonical store is the multi-key managed
+// Secret <cluster>-keyring-token (key = entry name).
+func (p *KeyringPhase) ensureManagedToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap, entry *nomadv1alpha1.KeyringEntry) (string, time.Duration, PhaseResult) {
 	auth := entry.Transit.Auth
 
 	cfg, err := p.vaultCallConfig(ctx, cluster, entry)
 	if err != nil {
-		return 0, ErrorWithReason(err, "KeyringVaultLoginFailed",
-			fmt.Sprintf("Vault connection config: %v", err))
+		return "", 0, ErrorWithReason(err, "KeyringVaultLoginFailed",
+			fmt.Sprintf("entry %q: Vault connection config: %v", entry.Name, err))
 	}
 
 	authHash := hashAny(auth)
-	secret := &corev1.Secret{}
-	secretAbsent := false
+	store := &corev1.Secret{}
+	storeAbsent := false
 	if err := p.Client.Get(ctx, types.NamespacedName{
-		Name: KeyringTokenSecretName(cluster.Name), Namespace: cluster.Namespace}, secret); err != nil {
+		Name: KeyringTokenSecretName(cluster.Name), Namespace: cluster.Namespace}, store); err != nil {
 		if !errors.IsNotFound(err) {
-			return 0, Error(err, "Failed to read managed keyring token Secret")
+			return "", 0, Error(err, "Failed to read managed keyring token Secret")
 		}
-		secretAbsent = true
+		storeAbsent = true
+	}
+	current := ""
+	if !storeAbsent {
+		current = string(store.Data[entry.Name])
 	}
 
-	meta := state.Token
+	if state.Tokens == nil {
+		state.Tokens = map[string]*tokenMeta{}
+	}
+	meta := state.Tokens[entry.Name]
 	now := time.Now()
 
 	// Renew path: token exists, config unchanged, inside its lease.
-	if !secretAbsent && meta != nil && meta.AuthHash == authHash && now.Before(meta.ExpiresAt.Time) {
+	if current != "" && meta != nil && meta.AuthHash == authHash && now.Before(meta.ExpiresAt.Time) {
 		remaining := meta.ExpiresAt.Sub(now)
 		if remaining > renewalWindow(meta) {
-			return remaining - renewalWindow(meta), OK()
+			return current, remaining - renewalWindow(meta), OK()
 		}
 		if meta.Renewable {
-			renewed, rerr := p.renewFunc()(ctx, cfg, string(secret.Data["VAULT_TOKEN"]))
+			renewed, rerr := p.renewFunc()(ctx, cfg, current)
 			if rerr == nil {
-				state.Token = &tokenMeta{
+				state.Tokens[entry.Name] = &tokenMeta{
 					ExpiresAt: metav1.NewTime(now.Add(renewed.LeaseDuration)),
 					Renewable: renewed.Renewable,
 					AuthHash:  authHash,
 				}
 				if serr := p.saveState(ctx, cm, state); serr != nil {
-					return 0, Error(serr, "Failed to persist keyring token state")
+					return "", 0, Error(serr, "Failed to persist keyring token state")
 				}
-				return renewed.LeaseDuration - renewalWindow(state.Token), OK()
+				return current, renewed.LeaseDuration - renewalWindow(state.Tokens[entry.Name]), OK()
 			}
 			// Fall through to re-mint on renewal failure.
 		}
@@ -238,40 +337,40 @@ func (p *KeyringPhase) ensureVaultToken(ctx context.Context, cluster *nomadv1alp
 	// Mint path.
 	jwt, jerr := p.serviceAccountJWT(ctx, cluster, auth)
 	if jerr != nil {
-		return 0, ErrorWithReason(jerr, "KeyringVaultLoginFailed",
-			fmt.Sprintf("ServiceAccount JWT source: %v", jerr))
+		return "", 0, ErrorWithReason(jerr, "KeyringVaultLoginFailed",
+			fmt.Sprintf("entry %q: ServiceAccount JWT source: %v", entry.Name, jerr))
 	}
 	result, lerr := p.loginFunc()(ctx, cfg, auth.Mount, saAuthBlock(auth).Role, jwt)
 	if lerr != nil {
 		reason := "KeyringVaultLoginFailed"
-		msg := fmt.Sprintf("Vault login at mount %q: %v", auth.Mount, lerr)
+		msg := fmt.Sprintf("entry %q: Vault login at mount %q: %v", entry.Name, auth.Mount, lerr)
 		// TokenReview permission failures have a distinct remediation
 		// (the Vault-side reviewer matrix) — make them legible.
 		if strings.Contains(lerr.Error(), "tokenreview") || strings.Contains(lerr.Error(), "TokenReview") {
 			reason = "KeyringVaultReviewerDenied"
-			msg = fmt.Sprintf("Vault cannot validate ServiceAccount tokens (TokenReview denied): "+
+			msg = fmt.Sprintf("entry %q: Vault cannot validate ServiceAccount tokens (TokenReview denied): "+
 				"grant system:auth-delegator per the auth-mode matrix, or configure the mount "+
-				"with a token_reviewer_jwt: %v", lerr)
+				"with a token_reviewer_jwt: %v", entry.Name, lerr)
 		}
-		return 0, ErrorWithReason(lerr, reason, msg)
+		return "", 0, ErrorWithReason(lerr, reason, msg)
 	}
 
-	if err := p.writeTokenSecret(ctx, cluster, secret, secretAbsent, result.Token); err != nil {
-		return 0, Error(err, "Failed to write managed keyring token Secret")
+	if err := p.writeTokenStore(ctx, cluster, store, storeAbsent, entry.Name, result.Token); err != nil {
+		return "", 0, Error(err, "Failed to write managed keyring token Secret")
 	}
-	state.Token = &tokenMeta{
+	state.Tokens[entry.Name] = &tokenMeta{
 		ExpiresAt: metav1.NewTime(now.Add(result.LeaseDuration)),
 		Renewable: result.Renewable,
 		AuthHash:  authHash,
 	}
 	if serr := p.saveState(ctx, cm, state); serr != nil {
-		return 0, Error(serr, "Failed to persist keyring token state")
+		return "", 0, Error(serr, "Failed to persist keyring token state")
 	}
 	if p.Recorder != nil {
 		p.Recorder.Event(cluster, corev1.EventTypeNormal, "KeyringVaultTokenMinted",
-			fmt.Sprintf("Vault token minted at mount %q (lease %s)", auth.Mount, result.LeaseDuration))
+			fmt.Sprintf("Vault token minted for entry %q at mount %q (lease %s)", entry.Name, auth.Mount, result.LeaseDuration))
 	}
-	return result.LeaseDuration - renewalWindow(state.Token), OK()
+	return result.Token, result.LeaseDuration - renewalWindow(state.Tokens[entry.Name]), OK()
 }
 
 // renewalWindow is how far before expiry renewal begins: a third of the
@@ -351,9 +450,11 @@ func (p *KeyringPhase) vaultCallConfig(ctx context.Context, cluster *nomadv1alph
 	return cfg, nil
 }
 
-// writeTokenSecret creates or updates the managed Secret. A changed
-// token value flows into the secrets checksum and rolls the pods.
-func (p *KeyringPhase) writeTokenSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, existing *corev1.Secret, absent bool, token string) error {
+// writeTokenStore creates or updates the multi-key managed Secret
+// (key = entry name). It is the canonical store the renewal loop
+// re-reads; pods consume tokens via the rendered config, not this
+// Secret.
+func (p *KeyringPhase) writeTokenStore(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, existing *corev1.Secret, absent bool, entryName, token string) error {
 	if absent {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
@@ -361,17 +462,20 @@ func (p *KeyringPhase) writeTokenSecret(ctx context.Context, cluster *nomadv1alp
 				Namespace: cluster.Namespace,
 				Labels:    GetLabels(cluster),
 			},
-			Data: map[string][]byte{"VAULT_TOKEN": []byte(token)},
+			Data: map[string][]byte{entryName: []byte(token)},
 		}
 		if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
 			return err
 		}
 		return p.Client.Create(ctx, secret)
 	}
-	if string(existing.Data["VAULT_TOKEN"]) == token {
+	if string(existing.Data[entryName]) == token {
 		return nil
 	}
-	existing.Data = map[string][]byte{"VAULT_TOKEN": []byte(token)}
+	if existing.Data == nil {
+		existing.Data = map[string][]byte{}
+	}
+	existing.Data[entryName] = []byte(token)
 	return p.Client.Update(ctx, existing)
 }
 

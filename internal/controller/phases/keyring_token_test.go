@@ -120,8 +120,8 @@ func TestKeyringTokenMint(t *testing.T) {
 		types.NamespacedName{Name: "kt-keyring-token", Namespace: "kt-ns"}, secret); err != nil {
 		t.Fatal(err)
 	}
-	if string(secret.Data["VAULT_TOKEN"]) != "hvs.token1" {
-		t.Fatalf("secret token = %q", secret.Data["VAULT_TOKEN"])
+	if string(secret.Data["primary"]) != "hvs.token1" {
+		t.Fatalf("store token = %q", secret.Data["primary"])
 	}
 	if cluster.Status.Keyring.TokenExpiry == nil {
 		t.Fatal("status.keyring.tokenExpiry not set")
@@ -176,7 +176,7 @@ func TestKeyringTokenRenewAndRemint(t *testing.T) {
 	shortenExpiry := func() {
 		state := &keyringState{}
 		mustUnmarshalState(t, stateCM, state)
-		state.Token.ExpiresAt = metav1.NewTime(time.Now().Add(20 * time.Second))
+		state.Tokens["primary"].ExpiresAt = metav1.NewTime(time.Now().Add(20 * time.Second))
 		mustMarshalState(t, phase, stateCM, state)
 	}
 	shortenExpiry()
@@ -190,8 +190,8 @@ func TestKeyringTokenRenewAndRemint(t *testing.T) {
 	secret := &corev1.Secret{}
 	_ = phase.Client.Get(context.Background(),
 		types.NamespacedName{Name: "kt-keyring-token", Namespace: "kt-ns"}, secret)
-	if string(secret.Data["VAULT_TOKEN"]) != "hvs.mint1" {
-		t.Fatalf("renewal must keep the token string, got %q", secret.Data["VAULT_TOKEN"])
+	if string(secret.Data["primary"]) != "hvs.mint1" {
+		t.Fatalf("renewal must keep the token string, got %q", secret.Data["primary"])
 	}
 
 	// Renewal failure: re-mint, secret value changes.
@@ -209,8 +209,8 @@ func TestKeyringTokenRenewAndRemint(t *testing.T) {
 	}
 	_ = phase.Client.Get(context.Background(),
 		types.NamespacedName{Name: "kt-keyring-token", Namespace: "kt-ns"}, secret)
-	if string(secret.Data["VAULT_TOKEN"]) != "hvs.mint2" {
-		t.Fatalf("re-mint must rotate the secret, got %q", secret.Data["VAULT_TOKEN"])
+	if string(secret.Data["primary"]) != "hvs.mint2" {
+		t.Fatalf("re-mint must rotate the store, got %q", secret.Data["primary"])
 	}
 }
 
@@ -254,25 +254,120 @@ func TestKeyringTokenLongLivedSource(t *testing.T) {
 	}
 }
 
-// TestKeyringTokenSourcesMutuallyExclusive: auth on one entry and
-// credentialsSecretRef on another still collide on VAULT_TOKEN.
-func TestKeyringTokenSourcesMutuallyExclusive(t *testing.T) {
-	phase, cluster := tokenFixture(t, nil, nil)
-	static := nomadv1alpha1.KeyringEntry{
-		Name: "static",
-		Transit: &nomadv1alpha1.TransitKeyring{
-			Address: "https://vault2:8200", KeyName: "nk", MountPath: "transit/",
-			Auth: &nomadv1alpha1.TransitAuth{
-				Method: "token",
-				Token:  &nomadv1alpha1.TransitAuthToken{SecretRef: corev1.LocalObjectReference{Name: "tok"}},
-			},
-		},
-	}
-	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{authTransitEntry(), static}
+// TestKeyringTokensPerVault: two transit entries on DIFFERENT Vaults
+// mint independently — one managed token per entry in the multi-key
+// store, and each rendered block carries its own inline token.
+func TestKeyringTokensPerVault(t *testing.T) {
+	logins := map[string]int{}
+	phase, cluster := tokenFixture(t,
+		func(ctx context.Context, cfg VaultCallConfig, mount, role, jwt string) (*vaultAuthResult, error) {
+			logins[cfg.Address]++
+			return &vaultAuthResult{Token: "hvs." + cfg.Address[len(cfg.Address)-4:],
+				LeaseDuration: time.Hour, Renewable: true}, nil
+		}, nil)
+	e1 := authTransitEntry()
+	e1.Transit.KeyIDPrefix = "a-"
+	e2 := authTransitEntry()
+	e2.Name = "secondary"
+	e2.Transit.Address = "https://vault2:8201"
+	e2.Transit.KeyIDPrefix = "b-"
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{e1, e2}
 
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if logins["https://vault:8200"] != 1 || logins["https://vault2:8201"] != 1 {
+		t.Fatalf("per-vault logins = %v, want one each", logins)
+	}
+	store := &corev1.Secret{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: "kt-keyring-token", Namespace: "kt-ns"}, store); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Data) != 2 || len(store.Data["primary"]) == 0 || len(store.Data["secondary"]) == 0 {
+		t.Fatalf("store keys = %v, want per-entry tokens", len(store.Data))
+	}
+	// Each rendered block carries ITS OWN inline token.
+	seen := map[string]string{}
+	for _, b := range phase.Keyrings {
+		for _, a := range b.Args {
+			if a.Key == "token" {
+				seen[b.Name] = a.Value
+			}
+		}
+	}
+	if len(seen) != 2 || seen["primary"] == seen["secondary"] {
+		t.Fatalf("inline tokens = %v, want distinct per entry", seen)
+	}
+}
+
+// TestKeyringCloudInlineCredentials: static cloud credentials render
+// as per-entry inline block args (no process-global env), and two GCP
+// entries get DISTINCT credential paths.
+func TestKeyringCloudInlineCredentials(t *testing.T) {
+	phase, cluster := tokenFixture(t, nil, nil)
+	for name, data := range map[string]map[string][]byte{
+		"aws-creds": {"AWS_ACCESS_KEY_ID": []byte("AKIA123"), "AWS_SECRET_ACCESS_KEY": []byte("s3cr3t")},
+	} {
+		if err := phase.Client.Create(context.Background(), &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kt-ns"}, Data: data,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{
+		{Name: "aws", AWSKMS: &nomadv1alpha1.AWSKMSKeyring{
+			KMSKeyID: "alias/a", Region: "eu-west-2",
+			CredentialsSecretRef: &corev1.LocalObjectReference{Name: "aws-creds"}}},
+		{Name: "gcp1", GCPCKMS: &nomadv1alpha1.GCPCKMSKeyring{
+			Project: "p", Region: "eu", KeyRing: "kr", CryptoKey: "ck",
+			CredentialsSecretRef: &corev1.LocalObjectReference{Name: "gcp1-creds"}}},
+		{Name: "gcp2", GCPCKMS: &nomadv1alpha1.GCPCKMSKeyring{
+			Project: "p", Region: "eu", KeyRing: "kr", CryptoKey: "ck",
+			CredentialsSecretRef: &corev1.LocalObjectReference{Name: "gcp2-creds"}}},
+	}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	args := map[string]map[string]string{}
+	for _, b := range phase.Keyrings {
+		args[b.Name] = map[string]string{}
+		for _, a := range b.Args {
+			args[b.Name][a.Key] = a.Value
+		}
+	}
+	if args["aws"]["access_key"] != "AKIA123" || args["aws"]["secret_key"] != "s3cr3t" {
+		t.Fatalf("aws inline args = %v", args["aws"])
+	}
+	if args["gcp1"]["credentials"] == args["gcp2"]["credentials"] ||
+		args["gcp1"]["credentials"] != "/nomad/keyring-gcp/gcp1/credentials.json" {
+		t.Fatalf("gcp paths must be per-entry: %q vs %q",
+			args["gcp1"]["credentials"], args["gcp2"]["credentials"])
+	}
+	// And the per-entry mounts cannot collide.
+	_, mounts := buildKeyringVolumes(phase.KeyringEntries)
+	paths := map[string]bool{}
+	for _, m := range mounts {
+		if paths[m.MountPath] {
+			t.Fatalf("duplicate mountPath %q", m.MountPath)
+		}
+		paths[m.MountPath] = true
+	}
+}
+
+// TestKeyringCloudCredentialsMissing: a missing cloud Secret surfaces
+// the legible per-entry reason.
+func TestKeyringCloudCredentialsMissing(t *testing.T) {
+	phase, cluster := tokenFixture(t, nil, nil)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{
+		{Name: "aws", AWSKMS: &nomadv1alpha1.AWSKMSKeyring{
+			KMSKeyID:             "alias/a",
+			CredentialsSecretRef: &corev1.LocalObjectReference{Name: "absent"}}},
+	}
 	result := phase.Execute(context.Background(), cluster)
-	if result.Error == nil || result.Reason != "KeyringInvalid" {
-		t.Fatalf("want KeyringInvalid, got %+v", result)
+	if result.Error == nil || result.Reason != "KeyringCredentialsUnavailable" {
+		t.Fatalf("want KeyringCredentialsUnavailable, got %+v", result)
 	}
 }
 

@@ -2200,12 +2200,13 @@ spec:
 		})
 	})
 
-	// Keyring HA pair (neo-3xe P3): two transit mounts on one Vault,
-	// one shared credential — every listed keyring wraps new keys, ANY
-	// ONE reachable keyring unwraps them. Proves same-type HA expansion
-	// via the set-reconciliation lifecycle and decrypt-any-one-alive
-	// under mount loss. Slow lane: skipped on the PR lane.
-	Context("Keyring HA pair (neo-3xe P3)", Ordered, func() {
+	// Keyring HA pair (neo-4q2): two transit keyrings on two INDEPENDENT
+	// Vault clusters, each with its own credential — every listed
+	// keyring wraps new keys, ANY ONE reachable Vault unwraps them.
+	// Proves per-entry credentials (inline token rendering), HA
+	// expansion across Vaults, and decrypt-any-one-alive under total
+	// Vault-cluster loss. Slow lane: skipped on the PR lane.
+	Context("Keyring HA pair (neo-4q2)", Ordered, func() {
 		const krHA = "keyring-ha"
 
 		haCR := func(entries string) string {
@@ -2227,33 +2228,27 @@ spec:
       type: NodePort
 `, krHA, namespace, entries)
 		}
-		entryYAML := func(name, mount string) string {
+		entryYAML := func(name, ns, prefix, tokenSecret string) string {
 			return fmt.Sprintf(`    - name: %s
       transit:
-        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        address: "http://vault.%s.svc.cluster.local:8200"
         keyName: nomad-keyring
-        mountPath: %s
+        mountPath: transit/
+        keyIDPrefix: %s
         auth:
           method: token
           token:
             secretRef:
-              name: keyring-vault-token
-`, name, mount)
+              name: %s
+`, name, ns, prefix, tokenSecret)
 		}
 
-		vaultCmd := func(script string) (string, error) {
-			cmd := exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault", "--", "sh", "-c",
-				"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+script)
-			return utils.Run(cmd)
-		}
-
-		BeforeAll(func() {
-			By("deploying Vault with TWO transit mounts")
-			cmd := exec.Command("kubectl", "create", "ns", "e2e-vault")
+		deployVault := func(ns string) {
+			cmd := exec.Command("kubectl", "create", "ns", ns)
 			_, _ = utils.Run(cmd)
-			vaultYAML := `apiVersion: v1
+			vaultYAML := fmt.Sprintf(`apiVersion: v1
 kind: Pod
-metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
+metadata: {name: vault, namespace: %s, labels: {app: vault}}
 spec:
   containers:
   - name: vault
@@ -2262,28 +2257,36 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: vault, namespace: e2e-vault}
+metadata: {name: vault, namespace: %s}
 spec:
   selector: {app: vault}
   ports: [{port: 8200, targetPort: 8200}]
-`
+`, ns, ns)
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(vaultYAML)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", "e2e-vault", "--timeout=120s")
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", ns, "--timeout=120s")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(func(g Gomega) {
-				_, err := vaultCmd("vault secrets enable -path=transit transit || true; " +
-					"vault write -f transit/keys/nomad-keyring; " +
-					"vault secrets enable -path=transit2 transit || true; " +
-					"vault write -f transit2/keys/nomad-keyring")
+				cmd := exec.Command("kubectl", "exec", "vault", "-n", ns, "--", "sh", "-c",
+					"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+
+						"vault secrets enable transit || true; vault write -f transit/keys/nomad-keyring")
+				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 			}, 90*time.Second, 5*time.Second).Should(Succeed())
-			cmd = exec.Command("kubectl", "create", "secret", "generic", "keyring-vault-token",
-				"-n", namespace, "--from-literal=VAULT_TOKEN=e2e-root")
-			_, _ = utils.Run(cmd)
+		}
+
+		BeforeAll(func() {
+			By("deploying TWO independent Vault clusters")
+			deployVault("e2e-vault")
+			deployVault("e2e-vault2")
+			for _, name := range []string{"keyring-vault-token", "keyring-vault-token2"} {
+				cmd := exec.Command("kubectl", "create", "secret", "generic", name,
+					"-n", namespace, "--from-literal=VAULT_TOKEN=e2e-root")
+				_, _ = utils.Run(cmd)
+			}
 		})
 
 		AfterAll(func() {
@@ -2293,16 +2296,19 @@ spec:
 			cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
 				"-l", "app.kubernetes.io/instance="+krHA, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "secret/keyring-vault-token", "-n", namespace, "--ignore-not-found")
+			cmd = exec.Command("kubectl", "delete", "secret/keyring-vault-token", "secret/keyring-vault-token2",
+				"-n", namespace, "--ignore-not-found")
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "ns", "e2e-vault", "--ignore-not-found", "--timeout=2m")
-			_, _ = utils.Run(cmd)
+			for _, ns := range []string{"e2e-vault", "e2e-vault2"} {
+				cmd = exec.Command("kubectl", "delete", "ns", ns, "--ignore-not-found", "--timeout=2m")
+				_, _ = utils.Run(cmd)
+			}
 		})
 
-		It("expands to an HA pair and survives losing one mount", func() {
-			By("creating a single-keyring cluster and writing a Variable")
+		It("expands across two Vaults and survives losing one entirely", func() {
+			By("creating a single-keyring cluster on Vault 1 and writing a Variable")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(haCR(entryYAML("primary", "transit/")))
+			cmd.Stdin = strings.NewReader(haCR(entryYAML("primary", "e2e-vault", "a-", "keyring-vault-token")))
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(func(g Gomega) {
@@ -2317,9 +2323,11 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 			}, 3*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("expanding to the HA pair (same Vault, same auth, second mount)")
+			By("expanding to an HA pair across BOTH Vault clusters")
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(haCR(entryYAML("primary", "transit/") + entryYAML("secondary", "transit2/")))
+			cmd.Stdin = strings.NewReader(haCR(
+				entryYAML("primary", "e2e-vault", "a-", "keyring-vault-token") +
+					entryYAML("secondary", "e2e-vault2", "b-", "keyring-vault-token2")))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(func(g Gomega) {
@@ -2335,14 +2343,15 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 			Expect(out).To(ContainSubstring("hotel345"))
 
-			By("ANY-ONE-ALIVE: disabling the FIRST mount and restarting the server")
-			_, err = vaultCmd("vault secrets disable transit")
+			By("ANY-ONE-ALIVE: destroying Vault cluster 1 ENTIRELY and restarting the server")
+			cmd = exec.Command("kubectl", "delete", "pod/vault", "svc/vault", "-n", "e2e-vault", "--ignore-not-found")
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			cmd = exec.Command("kubectl", "delete", "pod", krHA+"-0", "-n", namespace)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("verifying the restarted server unwraps via the surviving mount")
+			By("verifying the restarted server unwraps via the surviving Vault")
 			Eventually(func(g Gomega) {
 				out, err := utils.Run(exec.Command("kubectl", "exec", krHA+"-0", "-n", namespace, "--",
 					"nomad", "var", "get", "e2e/ha"))
@@ -2398,7 +2407,7 @@ spec:
 		}
 		managedToken := func() string {
 			cmd := exec.Command("kubectl", "get", "secret", krAuth+"-keyring-token", "-n", namespace,
-				"-o", "jsonpath={.data.VAULT_TOKEN}")
+				"-o", "jsonpath={.data.primary}")
 			out, err := utils.Run(cmd)
 			if err != nil {
 				return ""
@@ -2541,7 +2550,7 @@ subjects: [{kind: ServiceAccount, name: vault-reviewer, namespace: e2e-vault}]
 
 			By("revoking the token in Vault and observing re-mint")
 			raw, err := exec.Command("sh", "-c", fmt.Sprintf(
-				"kubectl get secret %s-keyring-token -n %s -o jsonpath='{.data.VAULT_TOKEN}' | base64 -d",
+				"kubectl get secret %s-keyring-token -n %s -o jsonpath='{.data.primary}' | base64 -d",
 				krAuth, namespace)).Output()
 			Expect(err).NotTo(HaveOccurred())
 			_, err = vaultCmd("vault token revoke " + strings.TrimSpace(string(raw)))

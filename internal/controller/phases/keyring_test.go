@@ -37,7 +37,7 @@ import (
 )
 
 // keyringFixture builds a cluster with a rolled StatefulSet and a
-// rendered ConfigMap whose content tracks whatever the phase renders —
+// rendered config Secret whose content tracks whatever the phase renders —
 // simulating the ConfigMap/StatefulSet phases having delivered it.
 func keyringFixture(t *testing.T, mock nomad.NomadAPI) (*KeyringPhase, *nomadv1alpha1.NomadCluster, *record.FakeRecorder) {
 	t.Helper()
@@ -52,7 +52,11 @@ func keyringFixture(t *testing.T, mock nomad.NomadAPI) (*KeyringPhase, *nomadv1a
 	}
 	recorder := record.NewFakeRecorder(20)
 	phase := &KeyringPhase{PhaseContext: &PhaseContext{
-		Client:   fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(sts).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(sts,
+			&corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "vt", Namespace: "kr-ns"},
+				Data:       map[string][]byte{"VAULT_TOKEN": []byte("hvs.static")},
+			}).Build(),
 		Scheme:   scheme.Scheme,
 		Log:      zap.New(zap.UseDevMode(true)),
 		Recorder: recorder,
@@ -69,7 +73,7 @@ func keyringFixture(t *testing.T, mock nomad.NomadAPI) (*KeyringPhase, *nomadv1a
 	return phase, cluster, recorder
 }
 
-// deliverConfig writes the rendered ConfigMap the way the ConfigMap
+// deliverConfig writes the rendered config Secret the way the config
 // phase would, from the phase's current render set.
 func deliverConfig(t *testing.T, p *KeyringPhase) {
 	t.Helper()
@@ -81,17 +85,17 @@ func deliverConfig(t *testing.T, p *KeyringPhase) {
 		}
 		content += fmt.Sprintf("  active = %v\n}\n", b.Active)
 	}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "kr-config", Namespace: "kr-ns"}}
-	existing := &corev1.ConfigMap{}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "kr-config", Namespace: "kr-ns"}}
+	existing := &corev1.Secret{}
 	err := p.Client.Get(context.Background(), types.NamespacedName{Name: "kr-config", Namespace: "kr-ns"}, existing)
 	if err != nil {
-		cm.Data = map[string]string{"server.hcl": content}
-		if cerr := p.Client.Create(context.Background(), cm); cerr != nil {
+		secret.Data = map[string][]byte{"server.hcl": []byte(content)}
+		if cerr := p.Client.Create(context.Background(), secret); cerr != nil {
 			t.Fatal(cerr)
 		}
 		return
 	}
-	existing.Data = map[string]string{"server.hcl": content}
+	existing.Data = map[string][]byte{"server.hcl": []byte(content)}
 	if uerr := p.Client.Update(context.Background(), existing); uerr != nil {
 		t.Fatal(uerr)
 	}
@@ -310,20 +314,28 @@ func TestKeyringDisableLifecycle(t *testing.T) {
 	}
 }
 
-// TestKeyringTransitAuthMismatchRejected: transit entries must share
-// one Vault (address) and one credential (auth) — VAULT_TOKEN is a
-// single shared environment variable.
-func TestKeyringTransitAuthMismatchRejected(t *testing.T) {
+// TestKeyringMultiTransitPrefixRequired: multiple transit entries
+// (same or different Vaults) need distinct non-empty keyIDPrefix for
+// Nomad's wrapped-key disambiguation.
+func TestKeyringMultiTransitPrefixRequired(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
 	phase, cluster, _ := keyringFixture(t, mock)
 	e1 := transitSpec("a")
 	e2 := transitSpec("b")
-	e2.Transit.Auth.Token.SecretRef.Name = "other"
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{e1, e2}
 
 	result := phase.Execute(context.Background(), cluster)
 	if result.Error == nil || result.Reason != "KeyringInvalid" {
-		t.Fatalf("want KeyringInvalid error, got %+v", result)
+		t.Fatalf("want KeyringInvalid without prefixes, got %+v", result)
+	}
+
+	e1.Transit.KeyIDPrefix, e2.Transit.KeyIDPrefix = "a-", "b-"
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{e1, e2}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("distinct prefixes must be accepted, got %+v", result)
+	}
+	if got := cluster.Status.Keyring; len(got.Active) != 2 {
+		t.Fatalf("status active = %+v, want both entries", got)
 	}
 }
 

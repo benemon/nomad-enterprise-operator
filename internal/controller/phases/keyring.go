@@ -68,8 +68,9 @@ type keyringState struct {
 	Retiring []storedKeyring `json:"retiring,omitempty"`
 	// Phase: Ready | Introducing | Rotating | Retiring.
 	Phase string `json:"phase"`
-	// Token is the managed Vault token lifecycle state (auth mode).
-	Token *tokenMeta `json:"token,omitempty"`
+	// Tokens is the per-entry managed Vault token lifecycle state,
+	// keyed by entry name (login methods only).
+	Tokens map[string]*tokenMeta `json:"tokens,omitempty"`
 }
 
 // storedKeyring is one persisted keyring: the full spec entry, or nil
@@ -107,10 +108,15 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		return result
 	}
 
-	tokenRequeue, tokenResult := p.ensureVaultToken(ctx, cluster, state, cm)
+	tokens, tokenRequeue, tokenResult := p.ensureVaultTokens(ctx, cluster, state, cm)
 	if tokenResult.Error != nil {
-		p.publish(cluster, state)
+		p.publish(cluster, state, tokens, nil)
 		return tokenResult
+	}
+	cloudArgs, cloudResult := p.resolveCloudArgs(ctx, cluster, state)
+	if cloudResult.Error != nil {
+		p.publish(cluster, state, tokens, cloudArgs)
+		return cloudResult
 	}
 
 	// Spec changed relative to the active set: start (or extend) a
@@ -149,12 +155,12 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		if p.statefulSetFullyRolled(ctx, cluster) && p.keyringConfigDelivered(ctx, cluster, state) {
 			token, terr := getManagementToken(ctx, p.Client, cluster)
 			if terr != nil {
-				p.publish(cluster, state)
+				p.publish(cluster, state, tokens, cloudArgs)
 				return RequeueWithReason(15*time.Second, "KeyringRotationPending",
 					"Keyring rotation waiting for the management token")
 			}
 			if rerr := p.rotate(ctx, cluster, token); rerr != nil {
-				p.publish(cluster, state)
+				p.publish(cluster, state, tokens, cloudArgs)
 				return RequeueWithReason(15*time.Second, "KeyringRotationPending",
 					fmt.Sprintf("Keyring rotation pending: %v", rerr))
 			}
@@ -171,7 +177,7 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		if terr == nil {
 			done, kerr := p.removeInactiveKeys(ctx, cluster, token)
 			if kerr != nil {
-				p.publish(cluster, state)
+				p.publish(cluster, state, tokens, cloudArgs)
 				return RequeueWithReason(15*time.Second, "KeyringRotationPending",
 					fmt.Sprintf("Keyring cleanup pending: %v", kerr))
 			}
@@ -198,7 +204,7 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		}
 	}
 
-	p.publish(cluster, state)
+	p.publish(cluster, state, tokens, cloudArgs)
 	if tokenRequeue > 0 {
 		p.RevisitAfter = tokenRequeue
 	}
@@ -206,9 +212,19 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 }
 
 // publish exposes the render set and the pod-wiring entry union on the
-// PhaseContext and mirrors names/phase into status.
-func (p *KeyringPhase) publish(cluster *nomadv1alpha1.NomadCluster, state *keyringState) {
-	p.Keyrings = renderBlocks(state)
+// PhaseContext and mirrors names/phase into status. Each transit block
+// carries its resolved token INLINE (Nomad's per-block token parameter
+// — the config artifact is a Secret, so custody class holds); the
+// VAULT_TOKEN env is not used.
+func (p *KeyringPhase) publish(cluster *nomadv1alpha1.NomadCluster, state *keyringState, tokens map[string]string, cloudArgs map[string][]hcl.KeyringArg) {
+	blocks := renderBlocks(state)
+	for i := range blocks {
+		if tok, ok := tokens[blocks[i].Name]; ok && tok != "" {
+			blocks[i].Args = append(blocks[i].Args, hcl.KeyringArg{Key: "token", Value: tok})
+		}
+		blocks[i].Args = append(blocks[i].Args, cloudArgs[blocks[i].Name]...)
+	}
+	p.Keyrings = blocks
 
 	var entries []nomadv1alpha1.KeyringEntry
 	for _, sk := range append(append([]storedKeyring{}, state.Active...), state.Retiring...) {
@@ -228,8 +244,10 @@ func (p *KeyringPhase) publish(cluster *nomadv1alpha1.NomadCluster, state *keyri
 	for _, sk := range state.Retiring {
 		st.Retiring = append(st.Retiring, storedName(sk))
 	}
-	if state.Token != nil {
-		st.TokenExpiry = state.Token.ExpiresAt.DeepCopy()
+	for _, meta := range state.Tokens {
+		if st.TokenExpiry == nil || meta.ExpiresAt.Before(st.TokenExpiry) {
+			st.TokenExpiry = meta.ExpiresAt.DeepCopy()
+		}
 	}
 	cluster.Status.Keyring = st
 }
@@ -270,7 +288,7 @@ func entryBlock(sk storedKeyring, active bool) hcl.KeyringBlock {
 		b.Args = kvs("project", e.GCPCKMS.Project, "region", e.GCPCKMS.Region,
 			"key_ring", e.GCPCKMS.KeyRing, "crypto_key", e.GCPCKMS.CryptoKey)
 		if e.GCPCKMS.CredentialsSecretRef != nil {
-			b.Args = append(b.Args, hcl.KeyringArg{Key: "credentials", Value: KeyringGCPCredentialsPath})
+			b.Args = append(b.Args, hcl.KeyringArg{Key: "credentials", Value: KeyringGCPCredentialsPath(e.Name)})
 		}
 	case e.Transit != nil:
 		b.Type = "transit"
@@ -293,20 +311,20 @@ func entryBlock(sk storedKeyring, active bool) hcl.KeyringBlock {
 // single-VAULT_TOKEN constraint (the wrapper reads one shared env var).
 func desiredKeyrings(cluster *nomadv1alpha1.NomadCluster) ([]storedKeyring, error) {
 	out := make([]storedKeyring, 0, len(cluster.Spec.Server.Keyrings))
-	var transitAddr, transitAuth string
+	transits := 0
+	prefixes := map[string]bool{}
 	for i := range cluster.Spec.Server.Keyrings {
 		e := cluster.Spec.Server.Keyrings[i]
 		if e.Transit != nil {
-			// VAULT_TOKEN and VAULT_ADDR-equivalent are shared: an HA
-			// transit set means one Vault, one credential, N mounts.
-			addr, auth := e.Transit.Address, hashAny(e.Transit.Auth)
-			if transitAddr == "" {
-				transitAddr, transitAuth = addr, auth
-			} else if transitAddr != addr || transitAuth != auth {
-				return nil, fmt.Errorf("all transit keyrings must share the same address and auth: VAULT_TOKEN is a single shared environment variable")
-			}
+			transits++
+			prefixes[e.Transit.KeyIDPrefix] = true
 		}
 		out = append(out, storedKeyring{Entry: &e})
+	}
+	// Multiple transit entries (same or different Vaults) need Nomad's
+	// own wrapped-key disambiguation: distinct non-empty keyIDPrefix.
+	if transits > 1 && (prefixes[""] || len(prefixes) != transits) {
+		return nil, fmt.Errorf("multiple transit keyrings require a distinct non-empty keyIDPrefix on each entry")
 	}
 	sort.Slice(out, func(i, j int) bool { return storedName(out[i]) < storedName(out[j]) })
 	return out, nil
@@ -362,11 +380,11 @@ func (p *KeyringPhase) removeInactiveKeys(ctx context.Context, cluster *nomadv1a
 // keyringConfigDelivered reports whether the live ConfigMap carries the
 // current render — the roll the pods completed included this state.
 func (p *KeyringPhase) keyringConfigDelivered(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState) bool {
-	cm := &corev1.ConfigMap{}
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: cluster.Name + "-config", Namespace: cluster.Namespace}, cm); err != nil {
+	secret := &corev1.Secret{}
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: cluster.Name + "-config", Namespace: cluster.Namespace}, secret); err != nil {
 		return false
 	}
-	nomadHCL := cm.Data[serverConfigKey]
+	nomadHCL := string(secret.Data[serverConfigKey])
 	for _, b := range renderBlocks(state) {
 		if !containsBlock(nomadHCL, b) {
 			return false
@@ -471,9 +489,12 @@ func KeyringSecretNamesFromEntries(entries []nomadv1alpha1.KeyringEntry) []strin
 	return out
 }
 
-// KeyringGCPCredentialsPath is where the GCP service-account JSON is
-// mounted; shared with the StatefulSet volume wiring.
-const KeyringGCPCredentialsPath = "/nomad/keyring-gcp/credentials.json"
+// KeyringGCPCredentialsPath is where an entry's GCP service-account
+// JSON is mounted — PER ENTRY, so same-type HA pairs cannot collide;
+// shared with the StatefulSet volume wiring.
+func KeyringGCPCredentialsPath(name string) string {
+	return "/nomad/keyring-gcp/" + name + "/credentials.json"
+}
 
 // keyringTLSPath is the mount directory for a transit entry's TLS
 // material; shared with the StatefulSet volume wiring.

@@ -309,7 +309,10 @@ keyring wraps new keys; any one reachable keyring unwraps):
 Cloud providers authenticate with ambient identity (IRSA, Workload
 Identity, Managed Identity) when `credentialsSecretRef` is omitted, or
 with static credentials from the referenced Secret. Rotating that
-Secret rolls the server pods automatically.
+Secret rolls the server pods automatically. Same-type HA pairs — two
+AWS KMS keys in different regions or accounts, two Azure vaults, two
+GCP keys — carry their credentials per entry, so each member of the
+pair may use a different identity.
 
 **Changing the keyring set is a live migration.** Enable, disable,
 provider change, and HA expand/contract all follow the same
@@ -375,8 +378,14 @@ revocation (rolls pods). For `method: token` the lifecycle is yours:
 the operator wires the Secret to the pods and rolls them when it
 changes.
 
-All transit entries in an HA set must share one `address` and one
-`auth` — a single Vault, a single credential, any number of mounts.
+Transit HA works across **independent Vault clusters**: each entry
+carries its own `address` and its own `auth` (any vector), so either
+Vault surviving keeps the cluster's keys decryptable. Give each entry
+a distinct `keyIDPrefix` — Nomad's wrapped-key disambiguation. Each
+entry's resolved token is rendered inline into that entry's keyring
+block in the generated server configuration, which the operator stores
+as a Secret (the same custody class as the gossip key it also
+carries); tokens never appear in the `NomadCluster` manifest.
 
 #### Who needs `system:auth-delegator`
 
@@ -464,7 +473,7 @@ Rejected at admission (API server, no operator involvement):
 | `spec.image.pullPolicy` ∈ Always/IfNotPresent/Never; `spec.services.*.type` ∈ LoadBalancer/NodePort; `spec.persistence.reclaimPolicy` ∈ Retain/Delete | enum |
 | Each `keyrings[]` entry configures exactly one provider; entry names unique; at most 8 entries | CEL + listType=map |
 | `transit.auth.method` ∈ token/kubernetes/jwt, with exactly the matching per-method block; `mount` required unless `method: token` | enum + CEL |
-| All transit entries share one `address` and one `auth` (single shared `VAULT_TOKEN`) | operator (`KeyringInvalid`) |
+| Multiple transit entries require a distinct non-empty `keyIDPrefix` on each | operator (`KeyringInvalid`) |
 
 Enforced at reconcile time (visible via `kubectl get nomadcluster` and
 the `Ready` condition, not an admission error):
