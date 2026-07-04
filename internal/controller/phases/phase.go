@@ -22,9 +22,13 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/go-logr/logr"
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -161,6 +165,40 @@ type Phase interface {
 // image has no USER directive.
 const nonRootUserID = int64(65532)
 
+// getManagementToken loads the operator management token, empty with
+// no error when ACLs are disabled; a missing Secret defers the caller.
+func getManagementToken(ctx context.Context, c client.Client, cluster *nomadv1alpha1.NomadCluster) (string, error) {
+	if !cluster.Spec.Server.ACL.Enabled {
+		return "", nil
+	}
+	secretName := OperatorManagementSecretName(cluster.Name)
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: secretName, Namespace: cluster.Namespace}, secret); err != nil {
+		return "", err
+	}
+	token := string(secret.Data[SecretKeySecretID])
+	if token == "" {
+		return "", fmt.Errorf("management token secret %q has no secret-id", secretName)
+	}
+	return token, nil
+}
+
+// statefulSetFullyRolled reports whether every pod runs the current
+// pod template — the gate between config-changing lifecycle steps.
+func statefulSetFullyRolled(ctx context.Context, c client.Client, cluster *nomadv1alpha1.NomadCluster) bool {
+	sts := &appsv1.StatefulSet{}
+	if err := c.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}, sts); err != nil {
+		return false
+	}
+	if sts.Generation != sts.Status.ObservedGeneration || sts.Spec.Replicas == nil {
+		return false
+	}
+	replicas := *sts.Spec.Replicas
+	return sts.Status.UpdatedReplicas == replicas &&
+		sts.Status.ReadyReplicas == replicas &&
+		sts.Status.CurrentRevision == sts.Status.UpdateRevision
+}
+
 // ImageRef returns the Nomad container image reference for the
 // cluster: `repository@digest` when a digest is pinned (neo-4xj,
 // digest takes precedence), else `repository:tag`. Single definition —
@@ -250,6 +288,16 @@ type PhaseContext struct {
 	// (populated by ClusterStatusPhase via C7 probe). Empty when the
 	// probe failed or has not yet run.
 	NomadVersion string
+
+	// Keyrings is the keyring render set, populated by KeyringPhase and
+	// consumed by the ConfigMap and StatefulSet phases.
+	Keyrings []hcl.KeyringBlock
+
+	// KeyringEntries is the active+retiring entry union, populated by
+	// KeyringPhase. Pod wiring (env, volumes, secrets checksum) derives
+	// from this, NOT the spec: a retiring wrapper still needs its
+	// credentials until its keys are removed.
+	KeyringEntries []nomadv1alpha1.KeyringEntry
 
 	// CACert is the PEM-encoded CA certificate, populated by CertificatePhase.
 	// Used by RoutePhase for destinationCACertificate and by BuildClientConfig.

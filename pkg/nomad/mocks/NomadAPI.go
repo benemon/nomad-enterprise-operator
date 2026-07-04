@@ -805,6 +805,194 @@ func (_c *MockNomadAPI_GetLicense_Call) RunAndReturn(run func(ctx context.Contex
 	return _c
 }
 
+// KeyringDelete provides a mock function for the type MockNomadAPI
+func (_mock *MockNomadAPI) KeyringDelete(ctx context.Context, token string, keyID string) error {
+	ret := _mock.Called(ctx, token, keyID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for KeyringDelete")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) error); ok {
+		r0 = returnFunc(ctx, token, keyID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockNomadAPI_KeyringDelete_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'KeyringDelete'
+type MockNomadAPI_KeyringDelete_Call struct {
+	*mock.Call
+}
+
+// KeyringDelete is a helper method to define mock.On call
+//   - ctx context.Context
+//   - token string
+//   - keyID string
+func (_e *MockNomadAPI_Expecter) KeyringDelete(ctx interface{}, token interface{}, keyID interface{}) *MockNomadAPI_KeyringDelete_Call {
+	return &MockNomadAPI_KeyringDelete_Call{Call: _e.mock.On("KeyringDelete", ctx, token, keyID)}
+}
+
+func (_c *MockNomadAPI_KeyringDelete_Call) Run(run func(ctx context.Context, token string, keyID string)) *MockNomadAPI_KeyringDelete_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_KeyringDelete_Call) Return(err error) *MockNomadAPI_KeyringDelete_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockNomadAPI_KeyringDelete_Call) RunAndReturn(run func(ctx context.Context, token string, keyID string) error) *MockNomadAPI_KeyringDelete_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// KeyringList provides a mock function for the type MockNomadAPI
+func (_mock *MockNomadAPI) KeyringList(ctx context.Context, token string) ([]*nomad.RootKey, error) {
+	ret := _mock.Called(ctx, token)
+
+	if len(ret) == 0 {
+		panic("no return value specified for KeyringList")
+	}
+
+	var r0 []*nomad.RootKey
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) ([]*nomad.RootKey, error)); ok {
+		return returnFunc(ctx, token)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) []*nomad.RootKey); ok {
+		r0 = returnFunc(ctx, token)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*nomad.RootKey)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, token)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockNomadAPI_KeyringList_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'KeyringList'
+type MockNomadAPI_KeyringList_Call struct {
+	*mock.Call
+}
+
+// KeyringList is a helper method to define mock.On call
+//   - ctx context.Context
+//   - token string
+func (_e *MockNomadAPI_Expecter) KeyringList(ctx interface{}, token interface{}) *MockNomadAPI_KeyringList_Call {
+	return &MockNomadAPI_KeyringList_Call{Call: _e.mock.On("KeyringList", ctx, token)}
+}
+
+func (_c *MockNomadAPI_KeyringList_Call) Run(run func(ctx context.Context, token string)) *MockNomadAPI_KeyringList_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_KeyringList_Call) Return(rootKeys []*nomad.RootKey, err error) *MockNomadAPI_KeyringList_Call {
+	_c.Call.Return(rootKeys, err)
+	return _c
+}
+
+func (_c *MockNomadAPI_KeyringList_Call) RunAndReturn(run func(ctx context.Context, token string) ([]*nomad.RootKey, error)) *MockNomadAPI_KeyringList_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// KeyringRotateFull provides a mock function for the type MockNomadAPI
+func (_mock *MockNomadAPI) KeyringRotateFull(ctx context.Context, token string) error {
+	ret := _mock.Called(ctx, token)
+
+	if len(ret) == 0 {
+		panic("no return value specified for KeyringRotateFull")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(ctx, token)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockNomadAPI_KeyringRotateFull_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'KeyringRotateFull'
+type MockNomadAPI_KeyringRotateFull_Call struct {
+	*mock.Call
+}
+
+// KeyringRotateFull is a helper method to define mock.On call
+//   - ctx context.Context
+//   - token string
+func (_e *MockNomadAPI_Expecter) KeyringRotateFull(ctx interface{}, token interface{}) *MockNomadAPI_KeyringRotateFull_Call {
+	return &MockNomadAPI_KeyringRotateFull_Call{Call: _e.mock.On("KeyringRotateFull", ctx, token)}
+}
+
+func (_c *MockNomadAPI_KeyringRotateFull_Call) Run(run func(ctx context.Context, token string)) *MockNomadAPI_KeyringRotateFull_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockNomadAPI_KeyringRotateFull_Call) Return(err error) *MockNomadAPI_KeyringRotateFull_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockNomadAPI_KeyringRotateFull_Call) RunAndReturn(run func(ctx context.Context, token string) error) *MockNomadAPI_KeyringRotateFull_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // RaftListPeers provides a mock function for the type MockNomadAPI
 func (_mock *MockNomadAPI) RaftListPeers(ctx context.Context, token string) ([]*nomad.RaftPeer, error) {
 	ret := _mock.Called(ctx, token)

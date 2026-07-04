@@ -152,6 +152,55 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 			},
 			{
+				name: "keyring entry with no provider rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{Name: "empty"}}
+				},
+				wantErr: "exactly one of",
+			},
+			{
+				name: "keyring entry with two providers rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name:   "both",
+						AWSKMS: &nomadv1alpha1.AWSKMSKeyring{KMSKeyID: "alias/x"},
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://v:8200", KeyName: "k", MountPath: "transit/",
+						},
+					}}
+				},
+				wantErr: "exactly one of",
+			},
+			{
+				name: "duplicate keyring names rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{
+						{Name: "dup", AWSKMS: &nomadv1alpha1.AWSKMSKeyring{KMSKeyID: "alias/x"}},
+						{Name: "dup", GCPCKMS: &nomadv1alpha1.GCPCKMSKeyring{Project: "p", Region: "r", KeyRing: "kr", CryptoKey: "ck"}},
+					}
+				},
+				wantErr: "Duplicate value",
+			},
+			{
+				name: "transit address without scheme rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name:    "bad",
+						Transit: &nomadv1alpha1.TransitKeyring{Address: "vault:8200", KeyName: "k", MountPath: "transit/"},
+					}}
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "valid HA keyring pair accepted",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{
+						{Name: "primary", Transit: &nomadv1alpha1.TransitKeyring{Address: "https://v:8200", KeyName: "k", MountPath: "transit/"}},
+						{Name: "dr", AWSKMS: &nomadv1alpha1.AWSKMSKeyring{KMSKeyID: "alias/nomad", Region: "eu-west-2"}},
+					}
+				},
+			},
+			{
 				name: "reclaimPolicy outside enum rejected",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
 					c.Spec.Persistence.ReclaimPolicy = "Recycle"

@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -188,6 +189,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// HCL (bootstrap_expect, retry_join) is startup-only in Nomad, and
 	// including it would roll pods — and break quorum — on every
 	// replica change.
+	keyringsJSON, _ := json.Marshal(p.Keyrings)
 	configChecksum := ConfigChecksum(map[string]string{
 		"advertise":  p.AdvertiseAddress,
 		"gossip":     p.GossipKey,
@@ -196,6 +198,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
 		"region":     cluster.Spec.Topology.Region,
 		"datacenter": cluster.Spec.Topology.Datacenter,
+		"keyrings":   string(keyringsJSON),
 	})
 	// Get secrets checksum for pod annotation - hash actual secret contents
 	// This ensures pods restart when referenced secrets change
@@ -242,7 +245,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 	// Get the effective license secret name (handles inline vs external)
 	licenseSecretName := getLicenseSecretName(cluster)
 
-	env := []corev1.EnvVar{
+	env := p.buildKeyringEnv()
+	env = append(env, []corev1.EnvVar{
 		{
 			Name: "NOMAD_LICENSE",
 			ValueFrom: &corev1.EnvVarSource{
@@ -289,13 +293,93 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 			Name:  "NOMAD_CACERT",
 			Value: "/nomad/tls/ca.crt",
 		},
-	}
+	}...)
 
 	return env
 }
 
+// buildKeyringEnv wires keyring credentials as environment variables,
+// per each provider's documented env contract. Omitted refs mean
+// ambient identity.
+func (p *StatefulSetPhase) buildKeyringEnv() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	secretEnv := func(name, secret, key string, optional bool) corev1.EnvVar {
+		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secret},
+				Key:                  key,
+				Optional:             &optional,
+			},
+		}}
+	}
+	for _, e := range p.KeyringEntries {
+		switch {
+		case e.AWSKMS != nil && e.AWSKMS.CredentialsSecretRef != nil:
+			n := e.AWSKMS.CredentialsSecretRef.Name
+			env = append(env,
+				secretEnv("AWS_ACCESS_KEY_ID", n, "AWS_ACCESS_KEY_ID", false),
+				secretEnv("AWS_SECRET_ACCESS_KEY", n, "AWS_SECRET_ACCESS_KEY", false),
+				secretEnv("AWS_SESSION_TOKEN", n, "AWS_SESSION_TOKEN", true))
+		case e.AzureKeyVault != nil && e.AzureKeyVault.CredentialsSecretRef != nil:
+			n := e.AzureKeyVault.CredentialsSecretRef.Name
+			env = append(env,
+				secretEnv("AZURE_CLIENT_ID", n, "AZURE_CLIENT_ID", false),
+				secretEnv("AZURE_CLIENT_SECRET", n, "AZURE_CLIENT_SECRET", false))
+		case e.GCPCKMS != nil && e.GCPCKMS.CredentialsSecretRef != nil:
+			env = append(env, corev1.EnvVar{
+				Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: KeyringGCPCredentialsPath})
+		case e.Transit != nil && e.Transit.CredentialsSecretRef != nil:
+			env = append(env,
+				secretEnv("VAULT_TOKEN", e.Transit.CredentialsSecretRef.Name, "VAULT_TOKEN", false))
+		}
+	}
+	return env
+}
+
+// buildKeyringVolumes returns the volumes and mounts for keyring
+// secret material: the GCP service-account JSON and per-transit TLS
+// files, at the paths the keyring phase renders into the HCL.
+func buildKeyringVolumes(entries []nomadv1alpha1.KeyringEntry) ([]corev1.Volume, []corev1.VolumeMount) {
+	var vols []corev1.Volume
+	var mounts []corev1.VolumeMount
+	for _, e := range entries {
+		if e.GCPCKMS != nil && e.GCPCKMS.CredentialsSecretRef != nil {
+			vols = append(vols, corev1.Volume{
+				Name: "keyring-gcp-" + e.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: e.GCPCKMS.CredentialsSecretRef.Name},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{
+				Name: "keyring-gcp-" + e.Name, MountPath: "/nomad/keyring-gcp", ReadOnly: true})
+		}
+		if e.Transit != nil && e.Transit.CASecretRef != nil {
+			vols = append(vols, corev1.Volume{
+				Name: "keyring-ca-" + e.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: e.Transit.CASecretRef.Name},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{
+				Name: "keyring-ca-" + e.Name, MountPath: KeyringTLSPath(e.Name), ReadOnly: true})
+		}
+		if e.Transit != nil && e.Transit.ClientCertSecretRef != nil {
+			vols = append(vols, corev1.Volume{
+				Name: "keyring-cc-" + e.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: e.Transit.ClientCertSecretRef.Name},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{
+				Name: "keyring-cc-" + e.Name, MountPath: KeyringTLSPath(e.Name) + "-client", ReadOnly: true})
+		}
+	}
+	return vols, mounts
+}
+
 func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster) []corev1.VolumeMount {
-	mounts := []corev1.VolumeMount{
+	_, keyringMounts := buildKeyringVolumes(p.KeyringEntries)
+	mounts := append(keyringMounts, []corev1.VolumeMount{
 		{
 			Name:      "data",
 			MountPath: "/nomad/data",
@@ -311,7 +395,7 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 			Name:      "tmp",
 			MountPath: "/tmp",
 		},
-	}
+	}...)
 
 	// Add audit volume mount (always needed when audit is enabled)
 	if cluster.Spec.Server.Audit.Enabled {
@@ -344,6 +428,9 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 			},
 		},
 	}
+
+	keyringVols, _ := buildKeyringVolumes(p.KeyringEntries)
+	volumes = append(volumes, keyringVols...)
 
 	// Scratch space to pair with readOnlyRootFilesystem (neo-8xu)
 	volumes = append(volumes, corev1.Volume{
@@ -550,6 +637,9 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 
 	// TLS secret — mTLS is always enabled
 	secretNames = append(secretNames, TLSSecretName(cluster.Name))
+
+	// Keyring credential/TLS secrets: rotation must roll pods
+	secretNames = append(secretNames, KeyringSecretNamesFromEntries(p.KeyringEntries)...)
 
 	// Sort for deterministic ordering
 	sort.Strings(secretNames)

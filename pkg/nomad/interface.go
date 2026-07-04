@@ -61,6 +61,14 @@ type NomadAPI interface {
 	// bootstrap token until C4 (neo-ikf) provisions a long-lived
 	// management token.
 	RaftRemovePeer(ctx context.Context, token, id string) error
+
+	// KeyringList returns root keys with states; KeyringRotateFull
+	// rotates immediately with full re-encryption; KeyringDelete
+	// removes a key (refused while referenced). Management token
+	// required when ACLs are enabled.
+	KeyringList(ctx context.Context, token string) ([]*RootKey, error)
+	KeyringRotateFull(ctx context.Context, token string) error
+	KeyringDelete(ctx context.Context, token, keyID string) error
 }
 
 // Compile-time assertion that *Client satisfies NomadAPI.

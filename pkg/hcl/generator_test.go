@@ -333,3 +333,48 @@ func TestGenerator_Generate_SingleReplica(t *testing.T) {
 		t.Error("Generate() should NOT contain server join entry for pod 1")
 	}
 }
+
+// TestGenerateKeyringBlocks covers the keyring stanza rendering: no
+// blocks when unset (implicit aead), full args per block, and the
+// dual-block migration shape (active new + inactive old).
+func TestGenerateKeyringBlocks(t *testing.T) {
+	cluster := &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "kr", Namespace: "ns"},
+	}
+	g := NewGenerator(cluster, "10.0.0.1", "key==")
+
+	out, err := g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "keyring ") {
+		t.Fatal("no keyring blocks expected when unset")
+	}
+
+	g.Keyrings = []KeyringBlock{
+		{Type: "transit", Name: "primary", Active: true, Args: []KeyringArg{
+			{"address", "https://vault:8200"},
+			{"key_name", "nomad-keyring"},
+			{"mount_path", "transit/"},
+		}},
+		{Type: "aead", Name: "aead", Active: false},
+	}
+	out, err = g.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`keyring "transit" {`,
+		`name   = "primary"`,
+		`active = true`,
+		`address = "https://vault:8200"`,
+		`key_name = "nomad-keyring"`,
+		`mount_path = "transit/"`,
+		`keyring "aead" {`,
+		`active = false`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered HCL missing %q", want)
+		}
+	}
+}

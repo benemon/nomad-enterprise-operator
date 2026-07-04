@@ -2183,6 +2183,218 @@ spec:
 		})
 	})
 
+	// Keyring lifecycle (neo-3xe): enable aead->transit on a live
+	// cluster, prove DR (snapshot restores + decrypts on a fresh
+	// cluster; redacted aead snapshot does NOT), then disable back to
+	// aead. Slow lane: runs nightly, skipped on the PR lane.
+	Context("Keyring lifecycle (neo-3xe)", Ordered, func() {
+		const krA, krB = "keyring-a", "keyring-b"
+
+		nomadExec := func(pod string, args ...string) (string, error) {
+			cmd := exec.Command("kubectl", append([]string{"exec", pod + "-0", "-n", namespace, "--", "nomad"}, args...)...)
+			return utils.Run(cmd)
+		}
+		clusterCR := func(name string, keyrings string) string {
+			return fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: false
+%s  services:
+    external:
+      type: NodePort
+`, name, namespace, keyrings)
+		}
+		transitKeyrings := `    keyrings:
+    - name: primary
+      transit:
+        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        keyName: nomad-keyring
+        mountPath: transit/
+        credentialsSecretRef:
+          name: keyring-vault-token
+`
+
+		BeforeAll(func() {
+			// Vault dev lives in its own UNLABELLED namespace: the
+			// operator namespace enforces restricted PSS, which the
+			// Vault image's entrypoint (root, IPC_LOCK) does not meet.
+			By("deploying a Vault dev pod with a transit key")
+			cmd := exec.Command("kubectl", "create", "ns", "e2e-vault")
+			_, _ = utils.Run(cmd)
+			vaultYAML := `apiVersion: v1
+kind: Pod
+metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
+spec:
+  containers:
+  - name: vault
+    image: hashicorp/vault:1.18
+    args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vault, namespace: e2e-vault}
+spec:
+  selector: {app: vault}
+  ports: [{port: 8200, targetPort: 8200}]
+`
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(vaultYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", "e2e-vault", "--timeout=120s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault", "--", "sh", "-c",
+					"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+
+						"vault secrets enable transit || true; vault write -f transit/keys/nomad-keyring")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 90*time.Second, 5*time.Second).Should(Succeed())
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "keyring-vault-token",
+				"-n", namespace, "--from-literal=VAULT_TOKEN=e2e-root")
+			_, _ = utils.Run(cmd)
+		})
+
+		AfterAll(func() {
+			for _, name := range []string{krA, krB} {
+				cmd := exec.Command("kubectl", "delete", "nomadcluster", name, "-n", namespace,
+					"--ignore-not-found", "--timeout=3m")
+				_, _ = utils.Run(cmd)
+			}
+			// Retained data PVCs poison reruns: an adopted PVC carries
+			// old Raft/keyring state into a "fresh" cluster.
+			for _, name := range []string{krA, krB} {
+				cmd := exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+					"-l", "app.kubernetes.io/instance="+name, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			}
+			cmd := exec.Command("kubectl", "delete", "ns", "e2e-vault", "--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret/keyring-vault-token", "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("enables transit mid-life, proves DR both ways, and disables", func() {
+			By("creating an aead cluster and writing a Variable")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR(krA, ""))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := nomadExec(krA, "var", "put", "-force", "e2e/secret", "dr_value=charlie789")
+				g.Expect(err).NotTo(HaveOccurred(), out)
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("saving aead snapshots (full and redacted) for the DR proofs")
+			_, err = nomadExec(krA, "operator", "snapshot", "save", "/tmp/aead.snap")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nomadExec(krA, "operator", "snapshot", "save", "-redact", "/tmp/aead-redacted.snap")
+			Expect(err).NotTo(HaveOccurred())
+			// Copy out NOW: the migration's rolling restart replaces the
+			// pod and wipes /tmp.
+			for _, f := range []string{"aead.snap", "aead-redacted.snap"} {
+				cmd = exec.Command("sh", "-c", fmt.Sprintf(
+					"kubectl exec %s-0 -n %s -- cat /tmp/%s > /tmp/e2e-%s", krA, namespace, f, f))
+				_, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("enabling the transit keyring and waiting for migration to complete")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR(krA, transitKeyrings))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krA, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready primary"))
+			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the pre-migration Variable survived the migration")
+			out, err := nomadExec(krA, "var", "get", "e2e/secret")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("charlie789"))
+
+			By("saving a KMS-cluster snapshot")
+			_, err = nomadExec(krA, "operator", "snapshot", "save", "/tmp/kms.snap")
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("sh", "-c", fmt.Sprintf(
+				"kubectl exec %s-0 -n %s -- cat /tmp/kms.snap > /tmp/e2e-kms.snap", krA, namespace))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("booting a fresh transit cluster for the DR proofs")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR(krB, transitKeyrings))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krB, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("NEGATIVE: a redacted aead snapshot must NOT decrypt on a virgin cluster")
+			cmd = exec.Command("sh", "-c", fmt.Sprintf(
+				"kubectl exec -i %s-0 -n %s -- sh -c 'cat > /tmp/aead-redacted.snap' < /tmp/e2e-aead-redacted.snap",
+				krB, namespace))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nomadExec(krB, "operator", "snapshot", "restore", "/tmp/aead-redacted.snap")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := nomadExec(krB, "var", "get", "e2e/secret")
+				// The specific decrypt-failure signature — NOT a vacuous
+				// "secret absent" (which an unready cluster also produces).
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(out+err.Error()).To(ContainSubstring("no such key"),
+					"redacted snapshot must fail decryption for lack of key material, got: %s", out)
+			}, 2*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("POSITIVE: the KMS snapshot restores and decrypts on the fresh cluster")
+			cmd = exec.Command("sh", "-c", fmt.Sprintf(
+				"kubectl exec -i %s-0 -n %s -- sh -c 'cat > /tmp/kms.snap' < /tmp/e2e-kms.snap", krB, namespace))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nomadExec(krB, "operator", "snapshot", "restore", "/tmp/kms.snap")
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := nomadExec(krB, "var", "get", "e2e/secret")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("charlie789"))
+			}, 2*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("disabling the keyring on the original cluster (back to aead)")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR(krA, ""))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krA, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready aead"))
+			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+			out, err = nomadExec(krA, "var", "get", "e2e/secret")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("charlie789"))
+		})
+	})
+
 	// Rolling Nomad version upgrade with the quorum floor asserted at
 	// every poll. Slow lane: runs nightly, skipped on the PR lane by
 	// container name.

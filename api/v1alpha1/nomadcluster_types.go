@@ -240,7 +240,9 @@ type CertificateSecretKeys struct {
 type MonitoringSpec struct {
 	// Enabled determines if monitoring resources are created
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	// NOTE: no omitempty — with default=true, an omitted false would be
+	// re-defaulted to true by the apiserver on every operator update.
+	Enabled bool `json:"enabled"`
 
 	// PrometheusRulesEnabled determines if PrometheusRule is created
 	// +kubebuilder:default=false
@@ -262,6 +264,143 @@ type ServerSpec struct {
 	// Audit logging configuration
 	// +optional
 	Audit AuditSpec `json:"audit,omitempty"`
+
+	// Keyrings configures external KMS protection for Nomad's root
+	// encryption keys (Variables encryption, workload-identity signing).
+	// Every listed keyring is active: new keys are wrapped by all
+	// entries, so any one surviving KMS can unwrap (HA). Omitted = the
+	// default aead keyring, whose KEK rides Raft IN CLEARTEXT — meaning
+	// snapshots (including NomadSnapshot uploads) contain key material.
+	// The operator manages migration between keyring sets, including
+	// enable, disable, and provider changes, with no quorum impact.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Keyrings []KeyringEntry `json:"keyrings,omitempty"`
+}
+
+// KeyringEntry names one KMS keyring. Exactly one provider block must
+// be set per entry (CEL-enforced).
+// +kubebuilder:validation:XValidation:rule="(has(self.awskms) ? 1 : 0) + (has(self.azurekeyvault) ? 1 : 0) + (has(self.gcpckms) ? 1 : 0) + (has(self.transit) ? 1 : 0) == 1",message="exactly one of awskms, azurekeyvault, gcpckms, or transit must be set per keyring entry"
+type KeyringEntry struct {
+	// Name identifies this keyring; rendered as the Nomad keyring block
+	// name. Unique within the list.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9_-]*$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// +optional
+	AWSKMS *AWSKMSKeyring `json:"awskms,omitempty"`
+	// +optional
+	AzureKeyVault *AzureKeyVaultKeyring `json:"azurekeyvault,omitempty"`
+	// +optional
+	GCPCKMS *GCPCKMSKeyring `json:"gcpckms,omitempty"`
+	// +optional
+	Transit *TransitKeyring `json:"transit,omitempty"`
+}
+
+// AWSKMSKeyring wraps root keys with AWS KMS.
+type AWSKMSKeyring struct {
+	// KMSKeyID is the KMS key: an ID, ARN, or alias/<name>.
+	// +kubebuilder:validation:MinLength=1
+	KMSKeyID string `json:"kmsKeyID"`
+
+	// Region of the KMS key. Omitted = SDK default chain.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Endpoint overrides the KMS endpoint (FIPS or KMS-compatible).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// CredentialsSecretRef names a Secret with AWS_ACCESS_KEY_ID,
+	// AWS_SECRET_ACCESS_KEY, and optionally AWS_SESSION_TOKEN. Omitted =
+	// ambient identity (IRSA / instance profile).
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// AzureKeyVaultKeyring wraps root keys with Azure Key Vault.
+// resource "managedhsm.azure.net" selects a Managed HSM vault.
+type AzureKeyVaultKeyring struct {
+	// +kubebuilder:validation:MinLength=1
+	VaultName string `json:"vaultName"`
+	// +kubebuilder:validation:MinLength=1
+	KeyName string `json:"keyName"`
+	// +kubebuilder:validation:MinLength=1
+	TenantID string `json:"tenantID"`
+
+	// Environment, e.g. AZUREPUBLICCLOUD (the default).
+	// +optional
+	Environment string `json:"environment,omitempty"`
+
+	// Resource is the key vault resource domain; set
+	// "managedhsm.azure.net" for Managed HSM.
+	// +optional
+	Resource string `json:"resource,omitempty"`
+
+	// CredentialsSecretRef names a Secret with AZURE_CLIENT_ID and
+	// AZURE_CLIENT_SECRET. Omitted = MSI / workload identity.
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// GCPCKMSKeyring wraps root keys with GCP Cloud KMS.
+type GCPCKMSKeyring struct {
+	// +kubebuilder:validation:MinLength=1
+	Project string `json:"project"`
+	// +kubebuilder:validation:MinLength=1
+	Region string `json:"region"`
+	// +kubebuilder:validation:MinLength=1
+	KeyRing string `json:"keyRing"`
+	// +kubebuilder:validation:MinLength=1
+	CryptoKey string `json:"cryptoKey"`
+
+	// CredentialsSecretRef names a Secret whose single key holds a
+	// service-account JSON, mounted and exposed as
+	// GOOGLE_APPLICATION_CREDENTIALS. Omitted = workload identity.
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// TransitKeyring wraps root keys with Vault's transit engine.
+type TransitKeyring struct {
+	// Address is the Vault cluster URL.
+	// +kubebuilder:validation:Pattern=`^https?://`
+	Address string `json:"address"`
+	// +kubebuilder:validation:MinLength=1
+	KeyName string `json:"keyName"`
+	// +kubebuilder:validation:MinLength=1
+	MountPath string `json:"mountPath"`
+
+	// Namespace is the Vault namespace of the transit engine.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// KeyIDPrefix disambiguates wrapped key IDs when multiple transit
+	// keyrings are listed.
+	// +optional
+	KeyIDPrefix string `json:"keyIDPrefix,omitempty"`
+
+	// TLSServerName is the SNI hostname for the Vault connection.
+	// +optional
+	TLSServerName string `json:"tlsServerName,omitempty"`
+
+	// CASecretRef names a Secret whose ca.crt verifies the Vault
+	// connection, for CAs outside the system trust store.
+	// +optional
+	CASecretRef *corev1.LocalObjectReference `json:"caSecretRef,omitempty"`
+
+	// ClientCertSecretRef names a kubernetes.io/tls-shaped Secret
+	// (tls.crt, tls.key) for mTLS to Vault.
+	// +optional
+	ClientCertSecretRef *corev1.LocalObjectReference `json:"clientCertSecretRef,omitempty"`
+
+	// CredentialsSecretRef names a Secret whose VAULT_TOKEN key holds
+	// the token the keyring authenticates with.
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
 }
 
 // ACLSpec defines ACL configuration. The bootstrap token Secret name is
@@ -269,7 +408,9 @@ type ServerSpec struct {
 type ACLSpec struct {
 	// Enabled determines if ACLs are enabled (defaults to true for security)
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	// NOTE: no omitempty — with default=true, an omitted false would be
+	// re-defaulted to true by the apiserver on every operator update.
+	Enabled bool `json:"enabled"`
 }
 
 // TLSSpec defines TLS configuration for the Nomad cluster.
@@ -319,7 +460,9 @@ type AuditSpec struct {
 	// Enabled determines if audit logging is enabled.
 	// When enabled, an audit volume is automatically created.
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
+	// NOTE: no omitempty — with default=true, an omitted false would be
+	// re-defaulted to true by the apiserver on every operator update.
+	Enabled bool `json:"enabled"`
 
 	// Size of the audit volume (created automatically when audit is enabled)
 	// +kubebuilder:default="5Gi"
@@ -386,6 +529,24 @@ const (
 //
 // Condition types stay string literals; deliberately no ConditionType
 // constants.
+
+// KeyringStatus reports keyring reconciliation state.
+type KeyringStatus struct {
+	// Active lists the keyring entries currently wrapping new keys
+	// ("aead" when the default file keyring is in use).
+	// +optional
+	Active []string `json:"active,omitempty"`
+
+	// Retiring lists entries kept only until their wrapped keys are
+	// removed; cleared when migration completes.
+	// +optional
+	Retiring []string `json:"retiring,omitempty"`
+
+	// Phase is Ready, Introducing, Rotating, or Retiring.
+	// +kubebuilder:validation:Enum=Ready;Introducing;Rotating;Retiring
+	// +optional
+	Phase string `json:"phase,omitempty"`
+}
 
 // LicenseStatus represents the Nomad Enterprise license information
 type LicenseStatus struct {
@@ -570,6 +731,10 @@ type NomadClusterStatus struct {
 	// InitialReconcileComplete Event across operator restarts.
 	// +optional
 	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
+
+	// Keyring reports the keyring set the operator has reconciled.
+	// +optional
+	Keyring *KeyringStatus `json:"keyring,omitempty"`
 
 	// ScaleDown tracks an in-flight Raft scale-down; nil when none.
 	// Drives crash-safe resume, the replicas-edit admission freeze,

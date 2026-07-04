@@ -27,7 +27,6 @@ import (
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -299,22 +298,7 @@ func (p *ScaleDownPhase) getManagementToken(
 	ctx context.Context,
 	cluster *nomadv1alpha1.NomadCluster,
 ) (string, error) {
-	if !cluster.Spec.Server.ACL.Enabled {
-		return "", nil
-	}
-	secretName := OperatorManagementSecretName(cluster.Name)
-	secret := &corev1.Secret{}
-	if err := p.Client.Get(ctx, types.NamespacedName{
-		Name:      secretName,
-		Namespace: cluster.Namespace,
-	}, secret); err != nil {
-		return "", err
-	}
-	token := string(secret.Data[SecretKeySecretID])
-	if token == "" {
-		return "", fmt.Errorf("management token secret %q has no secret-id", secretName)
-	}
-	return token, nil
+	return getManagementToken(ctx, p.Client, cluster)
 }
 
 // newNomadClientForScaleDown targets the internal Service only — no

@@ -232,6 +232,7 @@ func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.
 		phases.NewAdvertisePhase(ctx),
 		phases.NewCertificatePhase(ctx), // After Advertise so LoadBalancer IP is in cert SANs
 		phases.NewSecretsPhase(ctx),
+		phases.NewKeyringPhase(ctx), // before ConfigMap: publishes the keyring render set
 		phases.NewConfigMapPhase(ctx),
 		phases.NewStatefulSetPhase(ctx),
 		phases.NewPDBPhase(ctx),       // After StatefulSet so PDB selector matches running pods (D1 / neo-fp3)
@@ -595,6 +596,10 @@ func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, c
 // secretRefIndexes maps field-index keys to Secret-reference
 // extractors. Shared by SetupWithManager and fake-client tests so the
 // two cannot drift.
+// keyringSecretsIndex is the multi-valued field index over every
+// Secret the keyring entries reference.
+const keyringSecretsIndex = "spec.server.keyrings.secrets"
+
 var secretRefIndexes = map[string]func(*nomadv1alpha1.NomadCluster) string{
 	"spec.license.secretName": func(c *nomadv1alpha1.NomadCluster) string {
 		return c.Spec.License.SecretName
@@ -624,6 +629,12 @@ func (r *NomadClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}); err != nil {
 			return fmt.Errorf("failed to register field index %s: %w", key, err)
 		}
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &nomadv1alpha1.NomadCluster{}, keyringSecretsIndex,
+		func(obj client.Object) []string {
+			return phases.KeyringSecretNames(obj.(*nomadv1alpha1.NomadCluster))
+		}); err != nil {
+		return fmt.Errorf("failed to register field index %s: %w", keyringSecretsIndex, err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
@@ -670,7 +681,11 @@ func (r *NomadClusterReconciler) findClustersReferencingSecret(ctx context.Conte
 	// license and gossip), so requests are deduplicated.
 	seen := map[types.NamespacedName]bool{}
 	var requests []reconcile.Request
+	keys := []string{keyringSecretsIndex}
 	for key := range secretRefIndexes {
+		keys = append(keys, key)
+	}
+	for _, key := range keys {
 		clusterList := &nomadv1alpha1.NomadClusterList{}
 		if err := r.List(ctx, clusterList,
 			client.InNamespace(secret.Namespace),

@@ -26,6 +26,10 @@ import (
 
 // Generator creates Nomad HCL configuration
 type Generator struct {
+	// Keyrings, when non-empty, renders keyring blocks. Empty means
+	// Nomad's implicit aead default.
+	Keyrings []KeyringBlock
+
 	cluster          *nomadv1alpha1.NomadCluster
 	advertiseAddress string
 	gossipKey        string
@@ -58,6 +62,7 @@ func (g *Generator) Generate() (string, error) {
 	}
 
 	data := g.buildTemplateData()
+	data.Keyrings = g.Keyrings
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
@@ -66,6 +71,20 @@ func (g *Generator) Generate() (string, error) {
 
 	return buf.String(), nil
 }
+
+// KeyringBlock is one rendered keyring stanza. The caller (the
+// operator's keyring phase) owns the set semantics: which blocks
+// exist, which are active, and any transient aead block during
+// migration. Args render in order as key = "value" lines.
+type KeyringBlock struct {
+	Type   string // awskms | azurekeyvault | gcpckms | transit | aead
+	Name   string
+	Active bool
+	Args   []KeyringArg
+}
+
+// KeyringArg is a single keyring parameter.
+type KeyringArg struct{ Key, Value string }
 
 type templateData struct {
 	Region                 string
@@ -89,6 +108,7 @@ type templateData struct {
 	AuditRotateDur         string
 	AuditRotateMax         int
 	Autopilot              autopilotData
+	Keyrings               []KeyringBlock
 }
 
 type autopilotData struct {
@@ -252,6 +272,18 @@ telemetry {
   publish_node_metrics       = true
   prometheus_metrics         = true
 }
+
+{{- range .Keyrings }}
+keyring "{{ .Type }}" {
+{{- if .Name }}
+  name   = "{{ .Name }}"
+{{- end }}
+  active = {{ .Active }}
+{{- range .Args }}
+  {{ .Key }} = "{{ .Value }}"
+{{- end }}
+}
+{{- end }}
 
 # Leave on interrupt/term
 leave_on_interrupt = true

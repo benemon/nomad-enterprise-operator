@@ -28,7 +28,6 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	tlspkg "github.com/hashicorp/nomad-enterprise-operator/pkg/tls"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -288,19 +287,7 @@ func caTrustUnion(secret *corev1.Secret) []byte {
 // Conservative on any doubt: a missing StatefulSet, stale observation,
 // or in-flight roll all return false and rotation simply waits.
 func (p *CertificatePhase) statefulSetFullyRolled(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) bool {
-	sts := &appsv1.StatefulSet{}
-	if err := p.Client.Get(ctx, types.NamespacedName{
-		Name: cluster.Name, Namespace: cluster.Namespace,
-	}, sts); err != nil {
-		return false
-	}
-	if sts.Generation != sts.Status.ObservedGeneration || sts.Spec.Replicas == nil {
-		return false
-	}
-	replicas := *sts.Spec.Replicas
-	return sts.Status.UpdatedReplicas == replicas &&
-		sts.Status.ReadyReplicas == replicas &&
-		sts.Status.CurrentRevision == sts.Status.UpdateRevision
+	return statefulSetFullyRolled(ctx, p.Client, cluster)
 }
 
 // trustDelivered reports whether the mounted TLS secret's ca.crt

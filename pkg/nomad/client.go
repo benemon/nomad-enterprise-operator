@@ -69,6 +69,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if nomadCfg.HttpClient == nil {
 		nomadCfg.HttpClient = &http.Client{}
 	}
+	// One-shot connections for the non-TLS path too — see the transport
+	// note below.
+	nomadCfg.HttpClient.Transport = &http.Transport{DisableKeepAlives: true}
 
 	if cfg.Timeout > 0 {
 		nomadCfg.HttpClient.Timeout = cfg.Timeout
@@ -91,8 +94,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			tlsConfig.RootCAs = caCertPool
 		}
 
+		// Operator clients are ephemeral (a new one per phase call).
+		// Keep-alive connections from discarded transports accumulate
+		// against Nomad's per-IP concurrent-connection limit (default
+		// 100) until every call 429s — one-shot connections close
+		// immediately and cannot leak.
 		nomadCfg.HttpClient.Transport = &http.Transport{
-			TLSClientConfig: tlsConfig,
+			TLSClientConfig:   tlsConfig,
+			DisableKeepAlives: true,
 		}
 	}
 
@@ -579,4 +588,56 @@ func IsNetworkError(err error) bool {
 	}
 
 	return false
+}
+
+// RootKey is the projection of the SDK's RootKeyMeta used by the
+// keyring lifecycle: ID plus State ("active"/"inactive").
+type RootKey struct {
+	KeyID string
+	State string
+}
+
+// KeyringList returns the cluster's root keys with their states.
+// Needs a management token when ACLs are enabled.
+func (c *Client) KeyringList(ctx context.Context, token string) ([]*RootKey, error) {
+	keys, _, err := c.api.Keyring().List((&nomadapi.QueryOptions{AuthToken: token}).WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list keyring: %w", err)
+	}
+	out := make([]*RootKey, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, &RootKey{KeyID: k.KeyID, State: string(k.State)})
+	}
+	return out, nil
+}
+
+// KeyringRotateFull rotates the root key immediately (-full -now):
+// the new key is wrapped by every active keyring block and all
+// Variables are re-encrypted asynchronously, making old keys
+// removable. Nomad requires the now/prepublish choice; the operator
+// always uses now.
+func (c *Client) KeyringRotateFull(ctx context.Context, token string) error {
+	// Omitted PublishTime IS the CLI's -now: the CLI sends
+	// PublishTime 0 and the SDK omits the parameter entirely
+	// (verified against the CLI source). A non-zero value means
+	// -prepublish, which delays activation.
+	_, _, err := c.api.Keyring().Rotate(
+		&nomadapi.KeyringRotateOptions{Full: true},
+		(&nomadapi.WriteOptions{AuthToken: token}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("failed to rotate root keyring: %w", err)
+	}
+	return nil
+}
+
+// KeyringDelete removes a root key by ID; Nomad refuses while the key
+// is still referenced.
+func (c *Client) KeyringDelete(ctx context.Context, token, keyID string) error {
+	_, err := c.api.Keyring().Delete(
+		&nomadapi.KeyringDeleteOptions{KeyID: keyID},
+		(&nomadapi.WriteOptions{AuthToken: token}).WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("failed to delete root key %s: %w", keyID, err)
+	}
+	return nil
 }

@@ -132,3 +132,21 @@ func (i *instrumentedNomadAPI) RaftRemovePeer(ctx context.Context, token, id str
 // Compile-time assertion that the decorator satisfies NomadAPI, so an
 // interface change fails the build here rather than at the wrap site.
 var _ nomad.NomadAPI = (*instrumentedNomadAPI)(nil)
+
+func (i *instrumentedNomadAPI) KeyringList(ctx context.Context, token string) ([]*nomad.RootKey, error) {
+	keys, err := i.inner.KeyringList(ctx, token)
+	count("KeyringList", err)
+	return keys, err
+}
+
+func (i *instrumentedNomadAPI) KeyringRotateFull(ctx context.Context, token string) error {
+	err := i.inner.KeyringRotateFull(ctx, token)
+	count("KeyringRotateFull", err)
+	return err
+}
+
+func (i *instrumentedNomadAPI) KeyringDelete(ctx context.Context, token, keyID string) error {
+	err := i.inner.KeyringDelete(ctx, token, keyID)
+	count("KeyringDelete", err)
+	return err
+}

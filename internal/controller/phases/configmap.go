@@ -51,13 +51,14 @@ func (p *ConfigMapPhase) Name() string {
 func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	// Generate server.hcl configuration
 	generator := hcl.NewGenerator(cluster, p.AdvertiseAddress, p.GossipKey)
+	generator.Keyrings = p.Keyrings
 	serverHCL, err := generator.Generate()
 	if err != nil {
 		return Error(err, "Failed to generate server.hcl")
 	}
 
 	data := map[string]string{
-		"server.hcl": serverHCL,
+		serverConfigKey: serverHCL,
 	}
 
 	cm := &corev1.ConfigMap{

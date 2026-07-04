@@ -145,7 +145,8 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	# deliberate slow paths (Job retry backoff in the snapshot failure
 	# spec, quorum reformation in the scale-up spec).
 	# GINKGO_SKIP selects the lane (neo-g1o): the PR lane skips the slow
-	# containers (scale-down, version upgrade, leader failover); the
+	# containers (scale-down, version upgrade, leader failover, keyring
+	# lifecycle); the
 	# nightly lane runs everything. Empty = full suite.
 	# GINKGO_FOCUS runs a single container (matrix lanes focus the
 	# upgrade container per version pair); UPGRADE_FROM/UPGRADE_TO
