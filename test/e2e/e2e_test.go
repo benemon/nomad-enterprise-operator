@@ -2200,6 +2200,158 @@ spec:
 		})
 	})
 
+	// Keyring HA pair (neo-3xe P3): two transit mounts on one Vault,
+	// one shared credential — every listed keyring wraps new keys, ANY
+	// ONE reachable keyring unwraps them. Proves same-type HA expansion
+	// via the set-reconciliation lifecycle and decrypt-any-one-alive
+	// under mount loss. Slow lane: skipped on the PR lane.
+	Context("Keyring HA pair (neo-3xe P3)", Ordered, func() {
+		const krHA = "keyring-ha"
+
+		haCR := func(entries string) string {
+			return fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: false
+    keyrings:
+%s  services:
+    external:
+      type: NodePort
+`, krHA, namespace, entries)
+		}
+		entryYAML := func(name, mount string) string {
+			return fmt.Sprintf(`    - name: %s
+      transit:
+        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        keyName: nomad-keyring
+        mountPath: %s
+        auth:
+          method: token
+          token:
+            secretRef:
+              name: keyring-vault-token
+`, name, mount)
+		}
+
+		vaultCmd := func(script string) (string, error) {
+			cmd := exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault", "--", "sh", "-c",
+				"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+script)
+			return utils.Run(cmd)
+		}
+
+		BeforeAll(func() {
+			By("deploying Vault with TWO transit mounts")
+			cmd := exec.Command("kubectl", "create", "ns", "e2e-vault")
+			_, _ = utils.Run(cmd)
+			vaultYAML := `apiVersion: v1
+kind: Pod
+metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
+spec:
+  containers:
+  - name: vault
+    image: hashicorp/vault:1.18
+    args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vault, namespace: e2e-vault}
+spec:
+  selector: {app: vault}
+  ports: [{port: 8200, targetPort: 8200}]
+`
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(vaultYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", "e2e-vault", "--timeout=120s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				_, err := vaultCmd("vault secrets enable -path=transit transit || true; " +
+					"vault write -f transit/keys/nomad-keyring; " +
+					"vault secrets enable -path=transit2 transit || true; " +
+					"vault write -f transit2/keys/nomad-keyring")
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 90*time.Second, 5*time.Second).Should(Succeed())
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "keyring-vault-token",
+				"-n", namespace, "--from-literal=VAULT_TOKEN=e2e-root")
+			_, _ = utils.Run(cmd)
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", krHA, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+				"-l", "app.kubernetes.io/instance="+krHA, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret/keyring-vault-token", "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "ns", "e2e-vault", "--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("expands to an HA pair and survives losing one mount", func() {
+			By("creating a single-keyring cluster and writing a Variable")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(haCR(entryYAML("primary", "transit/")))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", krHA, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready primary"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(exec.Command("kubectl", "exec", krHA+"-0", "-n", namespace, "--",
+					"nomad", "var", "put", "-force", "e2e/ha", "v=hotel345"))
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("expanding to the HA pair (same Vault, same auth, second mount)")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(haCR(entryYAML("primary", "transit/") + entryYAML("secondary", "transit2/")))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", krHA, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal(`Ready ["primary","secondary"]`))
+			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the Variable survived the expansion")
+			out, err := utils.Run(exec.Command("kubectl", "exec", krHA+"-0", "-n", namespace, "--",
+				"nomad", "var", "get", "e2e/ha"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("hotel345"))
+
+			By("ANY-ONE-ALIVE: disabling the FIRST mount and restarting the server")
+			_, err = vaultCmd("vault secrets disable transit")
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "delete", "pod", krHA+"-0", "-n", namespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the restarted server unwraps via the surviving mount")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "exec", krHA+"-0", "-n", namespace, "--",
+					"nomad", "var", "get", "e2e/ha"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("hotel345"))
+			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+		})
+	})
+
 	// Keyring transit auth (neo-3xe P2): operator-managed Vault login
 	// via the cluster's own ServiceAccount — mint, scheduled renewal,
 	// and revocation recovery, against real kubernetes-auth TokenReview

@@ -45,4 +45,4 @@ jobs:
       - name: Running Test e2e (PR lane - slow containers skipped)
         run: |
           go mod tidy
-          make test-e2e GINKGO_SKIP='scale-down|version upgrade|leader failover|Keyring lifecycle'
+          make test-e2e GINKGO_SKIP='scale-down|version upgrade|leader failover|Keyring lifecycle|Keyring transit auth|Keyring HA pair'

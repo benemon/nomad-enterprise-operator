@@ -47,6 +47,11 @@ capabilities dropped, and read-only root filesystems with explicit
 writable mounts. The e2e suite runs in a namespace with
 `pod-security.kubernetes.io/enforce=restricted` to keep this true.
 
+Snapshot artifacts from `aead`-keyring clusters (the Nomad default)
+contain cleartext key material — see
+[Keyrings](#keyrings-specserverkeyrings) for why external KMS wrapping
+is the production posture.
+
 The v1alpha2 release is deliberately scoped: it prioritises operational stability, runtime security, developer maintainability, and value delivery. Some supply-chain hardening is **deliberately deferred** to a future release:
 
 - **Container images are not signed** (no cosign signatures attached). Verification by signature is not available against the upstream-published images.
@@ -272,6 +277,126 @@ configuration.
 | `server.audit.size` | `string` | `5Gi` | Audit volume size |
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
 
+### Keyrings (`spec.server.keyrings`)
+
+Nomad's root encryption keys — which protect Variables and sign
+workload identities — are wrapped by a **keyring**. The default (`aead`)
+stores its key-encryption key **in cleartext inside Raft**, which means
+every Raft snapshot carries usable key material:
+
+> **Snapshot custody is key custody.** On an `aead` cluster (the
+> default), anyone who can read a snapshot — including the object-store
+> bucket a `NomadSnapshot` uploads to — can decrypt that cluster's
+> Variables and mint workload identities. Configure an external KMS
+> keyring before treating snapshot storage as anything less than a
+> copy of your keys.
+
+With an external KMS keyring, only *wrapped* keys ride Raft: snapshots
+remain complete for disaster recovery and are safe at rest — a restore
+decrypts if and only if the restoring cluster can reach the KMS.
+
+Four providers are supported, singly or as an HA set (every listed
+keyring wraps new keys; any one reachable keyring unwraps):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server.keyrings[].name` | `string` | | Entry name (unique, ≤63 chars) |
+| `server.keyrings[].awskms` | `object` | | AWS KMS: `kmsKeyID` (required), `region`, `endpoint`, `credentialsSecretRef` |
+| `server.keyrings[].azurekeyvault` | `object` | | Azure Key Vault / Managed HSM: `vaultName`, `keyName`, `tenantID` (required), `environment`, `resource`, `credentialsSecretRef` |
+| `server.keyrings[].gcpckms` | `object` | | GCP Cloud KMS: `project`, `region`, `keyRing`, `cryptoKey` (all required), `credentialsSecretRef` |
+| `server.keyrings[].transit` | `object` | | Vault transit: `address`, `keyName`, `mountPath` (required), `namespace`, `keyIDPrefix`, `tlsServerName`, `caSecretRef`, `clientCertSecretRef`, `auth` (required) |
+
+Cloud providers authenticate with ambient identity (IRSA, Workload
+Identity, Managed Identity) when `credentialsSecretRef` is omitted, or
+with static credentials from the referenced Secret. Rotating that
+Secret rolls the server pods automatically.
+
+**Changing the keyring set is a live migration.** Enable, disable,
+provider change, and HA expand/contract all follow the same
+operator-managed cycle: render the union of old and new keyrings, roll
+the servers, rotate every root key under the new set, remove the old
+keys, retire the demoted keyrings, and roll once more.
+`status.keyring` reports `phase` (`Ready`, `Introducing`, `Rotating`,
+`Retiring`), the `active` and `retiring` sets, and `tokenExpiry` when
+the operator manages a Vault token. A cluster with keyrings removed
+parks on an explicit `aead` keyring permanently — its keys are not
+loadable by the implicit default, so the operator never collapses back.
+
+#### Transit authentication (`transit.auth`)
+
+The transit provider authenticates to Vault through one of **four
+credential vectors**, selected by `auth.method`. The structure mirrors
+the Vault Secrets Operator's `VaultAuth` (`method: token` is our
+extension — VSO has no static-token method):
+
+```yaml
+# 1. Long-lived Vault token, minted and rotated by you
+auth:
+  method: token
+  token:
+    secretRef:
+      name: my-vault-token        # Secret key: VAULT_TOKEN
+
+# 2. Long-lived Kubernetes ServiceAccount token, minted by you,
+#    exchanged for a Vault token at a kubernetes auth mount
+auth:
+  method: kubernetes
+  mount: kubernetes
+  kubernetes:
+    role: nomad-keyring
+    serviceAccountTokenSecretRef:
+      name: my-sa-jwt             # Secret key: token
+
+# 3. Ephemeral ServiceAccount token (RECOMMENDED) — the operator mints
+#    a short-lived, audience-bound TokenRequest JWT for the cluster's
+#    own ServiceAccount, uses it once to log in, and never stores it
+auth:
+  method: kubernetes
+  mount: kubernetes
+  kubernetes:
+    role: nomad-keyring
+    audiences: ["vault"]          # default
+    tokenExpirationSeconds: 600   # default
+
+# 4. ServiceAccount token validated as a JWT (no TokenReview) — the
+#    jwt auth mount verifies the signature against the cluster's JWKS
+auth:
+  method: jwt
+  mount: jwt
+  jwt:
+    role: nomad-keyring           # same source choice as kubernetes:
+                                  # ephemeral default, or secretRef
+```
+
+For the login methods (2–4) the operator publishes the resulting Vault
+token to the managed `<cluster>-keyring-token` Secret, renews it on the
+reconcile heartbeat (no pod restart), and re-mints on failure or
+revocation (rolls pods). For `method: token` the lifecycle is yours:
+the operator wires the Secret to the pods and rolls them when it
+changes.
+
+All transit entries in an HA set must share one `address` and one
+`auth` — a single Vault, a single credential, any number of mounts.
+
+#### Who needs `system:auth-delegator`
+
+The kubernetes auth method validates ServiceAccount tokens via the
+TokenReview API, and the identity making that call needs the
+`system:auth-delegator` ClusterRole. Which identity that is depends on
+the Vault mount configuration — **the operator never creates
+ClusterRoleBindings**; grant it per this table:
+
+| Mount configuration | TokenReview caller | Grant `auth-delegator` to |
+|---------------------|--------------------|---------------------------|
+| `token_reviewer_jwt` configured | that JWT's identity | the reviewer's ServiceAccount |
+| No reviewer JWT; Vault runs in Kubernetes (default `disable_local_ca_jwt=false`) | Vault's own pod ServiceAccount | Vault's pod ServiceAccount |
+| No reviewer JWT; Vault outside Kubernetes (or `disable_local_ca_jwt=true`) | the client's login JWT | the **cluster's** ServiceAccount — and the login JWT must be API-server-valid (vector 2, or vector 3 with API-server audience) |
+| `jwt` auth method | nobody (JWKS signature check) | nobody |
+
+A denied TokenReview surfaces on the cluster as the
+`KeyringVaultReviewerDenied` condition reason with this table's
+remediation.
+
 ### Gossip Encryption (`spec.gossip`)
 
 | Field | Type | Default | Description |
@@ -337,6 +462,9 @@ Rejected at admission (API server, no operator involvement):
 | `spec.image.tag` matches `^[A-Za-z0-9._-]+$` | pattern |
 | `spec.image.digest` matches `^sha256:[a-f0-9]{64}$` | pattern |
 | `spec.image.pullPolicy` ∈ Always/IfNotPresent/Never; `spec.services.*.type` ∈ LoadBalancer/NodePort; `spec.persistence.reclaimPolicy` ∈ Retain/Delete | enum |
+| Each `keyrings[]` entry configures exactly one provider; entry names unique; at most 8 entries | CEL + listType=map |
+| `transit.auth.method` ∈ token/kubernetes/jwt, with exactly the matching per-method block; `mount` required unless `method: token` | enum + CEL |
+| All transit entries share one `address` and one `auth` (single shared `VAULT_TOKEN`) | operator (`KeyringInvalid`) |
 
 Enforced at reconcile time (visible via `kubectl get nomadcluster` and
 the `Ready` condition, not an admission error):
