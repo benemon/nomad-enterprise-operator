@@ -265,15 +265,18 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		// Under Retain (default) they survive deletion — Raft state
 		// outlives accidental CR removal. Deletion-time value wins.
 		if cluster.Spec.Persistence.ReclaimPolicy == nomadv1alpha1.ReclaimPolicyDelete {
-			// The StatefulSet must be GONE before the PVCs are deleted:
-			// a live STS controller re-creates claims deleted out from
-			// under it (observed as a CI-runner race), and the orphaned
-			// claim then survives the cluster.
+			// The StatefulSet OBJECT must be gone before the PVCs are
+			// deleted: a live STS controller re-creates claims deleted
+			// out from under it (observed as a CI-runner race), and the
+			// orphaned claim then survives the cluster. Background
+			// propagation: the object disappears immediately (closing
+			// the race) while pods exit async — pvc-protection holds
+			// each PVC until its pod is gone, so ordering stays safe
+			// without waiting out pod termination in the finalizer.
 			sts := &appsv1.StatefulSet{
 				ObjectMeta: metav1.ObjectMeta{Name: cluster.Name, Namespace: cluster.Namespace},
 			}
-			if err := r.Delete(ctx, sts,
-				client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil && !k8serrors.IsNotFound(err) {
+			if err := r.Delete(ctx, sts); err != nil && !k8serrors.IsNotFound(err) {
 				return ctrl.Result{}, err
 			}
 			if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
