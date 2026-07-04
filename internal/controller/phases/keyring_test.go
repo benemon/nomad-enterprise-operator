@@ -102,6 +102,10 @@ func transitSpec(name string) nomadv1alpha1.KeyringEntry {
 		Name: name,
 		Transit: &nomadv1alpha1.TransitKeyring{
 			Address: "https://vault:8200", KeyName: "nomad-keyring", MountPath: "transit/",
+			Auth: &nomadv1alpha1.TransitAuth{
+				Method: "token",
+				Token:  &nomadv1alpha1.TransitAuthToken{SecretRef: corev1.LocalObjectReference{Name: "vt"}},
+			},
 		},
 	}
 }
@@ -306,15 +310,15 @@ func TestKeyringDisableLifecycle(t *testing.T) {
 	}
 }
 
-// TestKeyringMultiTransitTokenRejected: only one transit entry may
-// carry credentialsSecretRef (VAULT_TOKEN is a single env var).
-func TestKeyringMultiTransitTokenRejected(t *testing.T) {
+// TestKeyringTransitAuthMismatchRejected: transit entries must share
+// one Vault (address) and one credential (auth) — VAULT_TOKEN is a
+// single shared environment variable.
+func TestKeyringTransitAuthMismatchRejected(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
 	phase, cluster, _ := keyringFixture(t, mock)
 	e1 := transitSpec("a")
-	e1.Transit.CredentialsSecretRef = &corev1.LocalObjectReference{Name: "t1"}
 	e2 := transitSpec("b")
-	e2.Transit.CredentialsSecretRef = &corev1.LocalObjectReference{Name: "t2"}
+	e2.Transit.Auth.Token.SecretRef.Name = "other"
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{e1, e2}
 
 	result := phase.Execute(context.Background(), cluster)

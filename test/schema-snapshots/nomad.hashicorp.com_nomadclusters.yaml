@@ -505,6 +505,154 @@ spec:
                               description: Address is the Vault cluster URL.
                               pattern: ^https?://
                               type: string
+                            auth:
+                              description: |-
+                                Auth selects one of four credential vectors for the transit
+                                connection, mirroring the Vault Secrets Operator's VaultAuth
+                                structure (method + mount/namespace, per-method blocks).
+                              properties:
+                                jwt:
+                                  description: JWT configures method=jwt.
+                                  properties:
+                                    audiences:
+                                      default:
+                                      - vault
+                                      description: |-
+                                        Audiences for the ephemeral ServiceAccount token. Ignored when
+                                        serviceAccountTokenSecretRef is set.
+                                      items:
+                                        type: string
+                                      type: array
+                                    role:
+                                      description: Role is the Vault role to log in
+                                        as.
+                                      maxLength: 128
+                                      minLength: 1
+                                      type: string
+                                    serviceAccountTokenSecretRef:
+                                      description: |-
+                                        ServiceAccountTokenSecretRef names a Secret whose token key
+                                        holds a user-managed long-lived ServiceAccount JWT, replacing
+                                        the default ephemeral TokenRequest source.
+                                      properties:
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    tokenExpirationSeconds:
+                                      default: 600
+                                      description: |-
+                                        TokenExpirationSeconds bounds the ephemeral ServiceAccount token
+                                        lifetime. It is used once, immediately, and never stored.
+                                        Ignored when serviceAccountTokenSecretRef is set.
+                                      format: int64
+                                      maximum: 86400
+                                      minimum: 600
+                                      type: integer
+                                  required:
+                                  - role
+                                  type: object
+                                kubernetes:
+                                  description: Kubernetes configures method=kubernetes.
+                                  properties:
+                                    audiences:
+                                      default:
+                                      - vault
+                                      description: |-
+                                        Audiences for the ephemeral ServiceAccount token. Ignored when
+                                        serviceAccountTokenSecretRef is set.
+                                      items:
+                                        type: string
+                                      type: array
+                                    role:
+                                      description: Role is the Vault role to log in
+                                        as.
+                                      maxLength: 128
+                                      minLength: 1
+                                      type: string
+                                    serviceAccountTokenSecretRef:
+                                      description: |-
+                                        ServiceAccountTokenSecretRef names a Secret whose token key
+                                        holds a user-managed long-lived ServiceAccount JWT, replacing
+                                        the default ephemeral TokenRequest source.
+                                      properties:
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    tokenExpirationSeconds:
+                                      default: 600
+                                      description: |-
+                                        TokenExpirationSeconds bounds the ephemeral ServiceAccount token
+                                        lifetime. It is used once, immediately, and never stored.
+                                        Ignored when serviceAccountTokenSecretRef is set.
+                                      format: int64
+                                      maximum: 86400
+                                      minimum: 600
+                                      type: integer
+                                  required:
+                                  - role
+                                  type: object
+                                method:
+                                  description: Method declares the credential vector
+                                    explicitly.
+                                  enum:
+                                  - token
+                                  - kubernetes
+                                  - jwt
+                                  type: string
+                                mount:
+                                  description: |-
+                                    Mount is the Vault auth mount path (e.g. "kubernetes", "jwt").
+                                    Not used by method=token.
+                                  maxLength: 128
+                                  type: string
+                                namespace:
+                                  description: |-
+                                    Namespace is the Vault namespace for the login call. Defaults to
+                                    the transit entry's namespace.
+                                  type: string
+                                token:
+                                  description: Token configures method=token.
+                                  properties:
+                                    secretRef:
+                                      description: |-
+                                        SecretRef names a Secret whose VAULT_TOKEN key holds the token.
+                                        The operator wires it to the server pods and manages nothing
+                                        else: renewal and rotation are user-owned (rotation is delivered
+                                        by the Secret watch and rolls pods).
+                                      properties:
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                  required:
+                                  - secretRef
+                                  type: object
+                              required:
+                              - method
+                              type: object
                             caSecretRef:
                               description: |-
                                 CASecretRef names a Secret whose ca.crt verifies the Vault
@@ -525,22 +673,6 @@ spec:
                               description: |-
                                 ClientCertSecretRef names a kubernetes.io/tls-shaped Secret
                                 (tls.crt, tls.key) for mTLS to Vault.
-                              properties:
-                                name:
-                                  default: ""
-                                  description: |-
-                                    Name of the referent.
-                                    This field is effectively required, but due to backwards compatibility is
-                                    allowed to be empty. Instances of this type with an empty value here are
-                                    almost certainly wrong.
-                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                                  type: string
-                              type: object
-                              x-kubernetes-map-type: atomic
-                            credentialsSecretRef:
-                              description: |-
-                                CredentialsSecretRef names a Secret whose VAULT_TOKEN key holds
-                                the token the keyring authenticates with.
                               properties:
                                 name:
                                   default: ""
@@ -574,9 +706,19 @@ spec:
                               type: string
                           required:
                           - address
+                          - auth
                           - keyName
                           - mountPath
                           type: object
+                          x-kubernetes-validations:
+                          - message: auth requires exactly the per-method block matching
+                              method
+                            rule: (self.auth.method == 'token') == has(self.auth.token)
+                              && (self.auth.method == 'kubernetes') == has(self.auth.kubernetes)
+                              && (self.auth.method == 'jwt') == has(self.auth.jwt)
+                          - message: auth.mount is required for the kubernetes and
+                              jwt methods
+                            rule: self.auth.method == 'token' || has(self.auth.mount)
                       required:
                       - name
                       type: object
@@ -1083,6 +1225,12 @@ spec:
                     items:
                       type: string
                     type: array
+                  tokenExpiry:
+                    description: |-
+                      TokenExpiry is when the operator-managed Vault token expires;
+                      only set when a transit entry uses auth.
+                    format: date-time
+                    type: string
                 type: object
               lastReconcileTime:
                 description: |-

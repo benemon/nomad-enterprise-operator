@@ -2200,6 +2200,548 @@ spec:
 		})
 	})
 
+	// Keyring transit auth (neo-3xe P2): operator-managed Vault login
+	// via the cluster's own ServiceAccount — mint, scheduled renewal,
+	// and revocation recovery, against real kubernetes-auth TokenReview
+	// (mode 1: reviewer JWT). Slow lane: skipped on the PR lane.
+	Context("Keyring transit auth (neo-3xe P2)", Ordered, func() {
+		const krAuth = "keyring-auth"
+
+		authClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: false
+    keyrings:
+    - name: primary
+      transit:
+        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        keyName: nomad-keyring
+        mountPath: transit/
+        auth:
+          method: kubernetes
+          mount: kubernetes
+          kubernetes:
+            role: nomad-keyring
+            # vector 3: ephemeral short-lived SA token (TokenRequest) —
+            # stated explicitly rather than riding the defaults
+            audiences: ["vault"]
+            tokenExpirationSeconds: 600
+  services:
+    external:
+      type: NodePort
+`, krAuth, namespace)
+
+		vaultCmd := func(script string) (string, error) {
+			cmd := exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault", "--", "sh", "-c",
+				"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+script)
+			return utils.Run(cmd)
+		}
+		managedToken := func() string {
+			cmd := exec.Command("kubectl", "get", "secret", krAuth+"-keyring-token", "-n", namespace,
+				"-o", "jsonpath={.data.VAULT_TOKEN}")
+			out, err := utils.Run(cmd)
+			if err != nil {
+				return ""
+			}
+			return out
+		}
+		tokenExpiry := func() string {
+			cmd := exec.Command("kubectl", "get", "nomadcluster", krAuth, "-n", namespace,
+				"-o", "jsonpath={.status.keyring.tokenExpiry}")
+			out, _ := utils.Run(cmd)
+			return out
+		}
+
+		JustAfterEach(func() {
+			if !CurrentSpecReport().Failed() {
+				return
+			}
+			for _, name := range []string{krAuth, "keyring-auth2", "keyring-auth3", "keyring-auth4"} {
+				out, _ := utils.Run(exec.Command("kubectl", "get", "nomadcluster", name, "-n", namespace,
+					"-o", "jsonpath={.status.keyring}"))
+				_, _ = fmt.Fprintf(GinkgoWriter, "--- %s status.keyring: %s\n", name, out)
+			}
+			out, _ := utils.Run(exec.Command("sh", "-c",
+				"kubectl logs -n "+namespace+" deploy/nomad-enterprise-operator-controller-manager --tail=300"+
+					" | grep -iE 'keyring|vault' | tail -30"))
+			_, _ = fmt.Fprintf(GinkgoWriter, "--- operator keyring log ---\n%s\n", out)
+		})
+
+		BeforeAll(func() {
+			By("deploying Vault with transit and kubernetes auth (reviewer JWT mode)")
+			cmd := exec.Command("kubectl", "create", "ns", "e2e-vault")
+			_, _ = utils.Run(cmd)
+			vaultYAML := `apiVersion: v1
+kind: Pod
+metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
+spec:
+  containers:
+  - name: vault
+    image: hashicorp/vault:1.18
+    args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vault, namespace: e2e-vault}
+spec:
+  selector: {app: vault}
+  ports: [{port: 8200, targetPort: 8200}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: vault-reviewer, namespace: e2e-vault}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: e2e-vault-reviewer}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator}
+subjects: [{kind: ServiceAccount, name: vault-reviewer, namespace: e2e-vault}]
+`
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(vaultYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", "e2e-vault", "--timeout=120s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("minting a reviewer JWT and configuring vault kubernetes auth")
+			cmd = exec.Command("kubectl", "create", "token", "vault-reviewer", "-n", "e2e-vault", "--duration=2h")
+			reviewerJWT, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				_, err := vaultCmd("vault secrets enable transit || true; vault write -f transit/keys/nomad-keyring")
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 90*time.Second, 5*time.Second).Should(Succeed())
+			_, err = vaultCmd("vault auth enable kubernetes || true")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd(fmt.Sprintf(
+				"vault write auth/kubernetes/config kubernetes_host=https://kubernetes.default.svc "+
+					"kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt "+
+					"token_reviewer_jwt=%q", reviewerJWT))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd(`printf 'path "transit/*" { capabilities = ["read","create","update"] }' ` +
+				`| vault policy write nomad-transit -`)
+			Expect(err).NotTo(HaveOccurred())
+			// TTL deliberately short so this spec exercises renewal and
+			// revocation recovery in real time.
+			_, err = vaultCmd(fmt.Sprintf(
+				"vault write auth/kubernetes/role/nomad-keyring "+
+					"bound_service_account_names=%s bound_service_account_namespaces=%s "+
+					"audience=vault token_policies=nomad-transit token_ttl=2m token_max_ttl=1h", krAuth, namespace))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", krAuth, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+				"-l", "app.kubernetes.io/instance="+krAuth, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "clusterrolebinding", "e2e-vault-reviewer", "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "ns", "e2e-vault", "--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("mints, renews, and recovers the managed Vault token", func() {
+			By("creating a born-with-auth-keyring cluster")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(authClusterCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Ready with a minted token and expiry in status")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krAuth, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready primary"))
+				g.Expect(managedToken()).NotTo(BeEmpty())
+				g.Expect(tokenExpiry()).NotTo(BeEmpty())
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("proving the minted token actually wraps keys (Variable write)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", krAuth+"-0", "-n", namespace, "--",
+					"nomad", "var", "put", "-force", "e2e/auth", "v=delta456")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("observing scheduled renewal: expiry advances, token string does not change")
+			tokenBefore := managedToken()
+			expiryBefore := tokenExpiry()
+			Eventually(func(g Gomega) {
+				g.Expect(tokenExpiry()).NotTo(Equal(expiryBefore), "renewal must advance expiry")
+			}, 4*time.Minute, 15*time.Second).Should(Succeed())
+			Expect(managedToken()).To(Equal(tokenBefore), "renewal must not rotate the token")
+
+			By("revoking the token in Vault and observing re-mint")
+			raw, err := exec.Command("sh", "-c", fmt.Sprintf(
+				"kubectl get secret %s-keyring-token -n %s -o jsonpath='{.data.VAULT_TOKEN}' | base64 -d",
+				krAuth, namespace)).Output()
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd("vault token revoke " + strings.TrimSpace(string(raw)))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(managedToken()).NotTo(Equal(tokenBefore), "revocation must force a re-mint")
+			}, 5*time.Minute, 15*time.Second).Should(Succeed())
+
+			By("verifying the cluster still functions after the re-mint roll")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", krAuth+"-0", "-n", namespace, "--",
+					"nomad", "var", "get", "e2e/auth")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring("delta456"))
+			}, 4*time.Minute, 15*time.Second).Should(Succeed())
+		})
+
+		// Mode 2 of the Vault-side matrix, CORRECTED empirically: with
+		// no token_reviewer_jwt, modern kubernetes auth (v0.18+) uses
+		// VAULT'S OWN pod ServiceAccount as the TokenReview identity —
+		// NOT the client JWT (that behaviour is gone). So the harness
+		// grants auth-delegator to Vault's pod SA; client SAs need
+		// nothing. JWT source here: long-lived legacy SA token via
+		// serviceAccountTokenSecretRef (the secretRef path).
+		It("logs in via self-review mode with a long-lived SA token", func() {
+			const krAuth2 = "keyring-auth2"
+			By("granting auth-delegator to VAULT'S pod SA and configuring a reviewer-less mount")
+			crb := fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: e2e-selfreview-%s}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator}
+subjects: [{kind: ServiceAccount, name: default, namespace: e2e-vault}]
+`, krAuth2)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(crb)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "clusterrolebinding",
+					"e2e-selfreview-"+krAuth2, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "nomadcluster", krAuth2, "-n", namespace,
+					"--ignore-not-found", "--timeout=3m")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+					"-l", "app.kubernetes.io/instance="+krAuth2, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+			_, err = vaultCmd("vault auth enable -path=kubernetes-selfreview kubernetes || true")
+			Expect(err).NotTo(HaveOccurred())
+			// No token_reviewer_jwt: Vault self-reviews with the login JWT.
+			_, err = vaultCmd("vault write auth/kubernetes-selfreview/config " +
+				"kubernetes_host=https://kubernetes.default.svc " +
+				"kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+			Expect(err).NotTo(HaveOccurred())
+			// No audience param: legacy SA tokens carry the apiserver audience.
+			_, err = vaultCmd(fmt.Sprintf(
+				"vault write auth/kubernetes-selfreview/role/nomad-keyring "+
+					"bound_service_account_names=%s bound_service_account_namespaces=%s "+
+					"token_policies=nomad-transit token_ttl=1h", krAuth2, namespace))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating the cluster (login defers until the SA token Secret exists)")
+			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: false
+    keyrings:
+    - name: primary
+      transit:
+        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        keyName: nomad-keyring
+        mountPath: transit/
+        auth:
+          method: kubernetes
+          mount: kubernetes-selfreview
+          kubernetes:
+            role: nomad-keyring
+            # vector 2: long-lived user-minted SA token
+            serviceAccountTokenSecretRef:
+              name: %s-sa-jwt
+  services:
+    external:
+      type: NodePort
+`, krAuth2, namespace, krAuth2)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(cr)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a legacy long-lived SA token once the operator creates the SA")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "serviceaccount", krAuth2, "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			legacyToken := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s-sa-jwt
+  namespace: %s
+  annotations:
+    kubernetes.io/service-account.name: %s
+type: kubernetes.io/service-account-token
+`, krAuth2, namespace, krAuth2)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(legacyToken)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Ready via self-review login")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krAuth2, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready primary"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("proving the wrapper works end to end")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", krAuth2+"-0", "-n", namespace, "--",
+					"nomad", "var", "put", "-force", "e2e/selfreview", "v=echo123")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		// EXTERNAL-VAULT variant of reviewer-less kubernetes auth:
+		// disable_local_ca_jwt=true makes the plugin ignore its pod
+		// credentials (exactly the external-Vault code path), so the
+		// CLIENT's login JWT performs the TokenReview — the CLUSTER's
+		// SA carries system:auth-delegator, and the JWT must be a valid
+		// apiserver credential (long-lived legacy token).
+		It("logs in via client-JWT review (external-Vault semantics)", func() {
+			const krAuth4 = "keyring-auth4"
+			By("granting auth-delegator to the CLUSTER SA and configuring an external-style mount")
+			crb := fmt.Sprintf(`apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: e2e-clientreview-%s}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:auth-delegator}
+subjects: [{kind: ServiceAccount, name: %s, namespace: %s}]
+`, krAuth4, krAuth4, namespace)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(crb)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "clusterrolebinding",
+					"e2e-clientreview-"+krAuth4, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "nomadcluster", krAuth4, "-n", namespace,
+					"--ignore-not-found", "--timeout=3m")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+					"-l", "app.kubernetes.io/instance="+krAuth4, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+			_, err = vaultCmd("vault auth enable -path=kubernetes-external kubernetes || true")
+			Expect(err).NotTo(HaveOccurred())
+			// disable_local_ca_jwt: no pod-credential adoption; with no
+			// token_reviewer_jwt either, the CLIENT JWT reviews itself.
+			_, err = vaultCmd("vault write auth/kubernetes-external/config " +
+				"kubernetes_host=https://kubernetes.default.svc " +
+				"kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt " +
+				"disable_local_ca_jwt=true")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd(fmt.Sprintf(
+				"vault write auth/kubernetes-external/role/nomad-keyring "+
+					"bound_service_account_names=%s bound_service_account_namespaces=%s "+
+					"token_policies=nomad-transit token_ttl=1h", krAuth4, namespace))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating the cluster (vector 2 source; login defers until the token Secret exists)")
+			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: false
+    keyrings:
+    - name: primary
+      transit:
+        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        keyName: nomad-keyring
+        mountPath: transit/
+        auth:
+          method: kubernetes
+          mount: kubernetes-external
+          kubernetes:
+            role: nomad-keyring
+            serviceAccountTokenSecretRef:
+              name: %s-sa-jwt
+  services:
+    external:
+      type: NodePort
+`, krAuth4, namespace, krAuth4)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(cr)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating the legacy SA token once the operator creates the SA")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "serviceaccount", krAuth4, "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			legacyToken := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s-sa-jwt
+  namespace: %s
+  annotations:
+    kubernetes.io/service-account.name: %s
+type: kubernetes.io/service-account-token
+`, krAuth4, namespace, krAuth4)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(legacyToken)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Ready via client-JWT review")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krAuth4, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready primary"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("proving the wrapper works end to end")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", krAuth4+"-0", "-n", namespace, "--",
+					"nomad", "var", "put", "-force", "e2e/clientreview", "v=golf012")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		// Mode 3 of the Vault-side matrix: the jwt auth method verifies
+		// the SA JWT signature directly against the cluster's JWKS — no
+		// TokenReview, no auth-delegator for anyone. Pairs with the
+		// DEFAULT ephemeral TokenRequest source. Harness prerequisite:
+		// anonymous OIDC discovery (one CRB) + the cluster CA.
+		It("logs in via the jwt method against cluster JWKS", func() {
+			const krAuth3 = "keyring-auth3"
+			By("exposing OIDC discovery anonymously and configuring the jwt mount")
+			crb := `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: e2e-oidc-discovery}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system:service-account-issuer-discovery}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: Group, name: "system:unauthenticated"}]
+`
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(crb)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "clusterrolebinding", "e2e-oidc-discovery", "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "nomadcluster", krAuth3, "-n", namespace,
+					"--ignore-not-found", "--timeout=3m")
+				_, _ = utils.Run(cmd)
+				cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+					"-l", "app.kubernetes.io/instance="+krAuth3, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+			issuer, err := exec.Command("sh", "-c",
+				`kubectl get --raw /.well-known/openid-configuration | `+
+					`python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'`).Output()
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd("vault auth enable -path=jwt jwt || true")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd(fmt.Sprintf(
+				"vault write auth/jwt/config oidc_discovery_url=%q "+
+					`oidc_discovery_ca_pem=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`,
+				strings.TrimSpace(string(issuer))))
+			Expect(err).NotTo(HaveOccurred())
+			_, err = vaultCmd(fmt.Sprintf(
+				"vault write auth/jwt/role/nomad-keyring role_type=jwt user_claim=sub "+
+					"bound_audiences=vault bound_subject=system:serviceaccount:%s:%s "+
+					"token_policies=nomad-transit token_ttl=1h", namespace, krAuth3))
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating the cluster with the jwt method and the default ephemeral source")
+			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  server:
+    acl:
+      enabled: false
+    keyrings:
+    - name: primary
+      transit:
+        address: "http://vault.e2e-vault.svc.cluster.local:8200"
+        keyName: nomad-keyring
+        mountPath: transit/
+        auth:
+          method: jwt
+          mount: jwt
+          jwt:
+            role: nomad-keyring
+  services:
+    external:
+      type: NodePort
+`, krAuth3, namespace)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(cr)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Ready via jwt login")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", krAuth3, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase} {.status.keyring.active[0]}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready primary"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("proving the wrapper works end to end")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", krAuth3+"-0", "-n", namespace, "--",
+					"nomad", "var", "put", "-force", "e2e/jwt", "v=foxtrot789")
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+	})
+
 	// Keyring lifecycle (neo-3xe): enable aead->transit on a live
 	// cluster, prove DR (snapshot restores + decrypts on a fresh
 	// cluster; redacted aead snapshot does NOT), then disable back to
@@ -2235,8 +2777,11 @@ spec:
         address: "http://vault.e2e-vault.svc.cluster.local:8200"
         keyName: nomad-keyring
         mountPath: transit/
-        credentialsSecretRef:
-          name: keyring-vault-token
+        auth:
+          method: token
+          token:
+            secretRef:
+              name: keyring-vault-token
 `
 
 		BeforeAll(func() {

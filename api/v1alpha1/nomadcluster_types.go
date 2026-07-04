@@ -296,6 +296,8 @@ type KeyringEntry struct {
 	AzureKeyVault *AzureKeyVaultKeyring `json:"azurekeyvault,omitempty"`
 	// +optional
 	GCPCKMS *GCPCKMSKeyring `json:"gcpckms,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="(self.auth.method == 'token') == has(self.auth.token) && (self.auth.method == 'kubernetes') == has(self.auth.kubernetes) && (self.auth.method == 'jwt') == has(self.auth.jwt)",message="auth requires exactly the per-method block matching method"
+	// +kubebuilder:validation:XValidation:rule="self.auth.method == 'token' || has(self.auth.mount)",message="auth.mount is required for the kubernetes and jwt methods"
 	// +optional
 	Transit *TransitKeyring `json:"transit,omitempty"`
 }
@@ -397,10 +399,90 @@ type TransitKeyring struct {
 	// +optional
 	ClientCertSecretRef *corev1.LocalObjectReference `json:"clientCertSecretRef,omitempty"`
 
-	// CredentialsSecretRef names a Secret whose VAULT_TOKEN key holds
-	// the token the keyring authenticates with.
+	// Auth selects one of four credential vectors for the transit
+	// connection, mirroring the Vault Secrets Operator's VaultAuth
+	// structure (method + mount/namespace, per-method blocks).
+	Auth *TransitAuth `json:"auth"`
+}
+
+// TransitAuth is the transit keyring's Vault credential configuration.
+// Exactly one per-method block is set, agreeing with method:
+//
+//	token:      a long-lived user-minted Vault token (no login call;
+//	            user-owned lifecycle). Our extension beyond VSO.
+//	kubernetes: TokenReview-validated login — either a user-minted
+//	            long-lived ServiceAccount token (secretRef) or the
+//	            DEFAULT ephemeral operator-minted TokenRequest token
+//	            (single-use, never stored; the VSO pattern).
+//	jwt:        JWKS/OIDC-validated login with the same two
+//	            ServiceAccount token sources.
+type TransitAuth struct {
+	// Method declares the credential vector explicitly.
+	// +kubebuilder:validation:Enum=token;kubernetes;jwt
+	Method string `json:"method"`
+
+	// Mount is the Vault auth mount path (e.g. "kubernetes", "jwt").
+	// Not used by method=token.
+	// +kubebuilder:validation:MaxLength=128
 	// +optional
-	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+	Mount string `json:"mount,omitempty"`
+
+	// Namespace is the Vault namespace for the login call. Defaults to
+	// the transit entry's namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Token configures method=token.
+	// +optional
+	Token *TransitAuthToken `json:"token,omitempty"`
+
+	// Kubernetes configures method=kubernetes.
+	// +optional
+	Kubernetes *TransitAuthKubernetes `json:"kubernetes,omitempty"`
+
+	// JWT configures method=jwt.
+	// +optional
+	JWT *TransitAuthKubernetes `json:"jwt,omitempty"`
+}
+
+// TransitAuthToken is the long-lived user-minted Vault token vector.
+type TransitAuthToken struct {
+	// SecretRef names a Secret whose VAULT_TOKEN key holds the token.
+	// The operator wires it to the server pods and manages nothing
+	// else: renewal and rotation are user-owned (rotation is delivered
+	// by the Secret watch and rolls pods).
+	SecretRef corev1.LocalObjectReference `json:"secretRef"`
+}
+
+// TransitAuthKubernetes configures a ServiceAccount-JWT login (shared
+// by the kubernetes and jwt methods — their login payloads are
+// identical; only Vault-side validation differs).
+type TransitAuthKubernetes struct {
+	// Role is the Vault role to log in as.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Role string `json:"role"`
+
+	// ServiceAccountTokenSecretRef names a Secret whose token key
+	// holds a user-managed long-lived ServiceAccount JWT, replacing
+	// the default ephemeral TokenRequest source.
+	// +optional
+	ServiceAccountTokenSecretRef *corev1.LocalObjectReference `json:"serviceAccountTokenSecretRef,omitempty"`
+
+	// Audiences for the ephemeral ServiceAccount token. Ignored when
+	// serviceAccountTokenSecretRef is set.
+	// +kubebuilder:default={"vault"}
+	// +optional
+	Audiences []string `json:"audiences,omitempty"`
+
+	// TokenExpirationSeconds bounds the ephemeral ServiceAccount token
+	// lifetime. It is used once, immediately, and never stored.
+	// Ignored when serviceAccountTokenSecretRef is set.
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=600
+	// +kubebuilder:validation:Maximum=86400
+	// +optional
+	TokenExpirationSeconds int64 `json:"tokenExpirationSeconds,omitempty"`
 }
 
 // ACLSpec defines ACL configuration. The bootstrap token Secret name is
@@ -541,6 +623,11 @@ type KeyringStatus struct {
 	// removed; cleared when migration completes.
 	// +optional
 	Retiring []string `json:"retiring,omitempty"`
+
+	// TokenExpiry is when the operator-managed Vault token expires;
+	// only set when a transit entry uses auth.
+	// +optional
+	TokenExpiry *metav1.Time `json:"tokenExpiry,omitempty"`
 
 	// Phase is Ready, Introducing, Rotating, or Retiring.
 	// +kubebuilder:validation:Enum=Ready;Introducing;Rotating;Retiring

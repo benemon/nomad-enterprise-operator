@@ -99,6 +99,7 @@ func (r *NomadClusterReconciler) newNomadClient(cfg nomad.ClientConfig) (nomad.N
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create
 
@@ -221,7 +222,11 @@ func (r *NomadClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	log.Info("Reconciliation completed successfully")
-	return ctrl.Result{RequeueAfter: defaultRequeueInterval}, nil
+	interval := defaultRequeueInterval
+	if phaseCtx.RevisitAfter > 0 && phaseCtx.RevisitAfter < interval {
+		interval = phaseCtx.RevisitAfter
+	}
+	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
 func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.Phase {

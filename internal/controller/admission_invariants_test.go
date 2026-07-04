@@ -152,6 +152,99 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 			},
 			{
+				name: "transit auth with unknown method rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name: "badmethod",
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://vault:8200", KeyName: "nk", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{Method: "approle", Mount: "approle"},
+						},
+					}}
+				},
+				wantErr: "supported values",
+			},
+			{
+				name: "transit auth method/block mismatch rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name: "mismatched",
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://vault:8200", KeyName: "nk", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "kubernetes", Mount: "kubernetes",
+								Token: &nomadv1alpha1.TransitAuthToken{SecretRef: corev1.LocalObjectReference{Name: "tok"}},
+							},
+						},
+					}}
+				},
+				wantErr: "per-method block",
+			},
+			{
+				name: "transit token method accepted without mount",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name: "static",
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://vault:8200", KeyName: "nk", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "token",
+								Token:  &nomadv1alpha1.TransitAuthToken{SecretRef: corev1.LocalObjectReference{Name: "tok"}},
+							},
+						},
+					}}
+				},
+			},
+			{
+				name: "transit jwt method without mount rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name: "nomount",
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://vault:8200", KeyName: "nk", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "jwt",
+								JWT:    &nomadv1alpha1.TransitAuthKubernetes{Role: "nomad"},
+							},
+						},
+					}}
+				},
+				wantErr: "mount is required",
+			},
+			{
+				name: "transit auth alone accepted with defaults applied",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name: "dynamic",
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://vault:8200", KeyName: "nk", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "jwt", Mount: "jwt",
+								JWT: &nomadv1alpha1.TransitAuthKubernetes{Role: "nomad"},
+							},
+						},
+					}}
+				},
+			},
+			{
+				name: "transit auth token expiration below floor rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
+						Name: "short",
+						Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://vault:8200", KeyName: "nk", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "kubernetes", Mount: "kubernetes",
+								Kubernetes: &nomadv1alpha1.TransitAuthKubernetes{
+									Role: "nomad", TokenExpirationSeconds: 300,
+								},
+							},
+						},
+					}}
+				},
+				wantErr: "600",
+			},
+			{
 				name: "keyring entry with no provider rejected",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
 					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{Name: "empty"}}
@@ -166,6 +259,10 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 						AWSKMS: &nomadv1alpha1.AWSKMSKeyring{KMSKeyID: "alias/x"},
 						Transit: &nomadv1alpha1.TransitKeyring{
 							Address: "https://v:8200", KeyName: "k", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "token",
+								Token:  &nomadv1alpha1.TransitAuthToken{SecretRef: corev1.LocalObjectReference{Name: "vt"}},
+							},
 						},
 					}}
 				},
@@ -195,7 +292,13 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				name: "valid HA keyring pair accepted",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
 					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{
-						{Name: "primary", Transit: &nomadv1alpha1.TransitKeyring{Address: "https://v:8200", KeyName: "k", MountPath: "transit/"}},
+						{Name: "primary", Transit: &nomadv1alpha1.TransitKeyring{
+							Address: "https://v:8200", KeyName: "k", MountPath: "transit/",
+							Auth: &nomadv1alpha1.TransitAuth{
+								Method: "token",
+								Token:  &nomadv1alpha1.TransitAuthToken{SecretRef: corev1.LocalObjectReference{Name: "vt"}},
+							},
+						}},
 						{Name: "dr", AWSKMS: &nomadv1alpha1.AWSKMSKeyring{KMSKeyID: "alias/nomad", Region: "eu-west-2"}},
 					}
 				},

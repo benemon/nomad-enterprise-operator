@@ -245,7 +245,7 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 	// Get the effective license secret name (handles inline vs external)
 	licenseSecretName := getLicenseSecretName(cluster)
 
-	env := p.buildKeyringEnv()
+	env := p.buildKeyringEnv(cluster)
 	env = append(env, []corev1.EnvVar{
 		{
 			Name: "NOMAD_LICENSE",
@@ -301,7 +301,7 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 // buildKeyringEnv wires keyring credentials as environment variables,
 // per each provider's documented env contract. Omitted refs mean
 // ambient identity.
-func (p *StatefulSetPhase) buildKeyringEnv() []corev1.EnvVar {
+func (p *StatefulSetPhase) buildKeyringEnv(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
 	var env []corev1.EnvVar
 	secretEnv := func(name, secret, key string, optional bool) corev1.EnvVar {
 		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{
@@ -328,9 +328,12 @@ func (p *StatefulSetPhase) buildKeyringEnv() []corev1.EnvVar {
 		case e.GCPCKMS != nil && e.GCPCKMS.CredentialsSecretRef != nil:
 			env = append(env, corev1.EnvVar{
 				Name: "GOOGLE_APPLICATION_CREDENTIALS", Value: KeyringGCPCredentialsPath})
-		case e.Transit != nil && e.Transit.CredentialsSecretRef != nil:
+		case e.Transit != nil && e.Transit.Auth != nil && e.Transit.Auth.Method == "token":
 			env = append(env,
-				secretEnv("VAULT_TOKEN", e.Transit.CredentialsSecretRef.Name, "VAULT_TOKEN", false))
+				secretEnv("VAULT_TOKEN", e.Transit.Auth.Token.SecretRef.Name, "VAULT_TOKEN", false))
+		case e.Transit != nil && e.Transit.Auth != nil:
+			env = append(env,
+				secretEnv("VAULT_TOKEN", KeyringTokenSecretName(cluster.Name), "VAULT_TOKEN", false))
 		}
 	}
 	return env
@@ -640,6 +643,9 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 
 	// Keyring credential/TLS secrets: rotation must roll pods
 	secretNames = append(secretNames, KeyringSecretNamesFromEntries(p.KeyringEntries)...)
+	if authEntry(p.KeyringEntries) != nil {
+		secretNames = append(secretNames, KeyringTokenSecretName(cluster.Name))
+	}
 
 	// Sort for deterministic ordering
 	sort.Strings(secretNames)

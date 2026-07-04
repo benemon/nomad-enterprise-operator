@@ -68,6 +68,8 @@ type keyringState struct {
 	Retiring []storedKeyring `json:"retiring,omitempty"`
 	// Phase: Ready | Introducing | Rotating | Retiring.
 	Phase string `json:"phase"`
+	// Token is the managed Vault token lifecycle state (auth mode).
+	Token *tokenMeta `json:"token,omitempty"`
 }
 
 // storedKeyring is one persisted keyring: the full spec entry, or nil
@@ -103,6 +105,12 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 	state, cm, result := p.loadState(ctx, cluster, desired)
 	if result.Error != nil {
 		return result
+	}
+
+	tokenRequeue, tokenResult := p.ensureVaultToken(ctx, cluster, state, cm)
+	if tokenResult.Error != nil {
+		p.publish(cluster, state)
+		return tokenResult
 	}
 
 	// Spec changed relative to the active set: start (or extend) a
@@ -191,6 +199,9 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 	}
 
 	p.publish(cluster, state)
+	if tokenRequeue > 0 {
+		p.RevisitAfter = tokenRequeue
+	}
 	return OK()
 }
 
@@ -216,6 +227,9 @@ func (p *KeyringPhase) publish(cluster *nomadv1alpha1.NomadCluster, state *keyri
 	}
 	for _, sk := range state.Retiring {
 		st.Retiring = append(st.Retiring, storedName(sk))
+	}
+	if state.Token != nil {
+		st.TokenExpiry = state.Token.ExpiresAt.DeepCopy()
 	}
 	cluster.Status.Keyring = st
 }
@@ -278,17 +292,21 @@ func entryBlock(sk storedKeyring, active bool) hcl.KeyringBlock {
 // desiredKeyrings maps spec entries onto stored form, validating the
 // single-VAULT_TOKEN constraint (the wrapper reads one shared env var).
 func desiredKeyrings(cluster *nomadv1alpha1.NomadCluster) ([]storedKeyring, error) {
-	transitTokens := 0
 	out := make([]storedKeyring, 0, len(cluster.Spec.Server.Keyrings))
+	var transitAddr, transitAuth string
 	for i := range cluster.Spec.Server.Keyrings {
 		e := cluster.Spec.Server.Keyrings[i]
-		if e.Transit != nil && e.Transit.CredentialsSecretRef != nil {
-			transitTokens++
+		if e.Transit != nil {
+			// VAULT_TOKEN and VAULT_ADDR-equivalent are shared: an HA
+			// transit set means one Vault, one credential, N mounts.
+			addr, auth := e.Transit.Address, hashAny(e.Transit.Auth)
+			if transitAddr == "" {
+				transitAddr, transitAuth = addr, auth
+			} else if transitAddr != addr || transitAuth != auth {
+				return nil, fmt.Errorf("all transit keyrings must share the same address and auth: VAULT_TOKEN is a single shared environment variable")
+			}
 		}
 		out = append(out, storedKeyring{Entry: &e})
-	}
-	if transitTokens > 1 {
-		return nil, fmt.Errorf("at most one transit keyring may set credentialsSecretRef: VAULT_TOKEN is a single shared environment variable")
 	}
 	sort.Slice(out, func(i, j int) bool { return storedName(out[i]) < storedName(out[j]) })
 	return out, nil
@@ -435,9 +453,19 @@ func KeyringSecretNamesFromEntries(entries []nomadv1alpha1.KeyringEntry) []strin
 			add(e.GCPCKMS.CredentialsSecretRef)
 		}
 		if e.Transit != nil {
-			add(e.Transit.CredentialsSecretRef)
 			add(e.Transit.CASecretRef)
 			add(e.Transit.ClientCertSecretRef)
+			if a := e.Transit.Auth; a != nil {
+				if a.Token != nil {
+					add(&a.Token.SecretRef)
+				}
+				if a.Kubernetes != nil {
+					add(a.Kubernetes.ServiceAccountTokenSecretRef)
+				}
+				if a.JWT != nil {
+					add(a.JWT.ServiceAccountTokenSecretRef)
+				}
+			}
 		}
 	}
 	return out

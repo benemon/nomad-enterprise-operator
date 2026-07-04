@@ -299,6 +299,16 @@ type PhaseContext struct {
 	// credentials until its keys are removed.
 	KeyringEntries []nomadv1alpha1.KeyringEntry
 
+	// VaultLogin/VaultRenew override the Vault auth calls in tests.
+	VaultLogin VaultLoginFunc
+	VaultRenew VaultRenewFunc
+
+	// RevisitAfter asks the controller to reconcile again after this
+	// interval WITHOUT degrading status — a healthy-steady-state timer
+	// (e.g. Vault token renewal), not a requeue. Zero means the
+	// default heartbeat; the controller takes the minimum.
+	RevisitAfter time.Duration
+
 	// CACert is the PEM-encoded CA certificate, populated by CertificatePhase.
 	// Used by RoutePhase for destinationCACertificate and by BuildClientConfig.
 	CACert []byte
