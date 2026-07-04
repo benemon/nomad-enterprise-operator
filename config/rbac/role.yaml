@@ -68,6 +68,7 @@ rules:
   - statefulsets
   verbs:
   - create
+  - delete
   - get
   - list
   - patch
