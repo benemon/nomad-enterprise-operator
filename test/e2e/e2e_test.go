@@ -2202,6 +2202,40 @@ spec:
 		})
 	})
 
+	// The minimal sample is the first YAML a new user applies: this
+	// spec applies the ACTUAL FILE from config/samples and requires a
+	// Ready cluster — the quickstart cannot silently rot. Slow lane.
+	Context("Minimal sample quickstart", Ordered, func() {
+		const sampleCluster = "nomad" // metadata.name inside the sample
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", sampleCluster, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+				"-l", "app.kubernetes.io/instance="+sampleCluster, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("reaches Ready from the untouched sample file", func() {
+			By("applying config/samples/minimal/nomadcluster.yaml verbatim")
+			cmd := exec.Command("kubectl", "apply", "-n", namespace,
+				"-f", "config/samples/minimal/nomadcluster.yaml")
+			cmd.Dir = "../.."
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the defaulted 3-replica cluster to be Ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", sampleCluster, "-n", namespace,
+					"-o", "jsonpath={.status.phase} {.status.readyReplicas}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Running 3"))
+			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+		})
+	})
+
 	// Keyring HA pair (neo-4q2): two transit keyrings on two INDEPENDENT
 	// Vault clusters, each with its own credential — every listed
 	// keyring wraps new keys, ANY ONE reachable Vault unwraps them.

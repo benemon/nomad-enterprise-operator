@@ -38,6 +38,25 @@ spec:
     enabled: true
     prometheusRulesEnabled: true
     # Scrape cadence is operator-owned per ADR 0003 (30s interval, 10s timeout).
+  # External KMS keyring (recommended for production — see the README's
+  # keyring section for why aead snapshots are a key-custody risk).
+  # On OpenShift the ephemeral ServiceAccount vector works unchanged:
+  # the operator mints the SA token via the TokenRequest API, so no
+  # SCC or ClusterRoleBinding changes are needed on the Nomad side —
+  # Vault-side TokenReview prerequisites are documented in the README's
+  # auth-delegator table.
+  # server:
+  #   keyrings:
+  #   - name: primary
+  #     transit:
+  #       address: "https://vault.example.com:8200"
+  #       keyName: nomad-keyring
+  #       mountPath: transit/
+  #       auth:
+  #         method: kubernetes
+  #         mount: kubernetes
+  #         kubernetes:
+  #           role: nomad-keyring
   server:
     acl:
       enabled: true

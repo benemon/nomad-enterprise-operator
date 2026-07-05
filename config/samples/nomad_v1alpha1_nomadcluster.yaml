@@ -11,6 +11,10 @@ spec:
     repository: hashicorp/nomad
     tag: "2.0.3-ent"
     # pullPolicy: IfNotPresent  # default Always; override for air-gapped/digest-pinned workflows
+    # For supply-chain pinning, add the manifest digest — it takes
+    # precedence over the tag at deploy time while the tag stays
+    # documentation:
+    # digest: "sha256:<64 hex chars>"
   license:
     # Option 1: Reference an existing secret.
     # The license must be stored under the key "license" (operator-owned
@@ -25,17 +29,6 @@ spec:
     external:
       type: LoadBalancer
       # loadBalancerIP: "10.0.0.100"  # Optional: request specific IP
-  openshift:
-    enabled: true
-    route:
-      enabled: true
-      # Route always uses reencrypt termination with HTTP→HTTPS redirect.
-      # To use a custom external certificate:
-      # tls:
-      #   certificateSecretName: my-route-cert
-      #   secretKeys:               # Override key names for ESO/VSO-shaped Secrets
-      #     certificate: tls.crt    # default: tls.crt
-      #     privateKey: tls.key     # default: tls.key
   # Monitoring works on any cluster running Prometheus Operator —
   # independent of openshift.enabled. Resources are only created when
   # the monitoring.coreos.com CRDs are installed. Scrape cadence is
@@ -61,6 +54,57 @@ spec:
       enabled: true
       # Delivery (enforced), format (json), and rotation (24h × 15 files)
       # are operator-owned per ADR 0003.
+    # Keyrings: wrap Nomad's root encryption keys with an external KMS.
+    # STRONGLY RECOMMENDED for production — the default (aead) keyring
+    # stores its key-encryption key in cleartext inside Raft, so every
+    # snapshot carries usable key material. With an external KMS,
+    # snapshots stay restorable AND safe at rest.
+    #
+    # HA pair across two independent Vault clusters (any one surviving
+    # Vault keeps keys decryptable). Each entry carries its own auth —
+    # here vector 3 (ephemeral ServiceAccount token, recommended) and a
+    # user-managed Vault token. keyIDPrefix must be distinct per entry.
+    # keyrings:
+    # - name: primary
+    #   transit:
+    #     address: "https://vault-a.example.com:8200"
+    #     keyName: nomad-keyring
+    #     mountPath: transit/
+    #     keyIDPrefix: a-
+    #     auth:
+    #       method: kubernetes
+    #       mount: kubernetes
+    #       kubernetes:
+    #         role: nomad-keyring
+    #         audiences: ["vault"]          # default
+    #         tokenExpirationSeconds: 600   # default
+    # - name: secondary
+    #   transit:
+    #     address: "https://vault-b.example.com:8200"
+    #     keyName: nomad-keyring
+    #     mountPath: transit/
+    #     keyIDPrefix: b-
+    #     auth:
+    #       method: token
+    #       token:
+    #         secretRef:
+    #           name: vault-b-token         # Secret key: VAULT_TOKEN
+    #
+    # Same-type cloud pair (two AWS KMS keys, different regions or
+    # accounts). Omit credentialsSecretRef to use ambient identity
+    # (IRSA / Workload Identity / Managed Identity — recommended);
+    # each entry may carry its own static credentials otherwise.
+    # keyrings:
+    # - name: kms-west
+    #   awskms:
+    #     kmsKeyID: alias/nomad-west
+    #     region: eu-west-2
+    # - name: kms-east
+    #   awskms:
+    #     kmsKeyID: alias/nomad-east
+    #     region: us-east-1
+    #     credentialsSecretRef:
+    #       name: aws-east-creds  # keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
   persistence:
     size: 10Gi
     # reclaimPolicy: Retain  # default; Delete removes data PVCs with the cluster

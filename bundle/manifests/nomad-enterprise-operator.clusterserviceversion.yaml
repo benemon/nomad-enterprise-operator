@@ -8,6 +8,23 @@ metadata:
           "apiVersion": "nomad.hashicorp.com/v1alpha1",
           "kind": "NomadCluster",
           "metadata": {
+            "name": "nomad"
+          },
+          "spec": {
+            "license": {
+              "secretName": "nomad-license"
+            },
+            "services": {
+              "external": {
+                "type": "NodePort"
+              }
+            }
+          }
+        },
+        {
+          "apiVersion": "nomad.hashicorp.com/v1alpha1",
+          "kind": "NomadCluster",
+          "metadata": {
             "labels": {
               "app.kubernetes.io/managed-by": "kustomize",
               "app.kubernetes.io/name": "nomad-enterprise-operator"
@@ -25,12 +42,6 @@ metadata:
             "monitoring": {
               "enabled": true,
               "prometheusRulesEnabled": true
-            },
-            "openshift": {
-              "enabled": true,
-              "route": {
-                "enabled": true
-              }
             },
             "persistence": {
               "size": "10Gi"
@@ -105,7 +116,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-04T16:17:11Z"
+    createdAt: "2026-07-05T06:48:58Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
