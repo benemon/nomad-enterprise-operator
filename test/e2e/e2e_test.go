@@ -2002,6 +2002,9 @@ spec:
 			for _, args := range [][]string{
 				{"get", "nomadcluster", reclaimClusterName, "-n", namespace, "-o", "yaml"},
 				{"get", "sts,pods,pvc", "-n", namespace, "-l", "app.kubernetes.io/instance=" + reclaimClusterName},
+				{"get", "events", "-n", namespace,
+					"--field-selector", "involvedObject.name=" + reclaimClusterName,
+					"--sort-by", ".lastTimestamp"},
 			} {
 				out, _ := utils.Run(exec.Command("kubectl", args...))
 				_, _ = fmt.Fprintf(GinkgoWriter, "--- kubectl %v ---\n%s\n", args, out)

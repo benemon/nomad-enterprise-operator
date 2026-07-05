@@ -250,6 +250,17 @@ func (r *NomadClusterReconciler) buildPhases(ctx *phases.PhaseContext) []phases.
 	}
 }
 
+// deletionEvent surfaces a deletion-path failure as a Warning Event:
+// conditions race finalizer removal during deletion, but Events survive
+// the window and reach kubectl describe — without them a stuck
+// finalizer is invisible outside operator logs.
+func (r *NomadClusterReconciler) deletionEvent(cluster *nomadv1alpha1.NomadCluster, reason, format string, args ...interface{}) {
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Event(cluster, corev1.EventTypeWarning, reason, fmt.Sprintf(format, args...))
+}
+
 func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -264,6 +275,8 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		if cluster.Spec.Server.ACL.Enabled {
 			if err := r.cleanupNomadACLResources(ctx, cluster); err != nil {
 				log.Error(err, "Failed to clean up Nomad-side ACL resources, continuing")
+				r.deletionEvent(cluster, "ACLCleanupFailed",
+					"Nomad-side ACL cleanup failed (best-effort, deletion continues): %v", err)
 			}
 		}
 
@@ -283,6 +296,8 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 				ObjectMeta: metav1.ObjectMeta{Name: cluster.Name, Namespace: cluster.Namespace},
 			}
 			if err := r.Delete(ctx, sts); err != nil && !k8serrors.IsNotFound(err) {
+				r.deletionEvent(cluster, "StatefulSetDeleteFailed",
+					"Deleting the StatefulSet failed; the CR will stay terminating until it succeeds: %v", err)
 				return ctrl.Result{}, err
 			}
 			if err := r.Get(ctx, types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace},
@@ -294,6 +309,8 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 			}
 			if err := r.cleanupPVCs(ctx, cluster); err != nil {
 				log.Error(err, "Failed to cleanup PVCs")
+				r.deletionEvent(cluster, "PVCCleanupFailed",
+					"Deleting data PVCs failed; the CR will stay terminating until it succeeds: %v", err)
 				return ctrl.Result{}, err
 			}
 		} else {
@@ -312,6 +329,8 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 			},
 		}
 		if err := r.Delete(ctx, bootstrapSecret); err != nil && !k8serrors.IsNotFound(err) {
+			r.deletionEvent(cluster, "BootstrapSecretDeleteFailed",
+				"Deleting the bootstrap token Secret failed; the CR will stay terminating until it succeeds: %v", err)
 			return ctrl.Result{}, err
 		}
 
