@@ -1,42 +1,7 @@
-# Operator load testing (neo-31u)
+# Operator load testing
 
-Fleet-scale load test for the **operator** — real kind cluster, real
-Nomad Enterprise servers, operator-side measurements only.
-
-```sh
-make test-load LOAD_N=10          # tier size; results in test/load/results-*.txt
-```
-
-Scenarios: create wave (per-cluster seconds to Running), steady-state
-soak, delete wave (finalizer fan-out). Between scenarios the rig
-scrapes the operator's own metrics endpoint using a dedicated
-`loadtest-metrics` ServiceAccount bound to the shipped
-`metrics-reader` ClusterRole.
-
-Reading the numbers:
-
-- Counters are **cumulative across operator lifetime** — read deltas
-  between scrapes, not absolutes.
-- Happy-path reconciles end in `requeue_after` (the steady-state
-  heartbeat), not `success`; `success` moves mainly on deletions.
-- Never run in the PR lane; tiers are host-calibrated.
-
-## Calibration baseline (N=10, kind, 2026-07-05)
-
-- Create wave: all Running in 79–80s wall-clock (per-cluster 39–80s);
-  workqueue depth 0 at every sample; avg queue latency ~17ms.
-- Operator cost for the whole wave: +4.7MB RSS, +1.0 CPU-seconds.
-- Delete wave: sub-second for the tier (single-cluster deletion
-  measured at ~150ms end-to-end on a local apiserver).
-- Finding: ~3 transient reconcile errors per cluster during boot
-  (not-ready conditions surfacing as errors rather than requeues) —
-  pollutes error-rate alerting; tracked for cleanup.
-
-## GHA calibration (N=15, ubuntu-latest 4 vCPU, 2026-07-05)
-
-- Host ceiling found: 12/15 clusters converged (p50 37s — faster per
-  cluster than the local baseline); 3 starved to timeout with operator
-  queue depth 0 throughout (70MB RSS, 8 CPU-s) — the runner, not the
-  operator, is the limit. Standard-runner tier default is 12; larger
-  tiers need a bigger runner class.
-- Gate 1 pinned from this run: still-pending > 0 fails the rig.
+The load-test rig is [kube-burner](https://kube-burner.github.io/kube-burner/latest/),
+run via the **Load Test** GitHub Actions workflow (manual dispatch,
+`tier` input). Configuration, a guided tour with upstream doc links,
+and instructions for reading a run live in
+[kube-burner/README.md](kube-burner/README.md).

@@ -129,6 +129,13 @@ per-pod records). Compare operator series across the `create-wave`
 and `delete-wave` windows; the podLatency quantiles are the
 per-cluster convergence distribution.
 
+## GHA baseline (N=10, ubuntu-latest, 2026-07-05)
+
+First green parity run: create-wave 76s wall-clock (10 clusters,
+Prometheus stack sharing the 4 vCPU), delete-wave 2s, workqueue depth
+0 throughout. Matches the local bash-rig calibration (N=10: 79-80s) —
+the flip changed the harness, not the numbers.
+
 ## Gates (pinned from calibration, 2026-07-05)
 
 | Gate | Mechanism | Rationale |
