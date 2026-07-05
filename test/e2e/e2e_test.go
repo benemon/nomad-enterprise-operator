@@ -1204,6 +1204,18 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("Success"))
 
+			By("verifying the stamped Nomad version matches the live cluster (same-version restore rule)")
+			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.nomadVersion}")
+			clusterVersion, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(clusterVersion).NotTo(BeEmpty())
+			cmd = exec.Command("kubectl", "get", "nomadsnapshot", "test-snapshot-oneshot", "-n", namespace,
+				"-o", "jsonpath={.status.lastSnapshot.nomadVersion} {.status.nomadVersion}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal(clusterVersion + " " + clusterVersion))
+
 			By("cleaning up the one-shot NomadSnapshot")
 			cmd = exec.Command("kubectl", "delete", "nomadsnapshot", "test-snapshot-oneshot", "-n", namespace)
 			_, err = utils.Run(cmd)

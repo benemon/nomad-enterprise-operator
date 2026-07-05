@@ -124,6 +124,7 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 	t.Run("succeeded", func(t *testing.T) {
 		snap := newOneShotSnapshot("done")
 		cluster := newTestCluster("snap-ns", "test-cluster")
+		cluster.Status.NomadVersion = "2.0.3-ent"
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{Name: "done-snapshot", Namespace: "snap-ns"},
 			Status:     batchv1.JobStatus{Succeeded: 1, CompletionTime: &now},
@@ -139,8 +140,33 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 		if snap.Status.LastSnapshot == nil || snap.Status.LastSnapshot.Status != "Success" {
 			t.Errorf("lastSnapshot = %+v, want Success", snap.Status.LastSnapshot)
 		}
+		// Same-version restore rule: the artifact record freezes the
+		// version; the top-level mirror tracks the cluster.
+		if snap.Status.LastSnapshot.NomadVersion != "2.0.3-ent" {
+			t.Errorf("lastSnapshot.nomadVersion = %q, want 2.0.3-ent", snap.Status.LastSnapshot.NomadVersion)
+		}
+		if snap.Status.NomadVersion != "2.0.3-ent" {
+			t.Errorf("status.nomadVersion = %q, want 2.0.3-ent", snap.Status.NomadVersion)
+		}
 		if len(recorder.Events) != 0 {
 			t.Error("unexpected event on success")
+		}
+	})
+
+	t.Run("version unknown stays unset", func(t *testing.T) {
+		snap := newOneShotSnapshot("noversion")
+		cluster := newTestCluster("snap-ns", "test-cluster") // no probe yet
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: "noversion-snapshot", Namespace: "snap-ns"},
+			Status:     batchv1.JobStatus{Succeeded: 1, CompletionTime: &now},
+		}
+		r, _ := newSnapshotReconciler(snap, cluster, job)
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			t.Fatalf("reconcileOneShot() error = %v", err)
+		}
+		if snap.Status.NomadVersion != "" || snap.Status.LastSnapshot.NomadVersion != "" {
+			t.Errorf("unknown version must stay unset, got %q/%q",
+				snap.Status.NomadVersion, snap.Status.LastSnapshot.NomadVersion)
 		}
 	})
 
@@ -584,6 +610,33 @@ var _ = Describe("NomadSnapshot cross-namespace clusterRef (neo-tih)", func() {
 // lapsed, does NOT advance it while still in the future (the
 // once-per-interval churn bound), leaves it unset on an unparseable
 // interval, and one-shot mode clears it.
+// TestRecurringVersionMirror: the recurring path mirrors the cluster's
+// Nomad version into status — the same-version restore check for
+// agent-taken snapshots the operator cannot individually observe.
+func TestRecurringVersionMirror(t *testing.T) {
+	snap := newOneShotSnapshot("vmirror")
+	snap.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "1h", Retain: 24}
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	cluster.Status.NomadVersion = "2.0.3-ent"
+	r, _ := newSnapshotReconciler(snap, cluster)
+
+	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		t.Fatalf("reconcileRecurring() error = %v", err)
+	}
+	if snap.Status.NomadVersion != "2.0.3-ent" {
+		t.Errorf("status.nomadVersion = %q, want mirror of cluster", snap.Status.NomadVersion)
+	}
+
+	// Upgrade: the mirror follows the cluster.
+	cluster.Status.NomadVersion = "2.1.0-ent"
+	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		t.Fatalf("reconcileRecurring() second pass error = %v", err)
+	}
+	if snap.Status.NomadVersion != "2.1.0-ent" {
+		t.Errorf("status.nomadVersion = %q, want upgraded mirror", snap.Status.NomadVersion)
+	}
+}
+
 func TestNextScheduledProjection(t *testing.T) {
 	newRecurring := func(name, interval string) (*NomadSnapshotReconciler, *nomadv1alpha1.NomadSnapshot, *nomadv1alpha1.NomadCluster) {
 		snap := newOneShotSnapshot(name)

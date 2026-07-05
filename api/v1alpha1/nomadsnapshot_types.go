@@ -206,6 +206,14 @@ type NomadSnapshotStatus struct {
 	// +optional
 	PolicyName string `json:"policyName,omitempty"`
 
+	// NomadVersion mirrors the referenced cluster's version: the
+	// version snapshots are currently being taken against. Snapshots
+	// restore only to the same Nomad version — check this before a
+	// restore. Follows the cluster across upgrades; for a one-shot
+	// artifact's frozen value see lastSnapshot.nomadVersion.
+	// +optional
+	NomadVersion string `json:"nomadVersion,omitempty"`
+
 	// LastSnapshot contains information about the most recent snapshot
 	// +optional
 	LastSnapshot *SnapshotInfo `json:"lastSnapshot,omitempty"`
@@ -249,6 +257,12 @@ type SnapshotInfo struct {
 	// Error message if snapshot failed
 	// +optional
 	Error string `json:"error,omitempty"`
+
+	// NomadVersion the artifact was taken at. Snapshots restore only
+	// to the same Nomad version; this is the per-artifact record of
+	// it, frozen at Job completion (one-shot mode).
+	// +optional
+	NomadVersion string `json:"nomadVersion,omitempty"`
 }
 
 // NomadSnapshot is the Schema for the nomadsnapshots API.
@@ -265,6 +279,7 @@ type SnapshotInfo struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Interval",type="string",JSONPath=".spec.schedule.interval"
 // +kubebuilder:printcolumn:name="Last Snapshot",type="date",JSONPath=".status.lastSnapshot.time"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.nomadVersion"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status) || !has(self.status.phase) || self.status.phase != 'Running'",message="mode switch (adding/removing spec.schedule) is blocked while a one-shot snapshot Job is running; wait for it to complete"
 type NomadSnapshot struct {

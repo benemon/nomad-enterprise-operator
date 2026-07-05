@@ -33,6 +33,9 @@ spec:
     - jsonPath: .status.lastSnapshot.time
       name: Last Snapshot
       type: date
+    - jsonPath: .status.nomadVersion
+      name: Version
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -412,6 +415,12 @@ spec:
                   error:
                     description: Error message if snapshot failed
                     type: string
+                  nomadVersion:
+                    description: |-
+                      NomadVersion the artifact was taken at. Snapshots restore only
+                      to the same Nomad version; this is the per-artifact record of
+                      it, frozen at Job completion (one-shot mode).
+                    type: string
                   status:
                     description: Status of the snapshot (Success, Failed)
                     type: string
@@ -427,6 +436,14 @@ spec:
               nomadAddress:
                 description: NomadAddress is the internal Nomad cluster address used
                   by the snapshot agent
+                type: string
+              nomadVersion:
+                description: |-
+                  NomadVersion mirrors the referenced cluster's version: the
+                  version snapshots are currently being taken against. Snapshots
+                  restore only to the same Nomad version — check this before a
+                  restore. Follows the cluster across upgrades; for a one-shot
+                  artifact's frozen value see lastSnapshot.nomadVersion.
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the last observed generation

@@ -278,6 +278,10 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 	snapshot.Status.DeploymentName = deploymentName
 	snapshot.Status.ConfigMapName = snapshotConfigMapName(snapshot)
 	snapshot.Status.NomadAddress = internalAddr
+	// Snapshots restore only to the same Nomad version: mirror what
+	// the agent is snapshotting against (empty until the cluster's
+	// version probe succeeds).
+	snapshot.Status.NomadVersion = cluster.Status.NomadVersion
 
 	// Fetch deployment to get replica status
 	deploy := &appsv1.Deployment{}
@@ -360,6 +364,7 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 	snapshot.Status.ConfigMapName = snapshotConfigMapName(snapshot)
 	snapshot.Status.NomadAddress = internalAddr
 	snapshot.Status.DeploymentName = ""
+	snapshot.Status.NomadVersion = cluster.Status.NomadVersion
 	snapshot.Status.NextScheduled = nil
 	snapshot.Status.DesiredReplicas = 0
 	snapshot.Status.ReadyReplicas = 0
@@ -374,6 +379,9 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 		snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
 			Time:   job.Status.CompletionTime,
 			Status: "Success",
+			// Frozen per-artifact record: status.nomadVersion follows
+			// the cluster across upgrades, this does not.
+			NomadVersion: cluster.Status.NomadVersion,
 		}
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
