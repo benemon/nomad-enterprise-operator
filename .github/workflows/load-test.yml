@@ -49,6 +49,7 @@ jobs:
         run: |
           kubectl apply --server-side -f https://github.com/prometheus-operator/prometheus-operator/releases/download/${PROM_OPERATOR_VERSION}/bundle.yaml
           kubectl -n default rollout status deploy/prometheus-operator --timeout=180s
+          kubectl create namespace nomad-enterprise-operator-system
           kubectl apply -f test/load/kube-burner/prometheus.yaml
           kubectl -n nomad-enterprise-operator-system wait --for=condition=Available \
             prometheus/loadtest --timeout=180s 2>/dev/null || sleep 45
