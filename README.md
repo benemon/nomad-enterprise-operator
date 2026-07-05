@@ -447,6 +447,50 @@ Scrape cadence is operator-owned (30s interval, 10s
 timeout); ServiceMonitor label/relabel customisation belongs in
 Prometheus configuration.
 
+The shipped PrometheusRule covers three concern groups: health
+(leader loss, server down, job failures, memory, Raft backlog and
+commit latency), lifecycle expiry (CA and server certificates,
+license), and control-plane saturation — `NomadEvalsBlocked` and
+`NomadPlanQueueBacklog` fire on the signals that indicate a cluster
+needs scaling (vertically via `spec.resources` first, then
+horizontally 3 → 5), and `NomadRaftCommitSlow` fires on the symptom
+of under-provisioned storage or CPU. All expressions target metric
+names verified against live Nomad 2.0.x telemetry.
+
+### Production sizing
+
+The operator's defaults (requests `250m`/`512Mi`, limits `2`/`2Gi`)
+are **dev-grade** — sized so a first cluster schedules on a laptop or
+kind. For production, size the servers to match the HashiCorp
+Validated Design tiers:
+
+| Tier | CPU | Memory | Disk | Storage floor |
+|------|-----|--------|------|---------------|
+| Small (dev-test and initial production) | 2–4 cores | 8–16 Gi | 100+ Gi | 3000+ IOPS, 75+ MB/s |
+| Large | 8–16 cores | 32–64 Gi | 200+ Gi | 10000+ IOPS, 250+ MB/s |
+
+Set requests equal to limits — Guaranteed QoS is the Kubernetes
+translation of the design guidance to avoid burstable instances:
+
+```yaml
+spec:
+  resources:
+    requests:
+      cpu: "4"
+      memory: 16Gi
+    limits:
+      cpu: "4"
+      memory: 16Gi
+  persistence:
+    size: 100Gi
+    # storageClassName: <a class meeting the IOPS/throughput floor>
+```
+
+Storage IOPS and throughput are properties of the storageClass and
+invisible to the operator — validating them is a user responsibility.
+The operator alerts on the *symptom* instead: `NomadRaftCommitSlow`
+fires when commit latency indicates the floor is not being met.
+
 ### Pod placement
 
 Pod anti-affinity is operator-owned: preferred scheduling,

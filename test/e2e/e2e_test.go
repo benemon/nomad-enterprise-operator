@@ -1311,7 +1311,8 @@ spec:
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				for _, alert := range []string{"NomadCACertExpiringSoon", "NomadCACertExpired",
-					"NomadServerCertExpiringSoon", "NomadLicenseExpiringSoon"} {
+					"NomadServerCertExpiringSoon", "NomadLicenseExpiringSoon",
+					"NomadEvalsBlocked", "NomadPlanQueueBacklog", "NomadRaftCommitSlow"} {
 					g.Expect(output).To(ContainSubstring(alert))
 				}
 			}, 2*time.Minute, 5*time.Second).Should(Succeed())

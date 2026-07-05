@@ -61,6 +61,9 @@ func TestPrometheusRuleContent(t *testing.T) {
 	}
 
 	want := map[string]string{ // alert -> severity
+		"NomadEvalsBlocked":           "warning",
+		"NomadPlanQueueBacklog":       "warning",
+		"NomadRaftCommitSlow":         "warning",
 		"NomadCACertExpiringSoon":     "warning",
 		"NomadCACertExpired":          "critical",
 		"NomadServerCertExpiringSoon": "critical",

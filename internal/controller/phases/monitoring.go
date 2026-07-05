@@ -220,6 +220,51 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 							},
 						},
 						{
+							// HVD scale trigger: sustained blocked evaluations mean the
+							// cluster cannot place work — capacity or scheduler saturation.
+							Alert: "NomadEvalsBlocked",
+							Expr:  intstr.FromString(`nomad_nomad_blocked_evals_total_blocked > 0`),
+							For:   ptr.To(monitoringv1.Duration("10m")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad evaluations blocked for 10m",
+								"description": "Cluster {{ $labels.host }} has had blocked evaluations for 10 minutes. Sustained blocked evals signal insufficient client capacity or scheduler saturation: review client capacity first; for control-plane saturation scale servers vertically (spec.resources), then horizontally (replicas 3 to 5).",
+							},
+						},
+						{
+							// HVD scale trigger: the leader's plan queue backing up means
+							// the scheduling pipeline is saturated at the control plane.
+							Alert: "NomadPlanQueueBacklog",
+							Expr:  intstr.FromString(`nomad_nomad_plan_queue_depth > 2`),
+							For:   ptr.To(monitoringv1.Duration("10m")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad plan queue backed up for 10m",
+								"description": "Leader {{ $labels.host }} has a sustained plan-queue backlog. The scheduling pipeline is saturated: scale servers vertically (spec.resources), then horizontally (replicas 3 to 5).",
+							},
+						},
+						{
+							// Storage-slowness SYMPTOM: the operator cannot observe
+							// storageClass IOPS, so it alerts on what slow disks cause.
+							// rate(sum)/rate(count) is the NaN-proof mean (the summary's
+							// quantile gauges read NaN on idle windows); units are ms and
+							// a healthy baseline is low single digits.
+							Alert: "NomadRaftCommitSlow",
+							Expr:  intstr.FromString(`rate(nomad_raft_commitTime_sum[5m]) / rate(nomad_raft_commitTime_count[5m]) > 50`),
+							For:   ptr.To(monitoringv1.Duration("10m")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad Raft commit latency sustained above 50ms",
+								"description": "Server {{ $labels.host }} is committing Raft entries slowly — the classic symptom of under-provisioned storage or CPU. Verify the storageClass meets the production sizing floor (3000+ IOPS, 75+ MB/s) and that requests equal limits (Guaranteed QoS). Distinct from NomadRaftBehind, which tracks log backlog rather than latency.",
+							},
+						},
+						{
 							// for:6h keeps a healthy auto-rotation (minutes at
 							// the 30d mark) from firing this — only stuck
 							// rotations and unrenewed user CAs alert.
