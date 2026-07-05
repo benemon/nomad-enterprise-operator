@@ -1,29 +1,27 @@
 name: Load Test
 
-# Fleet-scale operator load test (neo-31u). Never part of the PR lane:
-# dispatch on demand with a tier size, plus a weekly scheduled run as
-# the volumetric heartbeat. Standard runners are 4 vCPU/16GB — tiers
-# beyond ~25 need a larger runner class.
+# Fleet-scale operator load test (neo-31u), kube-burner edition.
+# MANUAL DISPATCH ONLY — never part of the PR lane. Standard runners
+# (4 vCPU) hold ~12 one-replica clusters; larger tiers need a bigger
+# runner class.
 on:
   workflow_dispatch:
     inputs:
       tier:
-        description: "Number of NomadClusters (LOAD_N)"
-        default: "15"
+        description: "Number of NomadClusters (jobIterations)"
+        default: "12"
         required: true
-      soak:
-        description: "Soak seconds between waves"
-        default: "120"
-        required: true
-  schedule:
-    - cron: "0 4 * * 1" # weekly, Mondays 04:00 UTC
 
 permissions:
   contents: read
 
+env:
+  KUBE_BURNER_VERSION: v2.7.3
+  PROM_OPERATOR_VERSION: v0.92.1
+
 jobs:
   load-test:
-    name: Load test (N=${{ inputs.tier || '15' }})
+    name: kube-burner (N=${{ inputs.tier }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -33,29 +31,67 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Write license from secret
+      - name: Write Nomad Enterprise license file
         env:
           NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
         run: |
           mkdir -p test/e2e/testdata
-          printf '%s' "$NOMAD_LICENSE" > test/e2e/testdata/nomad.hclic
+          echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
 
       - name: Create kind cluster
         run: |
           go install sigs.k8s.io/kind@latest
-          kind create cluster --name nomad-enterprise-operator-test-e2e
+          kind create cluster --name loadtest
+
+      - name: Build and deploy the operator
+        run: |
+          make docker-build IMG=example.com/nomad-enterprise-operator:load
+          kind load docker-image example.com/nomad-enterprise-operator:load --name loadtest
+          make install
+          make deploy IMG=example.com/nomad-enterprise-operator:load
+          kubectl -n nomad-enterprise-operator-system create secret generic nomad-license \
+            --from-file=license=test/e2e/testdata/nomad.hclic
+          kubectl -n nomad-enterprise-operator-system rollout status \
+            deploy/nomad-enterprise-operator-controller-manager --timeout=180s
+
+      - name: Install Prometheus (operator bundle + instance)
+        run: |
+          kubectl create -f https://github.com/prometheus-operator/prometheus-operator/releases/download/${PROM_OPERATOR_VERSION}/bundle.yaml --server-side
+          kubectl -n default rollout status deploy/prometheus-operator --timeout=180s
+          kubectl apply -f test/load/kube-burner/prometheus.yaml
+          kubectl -n nomad-enterprise-operator-system wait --for=condition=Available \
+            prometheus/loadtest --timeout=180s 2>/dev/null || sleep 45
+          kubectl -n nomad-enterprise-operator-system rollout status \
+            statefulset/prometheus-loadtest --timeout=180s
+
+      - name: Prepare load namespace
+        run: |
+          kubectl create namespace nomad-load
+          kubectl -n nomad-load create secret generic nomad-license \
+            --from-file=license=test/e2e/testdata/nomad.hclic
+
+      - name: Install kube-burner
+        run: |
+          curl -sSL "https://github.com/kube-burner/kube-burner/releases/download/${KUBE_BURNER_VERSION}/kube-burner-V${KUBE_BURNER_VERSION#v}-linux-x86_64.tar.gz" \
+            | tar xz kube-burner
+          sudo mv kube-burner /usr/local/bin/
 
       - name: Run load test
-        run: |
-          make test-load \
-            LOAD_N='${{ inputs.tier || 15 }}'
+        working-directory: test/load/kube-burner
         env:
-          SOAK_SECONDS: ${{ inputs.soak || 120 }}
+          ITERATIONS: ${{ inputs.tier }}
+        run: |
+          kubectl -n nomad-enterprise-operator-system port-forward \
+            svc/prometheus-operated 9090:9090 >/dev/null 2>&1 &
+          sleep 3
+          PROMETHEUS_URL=http://127.0.0.1:9090 \
+            kube-burner init -c config.yml --log-level=info
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: load-test-results-n${{ inputs.tier || '15' }}
-          path: test/load/results-*.txt
+          name: load-test-results-n${{ inputs.tier }}
+          path: |
+            test/load/kube-burner/collected-metrics
           retention-days: 90
