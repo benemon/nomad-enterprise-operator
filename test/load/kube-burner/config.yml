@@ -44,4 +44,4 @@ jobs:
     objects:
       - kind: NomadCluster
         apiVersion: nomad.hashicorp.com/v1alpha1
-        labelSelector: {kube-burner-job: create-wave}
+        labelSelector: {kube-burner.io/job: create-wave}
