@@ -3,10 +3,11 @@
 # Tier size comes from the ITERATIONS env var.
 ---
 global:
-  measurements:
-    # Per-pod readiness quantiles: nomad server pod readiness is the
-    # convergence signal beneath NomadCluster phase=Running.
-    - name: podLatency
+  # podLatency deliberately not enabled: it tracks pods created by the
+  # kube-burner job itself, and this rig's pods are operator-created
+  # secondaries. Convergence timing comes from the job duration and
+  # the operator's reconcile-duration series in the metrics profile.
+  measurements: []
 
 metricsEndpoints:
   - endpoint: {{ .PROMETHEUS_URL }}
@@ -31,7 +32,7 @@ jobs:
         replicas: 1
         waitOptions:
           customStatusPaths:
-            - key: '(.phase)'
+            - key: '(.status.phase)'
               value: Running
 
   - name: delete-wave

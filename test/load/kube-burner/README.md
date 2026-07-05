@@ -68,16 +68,16 @@ rather than PVC churn; `NodePort` avoids the LoadBalancer-IP wait that
 never resolves on kind. The license Secret is pre-created by the
 workflow (the operator retries cleanly until it exists).
 
-## Measurements — podLatency
+## Measurements
 
 Doc: [measurements](https://kube-burner.github.io/kube-burner/latest/measurements/)
 
-`podLatency` records the kubelet lifecycle timestamps of every pod
-created during a job and emits quantiles (P50/P99/max) for
-ready-latency. The nomad server pod becoming Ready is the signal
-beneath `phase: Running`, so this gives per-cluster convergence
-distributions with better resolution than the bash rig's 5-second
-polling.
+None enabled. `podLatency` (the usual choice) tracks pods created by
+the kube-burner job itself — this rig's pods are operator-created
+secondaries, which it cannot see. Convergence timing comes from the
+job duration (the create-wave cannot finish before every NomadCluster
+reports Running) and the operator's reconcile-duration series in the
+metrics profile.
 
 ## metrics.yml — the operator-side series
 
