@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	vaultapi "github.com/hashicorp/vault/api"
 
@@ -323,6 +324,7 @@ func (p *KeyringPhase) ensureManagedToken(ctx context.Context, cluster *nomadv1a
 		if meta.Renewable {
 			renewed, rerr := p.renewFunc()(ctx, cfg, current)
 			if rerr == nil {
+				metrics.KeyringTokenRenewals.WithLabelValues(cluster.Name, cluster.Namespace, entry.Name).Inc()
 				state.Tokens[entry.Name] = &tokenMeta{
 					ExpiresAt: metav1.NewTime(now.Add(renewed.LeaseDuration)),
 					Renewable: renewed.Renewable,
@@ -357,6 +359,7 @@ func (p *KeyringPhase) ensureManagedToken(ctx context.Context, cluster *nomadv1a
 		}
 		return "", 0, ErrorWithReason(lerr, reason, msg)
 	}
+	metrics.KeyringTokenMints.WithLabelValues(cluster.Name, cluster.Namespace, entry.Name).Inc()
 
 	if err := p.writeTokenStore(ctx, cluster, store, storeAbsent, entry.Name, result.Token); err != nil {
 		return "", 0, Error(err, "Failed to write managed keyring token Secret")

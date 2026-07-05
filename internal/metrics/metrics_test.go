@@ -23,10 +23,10 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// TestMetricsRegistered (AC-F4.2) asserts all seven §8.1 handles are
-// registered on controller-runtime's default registry under their
-// canonical names. Each handle gets one labelled child first so the vecs
-// materialise in Gather output.
+// TestMetricsRegistered (AC-F4.2) asserts the §8.1 handles plus the
+// neo-065 keyring-token counters are registered on controller-runtime's
+// default registry under their canonical names. Each handle gets one
+// labelled child first so the vecs materialise in Gather output.
 func TestMetricsRegistered(t *testing.T) {
 	PhaseDuration.WithLabelValues("c", "ns", "Certificate").Observe(0)
 	NomadAPIRequests.WithLabelValues("GetLeader", "success").Add(0)
@@ -35,6 +35,8 @@ func TestMetricsRegistered(t *testing.T) {
 	ACLBootstrapFailures.WithLabelValues("c", "ns").Add(0)
 	ScaleDownInProgress.WithLabelValues("c", "ns").Set(0)
 	NomadVersionInfo.WithLabelValues("c", "ns", "2.0.0").Set(1)
+	KeyringTokenRenewals.WithLabelValues("c", "ns", "primary").Add(0)
+	KeyringTokenMints.WithLabelValues("c", "ns", "primary").Add(0)
 
 	families, err := ctrlmetrics.Registry.Gather()
 	if err != nil {
@@ -54,6 +56,8 @@ func TestMetricsRegistered(t *testing.T) {
 		"nomad_operator_acl_bootstrap_failures_total",
 		"nomad_operator_scale_down_in_progress",
 		"nomad_operator_nomad_version_info",
+		"nomad_operator_keyring_token_renewals_total",
+		"nomad_operator_keyring_token_mints_total",
 	}
 	for _, name := range expected {
 		if !found[name] {
