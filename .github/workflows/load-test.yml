@@ -1,0 +1,61 @@
+name: Load Test
+
+# Fleet-scale operator load test (neo-31u). Never part of the PR lane:
+# dispatch on demand with a tier size, plus a weekly scheduled run as
+# the volumetric heartbeat. Standard runners are 4 vCPU/16GB — tiers
+# beyond ~25 need a larger runner class.
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Number of NomadClusters (LOAD_N)"
+        default: "15"
+        required: true
+      soak:
+        description: "Soak seconds between waves"
+        default: "120"
+        required: true
+  schedule:
+    - cron: "0 4 * * 1" # weekly, Mondays 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  load-test:
+    name: Load test (N=${{ inputs.tier || '15' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Write license from secret
+        env:
+          NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+        run: |
+          mkdir -p test/e2e/testdata
+          printf '%s' "$NOMAD_LICENSE" > test/e2e/testdata/nomad.hclic
+
+      - name: Create kind cluster
+        run: |
+          go install sigs.k8s.io/kind@latest
+          kind create cluster --name nomad-enterprise-operator-test-e2e
+
+      - name: Run load test
+        run: |
+          make test-load \
+            LOAD_N='${{ inputs.tier || 15 }}'
+        env:
+          SOAK_SECONDS: ${{ inputs.soak || 120 }}
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results-n${{ inputs.tier || '15' }}
+          path: test/load/results-*.txt
+          retention-days: 90
