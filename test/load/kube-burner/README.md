@@ -1,0 +1,137 @@
+# Operator load testing with kube-burner
+
+This directory is the load-test rig for the **operator** (neo-31u's
+successor to the original bash driver). It uses
+[kube-burner](https://kube-burner.github.io/kube-burner/latest/), a
+CNCF tool for churning Kubernetes objects at scale and measuring what
+happens — the same tool the OpenShift performance and scale team uses.
+The NomadClusters are the load; the operator is the thing being
+measured.
+
+Run it via the **Load Test** GitHub Actions workflow (manual dispatch,
+`tier` input = fleet size). Standard 4 vCPU runners hold ~12
+one-replica clusters — the ceiling was established empirically, with
+the operator's queue depth at zero while the host starved.
+
+## How a run works
+
+`kube-burner init -c config.yml` executes the *jobs* in `config.yml`
+in order, taking *measurements* while they run, collecting *metrics*
+at job boundaries, and evaluating *alerts* at the end. Every file in
+this directory maps to one of those concepts.
+
+## config.yml — jobs and waiting
+
+Doc: [configuration reference](https://kube-burner.github.io/kube-burner/latest/reference/configuration/)
+
+Two jobs run in order:
+
+1. **create-wave** (`jobType: create`) renders
+   `templates/nomadcluster.yml` once per iteration (`jobIterations`
+   comes from the `ITERATIONS` env var — the config file itself is a
+   Go template fed by environment variables). All objects land in one
+   namespace (`namespacedIterations: false`), matching how a real
+   fleet shares namespaces.
+
+   The load-bearing part is the wait:
+
+   ```yaml
+   waitOptions:
+     customStatusPaths:
+       - key: '(.phase)'
+         value: Running
+   ```
+
+   `customStatusPaths` ([docs](https://kube-burner.github.io/kube-burner/latest/reference/configuration/#waitoptions))
+   takes jq expressions evaluated against each object's `.status`;
+   kube-burner blocks until every NomadCluster reports
+   `status.phase: Running` or `maxWaitTimeout` (20m) expires — and a
+   timeout **fails the run**. That *is* convergence gate 1: a fleet
+   that doesn't fully converge is a failed tier, never a silent pass
+   (the bash rig's first GHA run reported success with three
+   never-converged clusters; this design makes that impossible).
+
+2. **delete-wave** (`jobType: delete`) removes everything the create
+   job made, selected by the `kube-burner-job` label kube-burner
+   stamps on its objects. This exercises the operator's deletion path
+   (finalizers: ACL cleanup, StatefulSet-before-PVC ordering) as a
+   fan-out.
+
+## templates/nomadcluster.yml — the load unit
+
+Doc: [object templates](https://kube-burner.github.io/kube-burner/latest/reference/configuration/#objects)
+
+A minimal 1-replica cluster named `load-{{ .Iteration }}` —
+`{{ .Iteration }}` is kube-burner's per-iteration counter. `emptyDir`
+data (`persistence.size: ""`) keeps the tier's cost in operator work
+rather than PVC churn; `NodePort` avoids the LoadBalancer-IP wait that
+never resolves on kind. The license Secret is pre-created by the
+workflow (the operator retries cleanly until it exists).
+
+## Measurements — podLatency
+
+Doc: [measurements](https://kube-burner.github.io/kube-burner/latest/measurements/)
+
+`podLatency` records the kubelet lifecycle timestamps of every pod
+created during a job and emits quantiles (P50/P99/max) for
+ready-latency. The nomad server pod becoming Ready is the signal
+beneath `phase: Running`, so this gives per-cluster convergence
+distributions with better resolution than the bash rig's 5-second
+polling.
+
+## metrics.yml — the operator-side series
+
+Doc: [metrics collection](https://kube-burner.github.io/kube-burner/latest/observability/metrics/)
+
+A *metrics profile*: PromQL queries kube-burner runs against
+Prometheus at job boundaries, tagged with the job window and written
+by the local indexer
+([docs](https://kube-burner.github.io/kube-burner/latest/observability/indexing/))
+to `collected-metrics/` — uploaded as the workflow artifact.
+
+The queries are the operator's saturation and cost story: workqueue
+depth and average queue latency, reconcile outcomes, RSS, CPU rate,
+and Nomad API request counts. Two reading rules: counters are
+cumulative across the operator's lifetime (read deltas between
+windows), and happy-path reconciles finish as `requeue_after` — the
+steady-state heartbeat — not `success` (which moves mainly on
+deletions).
+
+## alerts.yml — operator-side gates
+
+Doc: [alerting](https://kube-burner.github.io/kube-burner/latest/observability/alerting/)
+
+An *alert profile*: expressions evaluated over the run window;
+`severity: error` fails the run. Gate 2 lives here — sustained
+nomadcluster workqueue depth means operator saturation. The threshold
+is pinned from calibration: depth stayed at zero through every wave
+at these tiers, so any sustained depth is signal. Add gates here as
+tiers grow (reconcile-error rate, queue-latency ceilings).
+
+## prometheus.yaml — the metrics source
+
+kube-burner queries a Prometheus API rather than scraping `/metrics`
+directly, so the workflow installs a pinned
+[prometheus-operator](https://github.com/prometheus-operator/prometheus-operator)
+and this minimal `Prometheus` instance. It selects **every
+ServiceMonitor in the operator namespace** — which includes the one
+the operator creates for itself — so the rig exercises the shipped
+monitoring surface end-to-end: the scraper authenticates through the
+operator's kube-rbac-proxy using the shipped `metrics-reader`
+ClusterRole, exactly as a user's Prometheus would.
+
+## Reading a run
+
+Download the workflow artifact. `collected-metrics/` contains one
+JSON document per metrics-profile query per job window, plus the
+`podLatency` measurement documents (quantile summaries and raw
+per-pod records). Compare operator series across the `create-wave`
+and `delete-wave` windows; the podLatency quantiles are the
+per-cluster convergence distribution.
+
+## Gates (pinned from calibration, 2026-07-05)
+
+| Gate | Mechanism | Rationale |
+|------|-----------|-----------|
+| Fleet fully converges | `customStatusPaths` wait + `maxWaitTimeout` | partial convergence is a failed tier, not a pass |
+| No sustained workqueue depth | `alerts.yml` | depth was zero at every calibrated tier; sustained depth = operator saturation, distinct from host ceilings |
