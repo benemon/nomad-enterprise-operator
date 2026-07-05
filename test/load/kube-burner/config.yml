@@ -31,8 +31,11 @@ jobs:
       - objectTemplate: templates/nomadcluster.yml
         replicas: 1
         waitOptions:
+          # The jq key is evaluated against the object's .status map
+          # (kube-burner waiters.go: NestedMap(item, "status")), so the
+          # path is phase, not status.phase.
           customStatusPaths:
-            - key: '(.status.phase)'
+            - key: '(.phase)'
               value: Running
 
   - name: delete-wave
