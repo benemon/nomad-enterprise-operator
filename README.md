@@ -195,6 +195,12 @@ spec:
     secretName: nomad-license
 ```
 
+On kind or any cluster without a load-balancer implementation, also set
+`spec.services.external.type: NodePort` — the default (`LoadBalancer`)
+waits indefinitely for an IP. The CI-tested quickstart at
+[config/samples/minimal/nomadcluster.yaml](config/samples/minimal/nomadcluster.yaml)
+carries this and is verified end-to-end on every nightly run.
+
 ### Uninstall
 
 ```sh
@@ -229,8 +235,10 @@ make undeploy
 
 ### Server Configuration (`spec.server`)
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
+Server-scoped configuration is split across the subsections below:
+[TLS](#tls-specservertls), [ACL](#acl-specserveracl),
+[Audit](#audit-specserveraudit), and
+[Keyrings](#keyrings-specserverkeyrings).
 
 ### TLS (`spec.server.tls`)
 
@@ -371,12 +379,12 @@ auth:
                                   # ephemeral default, or secretRef
 ```
 
-For the login methods (2–4) the operator publishes the resulting Vault
-token to the managed `<cluster>-keyring-token` Secret, renews it on the
-reconcile heartbeat (no pod restart), and re-mints on failure or
-revocation (rolls pods). For `method: token` the lifecycle is yours:
-the operator wires the Secret to the pods and rolls them when it
-changes.
+For the login methods (2–4) the operator logs in per entry, renews the
+token on the reconcile heartbeat (no pod restart), and re-mints on
+failure or revocation (rolls pods). For `method: token` the lifecycle
+is yours; rotating your Secret rolls the pods. In every vector the
+resolved token is rendered inline into that entry's keyring block —
+see below.
 
 Transit HA works across **independent Vault clusters**: each entry
 carries its own `address` and its own `auth` (any vector), so either
@@ -450,27 +458,33 @@ Prometheus configuration.
 The shipped PrometheusRule covers three concern groups: health
 (leader loss, server down, job failures, memory, Raft backlog and
 commit latency), lifecycle expiry (CA and server certificates,
-license), and control-plane saturation — `NomadEvalsBlocked` and
-`NomadPlanQueueBacklog` fire on the signals that indicate a cluster
-needs scaling (vertically via `spec.resources` first, then
-horizontally 3 → 5), and `NomadRaftCommitSlow` fires on the symptom
-of under-provisioned storage or CPU. All expressions target metric
-names verified against live Nomad 2.0.x telemetry.
+license), and control-plane saturation. `NomadEvalsBlocked` and
+`NomadPlanQueueBacklog` fire on the scale-trigger signals;
+`NomadRaftCommitSlow` fires on the symptom of under-provisioned
+storage or CPU. All expressions target metric names verified against
+live Nomad 2.0.x telemetry. When the saturation alerts fire:
+
+> Scale the servers vertically first; scale horizontally (3 → 5
+> servers) when sustained scheduler saturation persists at the larger
+> instance size.
+
+*— HashiCorp Validated Design: Nomad Enterprise Operating Guide*
 
 ### Production sizing
 
 The operator's defaults (requests `250m`/`512Mi`, limits `2`/`2Gi`)
 are **dev-grade** — sized so a first cluster schedules on a laptop or
-kind. For production, size the servers to match the HashiCorp
-Validated Design tiers:
+kind. For production, size the servers to these tiers:
 
-| Tier | CPU | Memory | Disk | Storage floor |
-|------|-----|--------|------|---------------|
-| Small (dev-test and initial production) | 2–4 cores | 8–16 Gi | 100+ Gi | 3000+ IOPS, 75+ MB/s |
-| Large | 8–16 cores | 32–64 Gi | 200+ Gi | 10000+ IOPS, 250+ MB/s |
+> Small (dev-test and initial production): 2–4 CPU cores, 8–16 GB
+> memory, 100+ GB disk, 3000+ IOPS, 75+ MB/s throughput.
+> Large: 8–16 CPU cores, 32–64 GB memory, 200+ GB disk, 10000+ IOPS,
+> 250+ MB/s throughput. Avoid burstable instance types.
+
+*— HashiCorp Validated Design: Nomad Enterprise Solution Design Guide*
 
 Set requests equal to limits — Guaranteed QoS is the Kubernetes
-translation of the design guidance to avoid burstable instances:
+translation of avoiding burstable instances:
 
 ```yaml
 spec:
@@ -517,7 +531,6 @@ Rejected at admission (API server, no operator involvement):
 | `spec.image.pullPolicy` ∈ Always/IfNotPresent/Never; `spec.services.*.type` ∈ LoadBalancer/NodePort; `spec.persistence.reclaimPolicy` ∈ Retain/Delete | enum |
 | Each `keyrings[]` entry configures exactly one provider; entry names unique; at most 8 entries | CEL + listType=map |
 | `transit.auth.method` ∈ token/kubernetes/jwt, with exactly the matching per-method block; `mount` required unless `method: token` | enum + CEL |
-| Multiple transit entries require a distinct non-empty `keyIDPrefix` on each | operator (`KeyringInvalid`) |
 
 Enforced at reconcile time (visible via `kubectl get nomadcluster` and
 the `Ready` condition, not an admission error):
@@ -527,6 +540,7 @@ the `Ready` condition, not an admission error):
 | Scaling from ≥ 3 replicas to below 3 requires the `nomad.hashicorp.com/accept-degraded-quorum: "true"` annotation | Scale-down does not start; `Ready` reason `DegradedQuorumNotAccepted`. Operator-side because CRD CEL cannot read `metadata.annotations` |
 | Scale-down requires a Raft leader | Scale-down pauses; `Ready` reason `ScaleDownBlocked` |
 | `audit.enabled=true` requires `audit.size` | Never violated in practice: `audit.size` defaults to `5Gi` at admission, and the operator falls back to `5Gi` if the field is explicitly cleared |
+| Multiple transit keyring entries require a distinct non-empty `keyIDPrefix` on each | `Ready` reason `KeyringInvalid` |
 
 Not validated: the existence of the Secret named by
 `spec.license.secretName` is not checked at admission (a missing Secret
@@ -598,6 +612,8 @@ The operator creates the following resources in the cluster namespace:
 | `<cluster>-ca` | Secret | CA certificate and private key (`tls.crt`, `tls.key`). Not created when using a user-provided CA |
 | `<cluster>-tls` | Secret | Server certificate and key (`tls.crt`, `tls.key`, `ca.crt`) |
 | `<cluster>-ca-bundle` | ConfigMap | CA certificate for external consumers |
+| `<cluster>-config` | Secret | Rendered `server.hcl` — Secret-class because it carries the gossip encryption key and any inline keyring credentials |
+| `<cluster>-keyring-token` | Secret | Operator-minted Vault tokens for keyring login vectors, one key per entry (operator-internal; pods consume tokens via the rendered config) |
 
 ### Operator-managed CA (default)
 
@@ -762,8 +778,14 @@ pod template carries a `checksum/config` annotation, so the agent
 always runs the current config. A failed one-shot Job sets the
 `Degraded` condition and emits a `SnapshotDegraded` Warning Event.
 
-For restoring from a snapshot, see
-an operations runbook (publication pending).
+**Restore compatibility.** Snapshots restore only to the same Nomad
+version that took them. `status.nomadVersion` mirrors the referenced
+cluster's version (what snapshots are currently taken against — it
+follows upgrades); for one-shot artifacts,
+`status.lastSnapshot.nomadVersion` is frozen at Job completion. Check
+one of these against the restore-target cluster before restoring. The
+full restore procedure will be covered in an operations runbook
+(publication pending).
 
 ### Spec
 
@@ -914,6 +936,7 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.certificateAuthority.expiryTime` | CA certificate expiry |
 | `status.certificateAuthority.subject` | CA certificate subject DN |
 | `status.nomadVersion` | Nomad agent version observed via `/v1/agent/self` (e.g. `1.11.0+ent`); empty until the first successful probe |
+| `status.keyring` | Keyring set state: `phase` (`Ready`/`Introducing`/`Rotating`/`Retiring`), `active[]`, `retiring[]`, and `tokenExpiry` for operator-managed Vault tokens |
 | `status.license.valid` | Whether the Nomad license is valid |
 | `status.license.expirationTime` | License expiry time |
 | `status.license.features` | Licensed features |
@@ -946,6 +969,11 @@ sub-field keeps its last-known value).
 | `Reconciling` | A phase requested requeue (generic wait) |
 | `ScaleDownBlocked` | Scale-down waiting on a Raft leader |
 | `DegradedQuorumNotAccepted` | Scale-down below 3 replicas lacks the [opt-in annotation](#scaling-down) |
+| `KeyringInvalid` | Keyring spec fails reconcile-time validation (e.g. multi-transit without distinct `keyIDPrefix`) |
+| `KeyringRotationPending` | A keyring migration is waiting to rotate or clean up root keys; the message carries the underlying cause |
+| `KeyringVaultLoginFailed` | Vault login for a keyring entry failed; the message names the entry |
+| `KeyringVaultReviewerDenied` | Vault cannot validate ServiceAccount tokens — see [Who needs `system:auth-delegator`](#who-needs-systemauth-delegator) |
+| `KeyringCredentialsUnavailable` | A keyring entry's credentials Secret is missing or malformed; the message names the entry and Secret |
 
 ### Operator Metrics
 
@@ -983,14 +1011,15 @@ The NomadCluster controller reconciles through a sequential phase pipeline:
 5. **Advertise** — resolves the external LoadBalancer address
 6. **Certificate** — generates CA and issues server/client certificates (after Advertise so the LoadBalancer IP is in the cert SANs)
 7. **Secrets** — assembles the Nomad configuration secrets
-8. **ConfigMap** — renders the Nomad HCL server configuration
-9. **StatefulSet** — creates or updates the Nomad server StatefulSet
-10. **PDB** — creates or updates the PodDisruptionBudget for `spec.replicas ≥ 3` (skipped for `replicas = 1`)
-11. **ScaleDown** — removes Raft peers when `sts.spec.replicas` exceeds `spec.replicas`, one peer per reconcile, before patching the StatefulSet (see "Scaling down" below)
-12. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
-13. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
-14. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
-15. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
+8. **Keyring** — reconciles the external-KMS keyring set: resolves per-entry credentials, manages Vault token lifecycles, and drives keyring migrations
+9. **Config** — renders server.hcl into the `<cluster>-config` Secret (a Secret, not a ConfigMap: it carries the gossip key and inline keyring credentials)
+10. **StatefulSet** — creates or updates the Nomad server StatefulSet
+11. **PDB** — creates or updates the PodDisruptionBudget for `spec.replicas ≥ 3` (skipped for `replicas = 1`)
+12. **ScaleDown** — removes Raft peers when `sts.spec.replicas` exceeds `spec.replicas`, one peer per reconcile, before patching the StatefulSet (see "Scaling down" below)
+13. **Route** — creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
+14. **Monitoring** — creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
+15. **ACLBootstrap** — bootstraps ACLs and creates the operator status token (when ACLs enabled)
+16. **ClusterStatus** — queries the Nomad API for leader, autopilot health, and license status
 
 ## Development
 
@@ -1022,10 +1051,6 @@ make test-e2e
 ```
 
 Run `make help` for all available targets.
-
-## Contributing
-
-Contributions are welcome. Please open an issue or pull request on [GitHub](https://github.com/benemon/nomad-enterprise-operator).
 
 ## License
 
