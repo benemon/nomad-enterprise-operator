@@ -56,7 +56,7 @@ jobs:
 
       - name: Install Prometheus (operator bundle + instance)
         run: |
-          kubectl create -f https://github.com/prometheus-operator/prometheus-operator/releases/download/${PROM_OPERATOR_VERSION}/bundle.yaml --server-side
+          kubectl apply --server-side -f https://github.com/prometheus-operator/prometheus-operator/releases/download/${PROM_OPERATOR_VERSION}/bundle.yaml
           kubectl -n default rollout status deploy/prometheus-operator --timeout=180s
           kubectl apply -f test/load/kube-burner/prometheus.yaml
           kubectl -n nomad-enterprise-operator-system wait --for=condition=Available \
