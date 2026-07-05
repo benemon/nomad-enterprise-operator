@@ -1,0 +1,7 @@
+# Operator-side gates evaluated over the run window.
+# Gate 2: the workqueue must not develop sustained depth — depth at
+# N<=25 means operator starvation, not host limits (pinned from the
+# 2026-07-05 calibrations: depth stayed 0 through every wave).
+- expr: avg_over_time(workqueue_depth{name="nomadcluster"}[5m]) > 5
+  description: sustained nomadcluster workqueue depth — operator saturation
+  severity: error

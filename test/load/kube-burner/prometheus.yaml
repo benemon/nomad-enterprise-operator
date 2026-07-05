@@ -1,0 +1,64 @@
+# Minimal Prometheus for the load rig: scrapes every ServiceMonitor in
+# the operator namespace (the operator creates its own automatically).
+# Requires prometheus-operator CRDs (installed by the workflow from
+# the pinned upstream bundle).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadtest-prometheus
+  namespace: nomad-enterprise-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: loadtest-prometheus
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - nonResourceURLs: [/metrics]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loadtest-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: loadtest-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: loadtest-prometheus
+    namespace: nomad-enterprise-operator-system
+---
+# The operator's own metrics endpoint sits behind kube-rbac-proxy-style
+# auth: the scraper needs the shipped metrics-reader ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: loadtest-prometheus-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nomad-enterprise-operator-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: loadtest-prometheus
+    namespace: nomad-enterprise-operator-system
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Prometheus
+metadata:
+  name: loadtest
+  namespace: nomad-enterprise-operator-system
+spec:
+  serviceAccountName: loadtest-prometheus
+  serviceMonitorSelector: {}
+  serviceMonitorNamespaceSelector: {}
+  scrapeInterval: 15s
+  retention: 2h
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi

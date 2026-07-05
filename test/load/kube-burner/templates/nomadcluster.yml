@@ -1,0 +1,13 @@
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: load-{{ .Iteration }}
+spec:
+  replicas: 1
+  license:
+    secretName: nomad-license
+  persistence:
+    size: ""
+  services:
+    external:
+      type: NodePort

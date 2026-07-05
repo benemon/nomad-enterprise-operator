@@ -1,0 +1,14 @@
+# Operator-side series collected at job boundaries; deltas tell the
+# story (counters are cumulative across the operator's lifetime).
+- query: workqueue_depth{name="nomadcluster"}
+  metricName: operatorQueueDepth
+- query: rate(workqueue_queue_duration_seconds_sum{name="nomadcluster"}[2m]) / rate(workqueue_queue_duration_seconds_count{name="nomadcluster"}[2m])
+  metricName: operatorQueueLatencyAvg
+- query: controller_runtime_reconcile_total{controller="nomadcluster"}
+  metricName: operatorReconcileTotal
+- query: process_resident_memory_bytes{job=~".*controller-manager.*"}
+  metricName: operatorRSS
+- query: rate(process_cpu_seconds_total{job=~".*controller-manager.*"}[2m])
+  metricName: operatorCPURate
+- query: nomad_operator_nomad_api_requests_total
+  metricName: operatorNomadAPIRequests

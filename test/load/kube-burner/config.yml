@@ -1,0 +1,43 @@
+# Fleet-scale operator load test (neo-31u) — kube-burner edition.
+# The operator is the measurement target; NomadClusters are the load.
+# Tier size comes from the ITERATIONS env var.
+---
+global:
+  measurements:
+    # Per-pod readiness quantiles: nomad server pod readiness is the
+    # convergence signal beneath NomadCluster phase=Running.
+    - name: podLatency
+
+metricsEndpoints:
+  - endpoint: {{ .PROMETHEUS_URL }}
+    metrics: [metrics.yml]
+    alerts: [alerts.yml]
+    indexer:
+      type: local
+      metricsDirectory: collected-metrics
+
+jobs:
+  - name: create-wave
+    jobType: create
+    jobIterations: {{ .ITERATIONS }}
+    namespace: nomad-load
+    namespacedIterations: false
+    # Convergence gate: every NomadCluster must reach phase=Running
+    # or the wait times out and the run fails (gate 1).
+    waitWhenFinished: true
+    maxWaitTimeout: 20m
+    objects:
+      - objectTemplate: templates/nomadcluster.yml
+        replicas: 1
+        waitOptions:
+          customStatusPaths:
+            - key: '(.phase)'
+              value: Running
+
+  - name: delete-wave
+    jobType: delete
+    waitWhenFinished: true
+    objects:
+      - kind: NomadCluster
+        apiVersion: nomad.hashicorp.com/v1alpha1
+        labelSelector: {kube-burner-job: create-wave}
