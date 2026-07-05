@@ -87,7 +87,7 @@ var _ = Describe("Finalizer reclaimPolicy gating", func() {
 	}
 
 	scenarios := []scenario{
-		{name: "omitted policy defaults to Retain and preserves PVCs", policyAtBirth: "", wantDeleted: false},
+		{name: "omitted policy defaults to Delete and removes PVCs", policyAtBirth: "", wantDeleted: true},
 		{name: "explicit Retain preserves PVCs", policyAtBirth: nomadv1alpha1.ReclaimPolicyRetain, wantDeleted: false},
 		{name: "Delete removes selector-matching PVCs", policyAtBirth: nomadv1alpha1.ReclaimPolicyDelete, wantDeleted: true},
 		{name: "policy flipped Delete to Retain before deletion is not retroactive", policyAtBirth: nomadv1alpha1.ReclaimPolicyDelete, policyAtDeath: nomadv1alpha1.ReclaimPolicyRetain, wantDeleted: false},
@@ -112,7 +112,9 @@ var _ = Describe("Finalizer reclaimPolicy gating", func() {
 				Name: "reclaim-check", Namespace: namespace,
 			}, fetched)).To(Succeed())
 			if sc.policyAtBirth == "" {
-				Expect(fetched.Spec.Persistence.ReclaimPolicy).To(Equal(nomadv1alpha1.ReclaimPolicyRetain))
+				// Default is Delete: Retain's re-adoption promise is not
+				// deliverable (Raft pins peer addresses to pod IPs).
+				Expect(fetched.Spec.Persistence.ReclaimPolicy).To(Equal(nomadv1alpha1.ReclaimPolicyDelete))
 			}
 
 			if sc.policyAtDeath != "" {

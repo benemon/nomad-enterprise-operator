@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/utils/ptr"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -596,7 +598,7 @@ var _ = Describe("NomadCluster Controller", func() {
 		It("should configure ACL in generated HCL", func() {
 			By("Creating a NomadCluster with ACL enabled")
 			cluster = newTestCluster(namespace, "test-cluster")
-			cluster.Spec.Server.ACL.Enabled = true
+			cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			namespacedName := types.NamespacedName{Name: "test-cluster", Namespace: namespace}

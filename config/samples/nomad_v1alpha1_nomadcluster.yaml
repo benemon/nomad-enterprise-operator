@@ -107,7 +107,9 @@ spec:
     #       name: aws-east-creds  # keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
   persistence:
     size: 10Gi
-    # reclaimPolicy: Retain  # default; Delete removes data PVCs with the cluster
+    # reclaimPolicy: Delete  # default; Retain keeps data PVCs, but a
+    #   recreated cluster cannot re-adopt them automatically — recover
+    #   via NomadSnapshot restore instead
   resources:
     limits:
       cpu: "2"

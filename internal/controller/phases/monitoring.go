@@ -58,7 +58,7 @@ func (p *MonitoringPhase) Name() string {
 
 // Execute creates or updates Prometheus monitoring resources.
 func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	if !cluster.Spec.Monitoring.Enabled {
+	if !cluster.Spec.Monitoring.IsEnabled() {
 		p.Log.V(1).Info("Monitoring disabled, skipping")
 		return OK()
 	}

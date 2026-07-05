@@ -168,7 +168,7 @@ const nonRootUserID = int64(65532)
 // getManagementToken loads the operator management token, empty with
 // no error when ACLs are disabled; a missing Secret defers the caller.
 func getManagementToken(ctx context.Context, c client.Client, cluster *nomadv1alpha1.NomadCluster) (string, error) {
-	if !cluster.Spec.Server.ACL.Enabled {
+	if !cluster.Spec.Server.ACL.IsEnabled() {
 		return "", nil
 	}
 	secretName := OperatorManagementSecretName(cluster.Name)

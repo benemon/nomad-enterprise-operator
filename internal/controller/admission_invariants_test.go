@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -49,6 +51,7 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 			name    string
 			mutate  func(*nomadv1alpha1.NomadCluster)
 			wantErr string // empty = must be accepted
+			verify  func(Gomega, *nomadv1alpha1.NomadCluster)
 		}
 
 		cases := []tc{
@@ -304,6 +307,15 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 			},
 			{
+				name: "reclaimPolicy defaults to Delete",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Persistence.ReclaimPolicy = ""
+				},
+				verify: func(g Gomega, c *nomadv1alpha1.NomadCluster) {
+					g.Expect(c.Spec.Persistence.ReclaimPolicy).To(Equal("Delete"))
+				},
+			},
+			{
 				name: "reclaimPolicy outside enum rejected",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
 					c.Spec.Persistence.ReclaimPolicy = "Recycle"
@@ -321,6 +333,11 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				err := k8sClient.Create(ctx, cluster)
 				if c.wantErr == "" {
 					Expect(err).NotTo(HaveOccurred())
+					if c.verify != nil {
+						stored := &nomadv1alpha1.NomadCluster{}
+						Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, stored)).To(Succeed())
+						c.verify(Default, stored)
+					}
 					Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
 					return
 				}

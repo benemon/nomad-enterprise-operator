@@ -145,7 +145,7 @@ func newScaleDownFixture(t *testing.T, currentSTSReplicas, specReplicas int32) *
 	// ACL disabled so the phase doesn't need a bootstrap Secret in
 	// the fake client. The token branch is exercised by
 	// TestScaleDown_AclDeferralWhenSecretMissing below.
-	cluster.Spec.Server.ACL.Enabled = false
+	cluster.Spec.Server.ACL.Enabled = ptr.To(false)
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "ns"},
@@ -497,7 +497,7 @@ func TestScaleDown_MetricLifecycle(t *testing.T) {
 	// ordinals).
 	cluster := newTestCluster("metric-ns", "nomad")
 	cluster.Spec.Replicas = 3
-	cluster.Spec.Server.ACL.Enabled = false
+	cluster.Spec.Server.ACL.Enabled = ptr.To(false)
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "metric-ns"},

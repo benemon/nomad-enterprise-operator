@@ -21,6 +21,8 @@ import (
 	"errors"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
@@ -45,7 +47,7 @@ func TestClusterStatusPhase_UsesOperatorStatusToken(t *testing.T) {
 	}
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 	cluster.Status.OperatorStatusSecretName = "test-cluster-operator-status"
 
 	fakeClient := fake.NewClientBuilder().
@@ -83,7 +85,7 @@ func TestClusterStatusPhase_FallsBackToBootstrapToken(t *testing.T) {
 	}
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 	// OperatorStatusSecretName is empty — should fall back to bootstrap
 
 	fakeClient := fake.NewClientBuilder().

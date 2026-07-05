@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,7 +53,7 @@ func newMapperPhaseContext(mapper meta.RESTMapper) *PhaseContext {
 
 func TestMonitoringDiscoveryGated(t *testing.T) {
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Monitoring.Enabled = true
+	cluster.Spec.Monitoring.Enabled = ptr.To(true)
 	// openshift.enabled deliberately false: monitoring must work without it.
 
 	t.Run("Prometheus CRDs present creates ServiceMonitor", func(t *testing.T) {
@@ -92,7 +94,7 @@ func TestMonitoringDiscoveryGated(t *testing.T) {
 		mapper.Add(serviceMonitorGVK, meta.RESTScopeNamespace)
 
 		disabled := newTestCluster("test-ns", "test-cluster")
-		disabled.Spec.Monitoring.Enabled = false
+		disabled.Spec.Monitoring.Enabled = ptr.To(false)
 
 		p := NewMonitoringPhase(newMapperPhaseContext(mapper))
 		if result := p.Execute(context.Background(), disabled); result.Error != nil {

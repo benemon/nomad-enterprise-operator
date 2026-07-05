@@ -226,7 +226,7 @@ make undeploy
 | `topology.datacenter` | `string` | | Nomad datacenter name. Defaults to the namespace |
 | `persistence.size` | `string` | `10Gi` | Data volume size. Set to empty string to use emptyDir |
 | `persistence.storageClassName` | `string` | | Storage class for the data PVC. Uses cluster default if empty |
-| `persistence.reclaimPolicy` | `Retain` \| `Delete` | `Retain` | What happens to data PVCs on cluster deletion. `Retain` (default) preserves Raft state so an accidentally deleted cluster can be recreated against its old data; `Delete` removes the PVCs with the cluster. The value at deletion time wins |
+| `persistence.reclaimPolicy` | `Retain` \| `Delete` | `Delete` | What happens to data PVCs on cluster deletion. `Delete` (default) removes the PVCs with the cluster. `Retain` keeps them — but note that a fully recreated cluster does **not** recover automatically against retained data (Raft pins peer addresses to pod IPs, which change on recreation); recovery is via [NomadSnapshot restore](docs/runbooks/disaster-recovery.md). The value at deletion time wins |
 | `resources` | `ResourceRequirements` | | Standard Kubernetes CPU/memory requests and limits |
 | `imagePullSecrets` | `[]LocalObjectReference` | | Image pull secrets for private registries |
 | `nodeSelector` | `map[string]string` | | Node selector for pod scheduling |
@@ -555,8 +555,8 @@ The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0
 Upgrading a cluster to a new Nomad version is a user-driven
 `spec.image.tag` change. **Snapshot before you upgrade** — the operator
 deliberately does not do it for you. The full procedure, including the
-pre-upgrade one-shot snapshot and rollback guidance, is in
-an operations runbook (publication pending). The short form: take a
+pre-upgrade one-shot snapshot and rollback guidance, is in the
+[disaster-recovery runbook](docs/runbooks/disaster-recovery.md). The short form: take a
 one-shot `NomadSnapshot`, wait for `status.phase: Succeeded`, then patch
 `spec.image.tag`; the operator rolls the StatefulSet one pod at a time
 behind the PodDisruptionBudget.
@@ -784,8 +784,8 @@ cluster's version (what snapshots are currently taken against — it
 follows upgrades); for one-shot artifacts,
 `status.lastSnapshot.nomadVersion` is frozen at Job completion. Check
 one of these against the restore-target cluster before restoring. The
-full restore procedure will be covered in an operations runbook
-(publication pending).
+full restore procedure is in the
+[disaster-recovery runbook](docs/runbooks/disaster-recovery.md).
 
 ### Spec
 

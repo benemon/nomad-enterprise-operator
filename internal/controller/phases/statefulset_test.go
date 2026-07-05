@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -91,7 +93,7 @@ func TestAuditPVCIndependent(t *testing.T) {
 			if tc.persistence {
 				cluster.Spec.Persistence.Size = "10Gi"
 			}
-			cluster.Spec.Server.Audit.Enabled = tc.audit
+			cluster.Spec.Server.Audit.Enabled = ptr.To(tc.audit)
 			if tc.audit {
 				cluster.Spec.Server.Audit.Size = "5Gi"
 			}

@@ -20,6 +20,8 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	tlspkg "github.com/hashicorp/nomad-enterprise-operator/pkg/tls"
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +69,11 @@ func newTestCluster(namespace, name string) *nomadv1alpha1.NomadCluster {
 			Replicas: 3,
 			License: nomadv1alpha1.LicenseSpec{
 				SecretName: "nomad-license",
+			},
+			// Phase tests predate ACL pointer semantics: keep the
+			// historical ACL-off fixture default explicitly.
+			Server: nomadv1alpha1.ServerSpec{
+				ACL: nomadv1alpha1.ACLSpec{Enabled: ptr.To(false)},
 			},
 		},
 	}
@@ -1196,7 +1203,7 @@ func TestACLBootstrapPhase_Disabled(t *testing.T) {
 	phase := NewACLBootstrapPhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = false
+	cluster.Spec.Server.ACL.Enabled = ptr.To(false)
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -1224,7 +1231,7 @@ func TestACLBootstrapPhase_AlreadyBootstrapped(t *testing.T) {
 	phase := NewACLBootstrapPhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -1253,7 +1260,7 @@ func TestACLBootstrapPhase_OperatorOwnedSecretName(t *testing.T) {
 	phase := NewACLBootstrapPhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 
 	result := phase.Execute(context.Background(), cluster)
 
@@ -1270,7 +1277,7 @@ func TestACLBootstrapPhase_WaitForPods(t *testing.T) {
 	phase := NewACLBootstrapPhase(ctx)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 
 	result := phase.Execute(context.Background(), cluster)
 

@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -55,7 +57,7 @@ func TestDeletionFailuresEmitEvents(t *testing.T) {
 			},
 		}
 		c.Spec.Persistence.ReclaimPolicy = nomadv1alpha1.ReclaimPolicyDelete
-		c.Spec.Server.ACL.Enabled = false
+		c.Spec.Server.ACL.Enabled = ptr.To(false)
 		return c
 	}
 

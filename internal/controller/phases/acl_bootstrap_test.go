@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
@@ -38,7 +40,7 @@ const testOperatorStatusName = "test-cluster-operator-status"
 // expected IDs, status fields, and owner reference (mocked NomadAPI).
 func TestACLBootstrapPhase_CreatesOperatorStatusToken(t *testing.T) {
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 	// Both must be empty so neither idempotency guard fires
 	cluster.Status.OperatorStatusSecretName = ""
 	cluster.Status.OperatorStatusPolicyName = ""
@@ -174,7 +176,7 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 	}
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
 	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
 
@@ -238,7 +240,7 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	// policy operations authenticate with the MANAGEMENT token
 	// (C4 / AC-2.4.5), which the mock expectations below pin.
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
 	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
 	cluster.Status.OperatorManagementSecretName = "test-cluster-operator-management"
@@ -395,7 +397,7 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 	)
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 
 	readyPod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -500,7 +502,7 @@ func TestC2WritesUseManagementToken(t *testing.T) {
 	const mgmtName = "test-cluster-operator-management"
 
 	cluster := newTestCluster("test-ns", "test-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 	cluster.Status.OperatorStatusSecretName = testOperatorStatusName
 	cluster.Status.OperatorStatusPolicyName = testOperatorStatusName
 	cluster.Status.OperatorManagementSecretName = mgmtName

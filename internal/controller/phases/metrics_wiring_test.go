@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/utils/ptr"
+
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
@@ -205,7 +207,7 @@ func TestLicenseAndVersionGauges(t *testing.T) {
 func TestACLBootstrapFailureCounted(t *testing.T) {
 	newFixture := func(name string, bootstrapErr error) (*ACLBootstrapPhase, *nomadv1alpha1.NomadCluster) {
 		cluster := newTestCluster("d4e-ns", name)
-		cluster.Spec.Server.ACL.Enabled = true
+		cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 		readyPod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name + "-0",

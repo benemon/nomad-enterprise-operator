@@ -158,16 +158,18 @@ spec:
                     default: true
                     description: |-
                       Enabled determines if monitoring resources are created
-                      NOTE: no omitempty — with default=true, an omitted false would be
-                      re-defaulted to true by the apiserver on every operator update.
+                      Pointer + omitempty is load-bearing: a plain bool either drops
+                      explicit false (omitempty: apiserver re-defaults it true on the
+                      operator's next write) or writes false into fields the user
+                      never set (no omitempty: the zero value overwrites the default).
+                      nil means "user said nothing" and reads as the default via
+                      IsEnabled().
                     type: boolean
                   prometheusRulesEnabled:
                     default: false
                     description: PrometheusRulesEnabled determines if PrometheusRule
                       is created
                     type: boolean
-                required:
-                - enabled
                 type: object
               nodeSelector:
                 additionalProperties:
@@ -228,11 +230,15 @@ spec:
                 description: Persistence configuration for data volumes
                 properties:
                   reclaimPolicy:
-                    default: Retain
+                    default: Delete
                     description: |-
-                      ReclaimPolicy controls data-PVC fate on cluster deletion. Retain
-                      (default) preserves Raft state for re-adoption by a same-name
-                      cluster; Delete removes it. Deletion-time value wins.
+                      ReclaimPolicy controls data-PVC fate on cluster deletion. Delete
+                      (default) removes the data PVCs with the cluster. Retain keeps
+                      them, but re-adoption by a recreated cluster does NOT recover
+                      automatically: Raft stores peer addresses as pod IPs, which
+                      change on recreation, so a fully recreated cluster needs manual
+                      outage recovery. Prefer NomadSnapshot restore for recovery.
+                      Deletion-time value wins.
                     enum:
                     - Retain
                     - Delete
@@ -327,11 +333,13 @@ spec:
                         default: true
                         description: |-
                           Enabled determines if ACLs are enabled (defaults to true for security)
-                          NOTE: no omitempty — with default=true, an omitted false would be
-                          re-defaulted to true by the apiserver on every operator update.
+                          Pointer + omitempty is load-bearing: a plain bool either drops
+                          explicit false (omitempty: apiserver re-defaults it true on the
+                          operator's next write) or writes false into fields the user
+                          never set (no omitempty: the zero value overwrites the default).
+                          nil means "user said nothing" and reads as the default via
+                          IsEnabled().
                         type: boolean
-                    required:
-                    - enabled
                     type: object
                   audit:
                     description: Audit logging configuration
@@ -341,8 +349,12 @@ spec:
                         description: |-
                           Enabled determines if audit logging is enabled.
                           When enabled, an audit volume is automatically created.
-                          NOTE: no omitempty — with default=true, an omitted false would be
-                          re-defaulted to true by the apiserver on every operator update.
+                          Pointer + omitempty is load-bearing: a plain bool either drops
+                          explicit false (omitempty: apiserver re-defaults it true on the
+                          operator's next write) or writes false into fields the user
+                          never set (no omitempty: the zero value overwrites the default).
+                          nil means "user said nothing" and reads as the default via
+                          IsEnabled().
                         type: boolean
                       size:
                         default: 5Gi
@@ -353,8 +365,6 @@ spec:
                         description: StorageClassName for the audit PVC (uses cluster
                           default if empty)
                         type: string
-                    required:
-                    - enabled
                     type: object
                   keyrings:
                     description: |-

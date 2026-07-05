@@ -86,7 +86,7 @@ func (p *ACLBootstrapPhase) Name() string {
 // Execute performs ACL bootstrap if enabled and not already done.
 func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	// Skip if ACLs not enabled
-	if !cluster.Spec.Server.ACL.Enabled {
+	if !cluster.Spec.Server.ACL.IsEnabled() {
 		p.Log.V(1).Info("ACLs disabled, skipping bootstrap")
 		return OK()
 	}

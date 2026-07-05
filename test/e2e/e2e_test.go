@@ -2249,6 +2249,18 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(Equal("Running 3"))
 			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the promised defaults MATERIALIZE (regression: absent fields once flipped to false)")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", sampleCluster, "-n", namespace,
+					"-o", "jsonpath={.status.aclBootstrapped}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("true"), "ACL default must bootstrap")
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+			out, err := utils.Run(exec.Command("kubectl", "get", "sts", sampleCluster, "-n", namespace,
+				"-o", "jsonpath={.spec.template.spec.volumes[*].name} {.spec.volumeClaimTemplates[*].metadata.name}"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out).To(ContainSubstring("audit"), "audit default must create its volume")
 		})
 	})
 

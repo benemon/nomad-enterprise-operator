@@ -146,14 +146,14 @@ func (g *Generator) buildTemplateData() templateData {
 		Namespace:            cluster.Namespace,
 		HeadlessService:      cluster.Name + "-headless",
 		GossipKey:            g.gossipKey,
-		ACLEnabled:           cluster.Spec.Server.ACL.Enabled,
+		ACLEnabled:           cluster.Spec.Server.ACL.IsEnabled(),
 		TLSEnabled:           true,
 		TLSCAFile:            "/nomad/tls/ca.crt",
 		TLSCertFile:          "/nomad/tls/tls.crt",
 		TLSKeyFile:           "/nomad/tls/tls.key",
 		VerifyServerHostname: true,
 		VerifyHTTPSClient:    false,
-		AuditEnabled:         cluster.Spec.Server.Audit.Enabled,
+		AuditEnabled:         cluster.Spec.Server.Audit.IsEnabled(),
 		// Audit shape is operator-owned per ADR 0003 ("Fields dropped
 		// in v1"): enforced delivery (best-effort is a footgun), JSON
 		// only, 24h rotation × 15 files (~15 days). Users needing

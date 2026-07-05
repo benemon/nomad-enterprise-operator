@@ -148,7 +148,7 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (nomad.NomadAPI, string, error) {
 	// If ACL is enabled and bootstrapped, use the token
 	var aclToken string
-	if cluster.Spec.Server.ACL.Enabled {
+	if cluster.Spec.Server.ACL.IsEnabled() {
 		token, err := p.getOperatorStatusToken(ctx, cluster)
 		if err == nil && token != "" {
 			aclToken = token

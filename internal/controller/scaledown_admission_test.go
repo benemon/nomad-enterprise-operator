@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 
+	"k8s.io/utils/ptr"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -84,7 +86,7 @@ var _ = Describe("Scale-down admission rules (D2c)", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{
 			Name: "inflight-block", Namespace: namespace,
 		}, refetched)).To(Succeed())
-		refetched.Spec.Server.ACL.Enabled = !refetched.Spec.Server.ACL.Enabled
+		refetched.Spec.Server.ACL.Enabled = ptr.To(!refetched.Spec.Server.ACL.IsEnabled())
 		Expect(k8sClient.Update(ctx, refetched)).To(Succeed())
 	})
 

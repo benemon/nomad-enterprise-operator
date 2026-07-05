@@ -193,9 +193,9 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	configChecksum := ConfigChecksum(map[string]string{
 		"advertise":  p.AdvertiseAddress,
 		"gossip":     p.GossipKey,
-		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
+		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
 		"tls":        "true",
-		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
+		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.IsEnabled()),
 		"region":     cluster.Spec.Topology.Region,
 		"datacenter": cluster.Spec.Topology.Datacenter,
 		"keyrings":   string(keyringsJSON),
@@ -359,7 +359,7 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 	}...)
 
 	// Add audit volume mount (always needed when audit is enabled)
-	if cluster.Spec.Server.Audit.Enabled {
+	if cluster.Spec.Server.Audit.IsEnabled() {
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      "audit",
 			MountPath: "/nomad/audit",
@@ -461,7 +461,7 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 	// Audit PVC is independent of data persistence (B6 / AC-4.5.1):
 	// audit always gets persistent storage when enabled, even when
 	// spec.persistence is disabled and data runs on emptyDir.
-	if cluster.Spec.Server.Audit.Enabled {
+	if cluster.Spec.Server.Audit.IsEnabled() {
 		auditSize := cluster.Spec.Server.Audit.Size
 		if auditSize == "" {
 			auditSize = "5Gi"

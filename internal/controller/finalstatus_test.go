@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -84,7 +83,7 @@ func newFinalStatusFixture(t *testing.T, objs ...client.Object) (*NomadClusterRe
 // Event debounce.
 func TestReadyTruePrecondition(t *testing.T) {
 	cluster := newTestCluster("fs-ns", "fs-cluster")
-	cluster.Spec.Server.ACL.Enabled = true
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "fs-cluster", Namespace: "fs-ns"},
@@ -387,27 +386,5 @@ func TestLicenseSecretNotFoundReason(t *testing.T) {
 	ready = meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	if ready == nil || ready.Reason == "LicenseSecretNotFound" {
 		t.Fatalf("reason not cleared after Secret creation: %+v", ready)
-	}
-}
-
-// TestExplicitFalseSurvivesOperatorUpdate: default-true booleans set
-// explicitly to false must survive the operator's finalizer Update —
-// with omitempty they marshalled to absent and the apiserver
-// re-defaulted them to true (found by the keyring e2e: acl.enabled
-// false silently flipped back on, yielding 403s).
-func TestExplicitFalseSurvivesOperatorUpdate(t *testing.T) {
-	cluster := newTestCluster("ef-ns", "ef")
-	cluster.Spec.Server.ACL.Enabled = false
-	cluster.Spec.Server.Audit.Enabled = false
-	cluster.Spec.Monitoring.Enabled = false
-
-	raw, err := json.Marshal(cluster.Spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`"acl":{"enabled":false}`, `"enabled":false`} {
-		if !strings.Contains(string(raw), want) {
-			t.Fatalf("explicit false dropped from wire form: %s", raw)
-		}
 	}
 }

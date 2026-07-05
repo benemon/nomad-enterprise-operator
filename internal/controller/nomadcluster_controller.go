@@ -272,7 +272,7 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		// spec, not status: deterministic names must be revoked even if
 		// the status cache was never persisted.
 		// Non-fatal — Kubernetes-owned resources are cleaned up via owner references
-		if cluster.Spec.Server.ACL.Enabled {
+		if cluster.Spec.Server.ACL.IsEnabled() {
 			if err := r.cleanupNomadACLResources(ctx, cluster); err != nil {
 				log.Error(err, "Failed to clean up Nomad-side ACL resources, continuing")
 				r.deletionEvent(cluster, "ACLCleanupFailed",
@@ -626,7 +626,7 @@ func (r *NomadClusterReconciler) updateStatefulSetStatus(ctx context.Context, cl
 // updateACLBootstrapStatus mirrors ACL bootstrap completion into status
 // sub-fields.
 func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) {
-	if !cluster.Spec.Server.ACL.Enabled {
+	if !cluster.Spec.Server.ACL.IsEnabled() {
 		return
 	}
 

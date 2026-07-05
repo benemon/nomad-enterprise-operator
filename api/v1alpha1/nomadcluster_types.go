@@ -240,14 +240,22 @@ type CertificateSecretKeys struct {
 type MonitoringSpec struct {
 	// Enabled determines if monitoring resources are created
 	// +kubebuilder:default=true
-	// NOTE: no omitempty — with default=true, an omitted false would be
-	// re-defaulted to true by the apiserver on every operator update.
-	Enabled bool `json:"enabled"`
+	// Pointer + omitempty is load-bearing: a plain bool either drops
+	// explicit false (omitempty: apiserver re-defaults it true on the
+	// operator's next write) or writes false into fields the user
+	// never set (no omitempty: the zero value overwrites the default).
+	// nil means "user said nothing" and reads as the default via
+	// IsEnabled().
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// PrometheusRulesEnabled determines if PrometheusRule is created
 	// +kubebuilder:default=false
 	PrometheusRulesEnabled bool `json:"prometheusRulesEnabled,omitempty"`
 }
+
+// IsEnabled resolves the tri-state pointer: nil (unset) follows the
+// default (true).
+func (m MonitoringSpec) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
 
 // ServerSpec defines Nomad server configuration. Autopilot tuning is
 // operator-owned (cleanup_dead_servers=true, 200ms last
@@ -490,10 +498,18 @@ type TransitAuthKubernetes struct {
 type ACLSpec struct {
 	// Enabled determines if ACLs are enabled (defaults to true for security)
 	// +kubebuilder:default=true
-	// NOTE: no omitempty — with default=true, an omitted false would be
-	// re-defaulted to true by the apiserver on every operator update.
-	Enabled bool `json:"enabled"`
+	// Pointer + omitempty is load-bearing: a plain bool either drops
+	// explicit false (omitempty: apiserver re-defaults it true on the
+	// operator's next write) or writes false into fields the user
+	// never set (no omitempty: the zero value overwrites the default).
+	// nil means "user said nothing" and reads as the default via
+	// IsEnabled().
+	Enabled *bool `json:"enabled,omitempty"`
 }
+
+// IsEnabled resolves the tri-state pointer: nil (unset) follows the
+// default (true).
+func (a ACLSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // TLSSpec defines TLS configuration for the Nomad cluster.
 // mTLS is always enabled. The operator generates and manages all certificates
@@ -542,9 +558,13 @@ type AuditSpec struct {
 	// Enabled determines if audit logging is enabled.
 	// When enabled, an audit volume is automatically created.
 	// +kubebuilder:default=true
-	// NOTE: no omitempty — with default=true, an omitted false would be
-	// re-defaulted to true by the apiserver on every operator update.
-	Enabled bool `json:"enabled"`
+	// Pointer + omitempty is load-bearing: a plain bool either drops
+	// explicit false (omitempty: apiserver re-defaults it true on the
+	// operator's next write) or writes false into fields the user
+	// never set (no omitempty: the zero value overwrites the default).
+	// nil means "user said nothing" and reads as the default via
+	// IsEnabled().
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// Size of the audit volume (created automatically when audit is enabled)
 	// +kubebuilder:default="5Gi"
@@ -554,6 +574,10 @@ type AuditSpec struct {
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 }
+
+// IsEnabled resolves the tri-state pointer: nil (unset) follows the
+// default (true).
+func (a AuditSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // PersistenceSpec defines storage configuration
 type PersistenceSpec struct {
@@ -566,17 +590,20 @@ type PersistenceSpec struct {
 	// +kubebuilder:default="10Gi"
 	Size string `json:"size,omitempty"`
 
-	// ReclaimPolicy controls data-PVC fate on cluster deletion. Retain
-	// (default) preserves Raft state for re-adoption by a same-name
-	// cluster; Delete removes it. Deletion-time value wins.
+	// ReclaimPolicy controls data-PVC fate on cluster deletion. Delete
+	// (default) removes the data PVCs with the cluster. Retain keeps
+	// them, but re-adoption by a recreated cluster does NOT recover
+	// automatically: Raft stores peer addresses as pod IPs, which
+	// change on recreation, so a fully recreated cluster needs manual
+	// outage recovery. Prefer NomadSnapshot restore for recovery.
+	// Deletion-time value wins.
 	// +kubebuilder:validation:Enum=Retain;Delete
-	// +kubebuilder:default=Retain
+	// +kubebuilder:default=Delete
 	// +optional
 	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
 }
 
-// Valid spec.persistence.reclaimPolicy values. Retain has only test
-// consumers; kept so the enum pair is documented in one place.
+// Valid spec.persistence.reclaimPolicy values.
 const (
 	ReclaimPolicyRetain = "Retain"
 	ReclaimPolicyDelete = "Delete"

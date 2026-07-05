@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -32,6 +34,11 @@ func TestGenerator_Generate_BasicConfiguration(t *testing.T) {
 			Namespace: "nomad",
 		},
 		Spec: nomadv1alpha1.NomadClusterSpec{
+			// Explicitly disabled: nil now means enabled-by-default.
+			Server: nomadv1alpha1.ServerSpec{
+				ACL:   nomadv1alpha1.ACLSpec{Enabled: ptr.To(false)},
+				Audit: nomadv1alpha1.AuditSpec{Enabled: ptr.To(false)},
+			},
 			Replicas: 3,
 			Topology: nomadv1alpha1.TopologySpec{
 				Region:     "us-west-1",
@@ -130,7 +137,7 @@ func TestGenerator_Generate_ACLEnabled(t *testing.T) {
 			Replicas: 3,
 			Server: nomadv1alpha1.ServerSpec{
 				ACL: nomadv1alpha1.ACLSpec{
-					Enabled: true,
+					Enabled: ptr.To(true),
 				},
 			},
 		},
@@ -208,7 +215,7 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 			Replicas: 3,
 			Server: nomadv1alpha1.ServerSpec{
 				Audit: nomadv1alpha1.AuditSpec{
-					Enabled: true,
+					Enabled: ptr.To(true),
 				},
 			},
 		},
@@ -256,10 +263,10 @@ func TestGenerator_Generate_AllFeaturesEnabled(t *testing.T) {
 			},
 			Server: nomadv1alpha1.ServerSpec{
 				ACL: nomadv1alpha1.ACLSpec{
-					Enabled: true,
+					Enabled: ptr.To(true),
 				},
 				Audit: nomadv1alpha1.AuditSpec{
-					Enabled: true,
+					Enabled: ptr.To(true),
 				},
 			},
 		},
