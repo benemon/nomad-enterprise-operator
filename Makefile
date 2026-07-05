@@ -139,6 +139,11 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
+LOAD_N ?= 10
+.PHONY: test-load
+test-load: ## Fleet-scale operator load test (neo-31u); LOAD_N sets the tier. Never runs in the PR lane.
+	N=$(LOAD_N) ./test/load/loadtest.sh
+
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	# -timeout raised from the go-test default 10m: the suite includes
