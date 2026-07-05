@@ -591,6 +591,25 @@ agent uses the same image reference as the cluster.
 
 **Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. Upgrade behaviour: existing NomadClusters that do not override `spec.image.tag` receive the new default on next reconcile, which triggers a rolling restart of the StatefulSet.
 
+## Nomad version compatibility
+
+The operator manages **Nomad Enterprise** servers (a license is the
+one required field). Compatibility is stated in three tiers, and the
+"tested" tier reports exactly what CI proves — nothing more:
+
+| Tier | Versions | Evidence |
+|------|----------|----------|
+| Tested | `2.0.x-ent` (current default `2.0.3-ent`) | full e2e suite, nightly |
+| Tested upgrade paths | `1.10-ent → 1.11-ent`, `1.11-ent → 2.0-ent` | nightly upgrade matrix: rolling upgrade with the Raft quorum floor asserted at every poll |
+| Expected to work | `1.10.x-ent` and `1.11.x-ent` as running versions | upgrade-matrix clusters boot and serve on these lines, but the full suite does not run against them |
+| Unsupported | anything below `1.10-ent`; Nomad CE | untested; CE lacks the licensed features the operator manages (audit, snapshot agent) |
+
+Upgrade one minor version at a time (the matrix pairs are consecutive
+for this reason). The matrix uses major.minor tags deliberately — each
+run exercises the latest patch of each line, so the proof
+self-maintains as patches ship; when a new Nomad minor GAs, a new pair
+is appended to the nightly matrix and this table.
+
 ## TLS Configuration
 
 mTLS is always enabled — no configuration is required. The operator automatically:
@@ -602,6 +621,24 @@ mTLS is always enabled — no configuration is required. The operator automatica
 - Configures `verify_server_hostname = true` in the Nomad HCL for RPC mTLS
 - Sets `verify_https_client = false` — the HTTP API is TLS-encrypted but does not require client certificates, allowing the UI, CLI, and OpenShift Routes to connect without distributing client certs. ACLs handle authorization
 - Sets OpenShift Routes to `reencrypt` termination with the CA as `destinationCACertificate`
+
+**A documented divergence from the validated design.** For load
+balancers in front of Nomad, the guidance is:
+
+> Use TLS passthrough — the load balancer forwards encrypted traffic
+> without terminating it, and Nomad terminates TLS itself.
+
+*— HashiCorp Validated Design: Nomad Enterprise Solution Design Guide*
+
+The operator's OpenShift Route deliberately uses `reencrypt` instead:
+the Route terminates with a platform (or user-supplied) certificate
+and re-establishes TLS to Nomad, verifying the cluster CA as
+`destinationCACertificate`. Traffic stays encrypted on every segment
+— the difference is a verified re-termination at the Route rather
+than blind passthrough — and in exchange the Route gets platform
+hostname routing and certificate management. Clients that require an
+unterminated TLS session to Nomad should use the external
+LoadBalancer/NodePort Service directly rather than the Route.
 
 ### Generated Secrets
 
