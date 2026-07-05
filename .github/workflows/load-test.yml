@@ -9,7 +9,7 @@ on:
     inputs:
       tier:
         description: "Number of NomadClusters (LOAD_N)"
-        default: "15"
+        default: "12"
         required: true
       soak:
         description: "Soak seconds between waves"
@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   load-test:
-    name: Load test (N=${{ inputs.tier || '15' }})
+    name: Load test (N=${{ inputs.tier || '12' }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -48,7 +48,7 @@ jobs:
       - name: Run load test
         run: |
           make test-load \
-            LOAD_N='${{ inputs.tier || 15 }}'
+            LOAD_N='${{ inputs.tier || 12 }}'
         env:
           SOAK_SECONDS: ${{ inputs.soak || 120 }}
 
@@ -56,6 +56,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: load-test-results-n${{ inputs.tier || '15' }}
+          name: load-test-results-n${{ inputs.tier || '12' }}
           path: test/load/results-*.txt
           retention-days: 90

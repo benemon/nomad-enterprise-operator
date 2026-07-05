@@ -129,3 +129,12 @@ scrape "post-delete-wave"
 
 say "results: $OUT"
 grep -E "wave wall-clock|delete wall-clock|still-pending" "$OUT"
+
+# GATE 1 (pinned from the first GHA calibration): the fleet must fully
+# converge. still-pending>0 means either operator starvation (queue
+# depth in the scrapes will show it) or a host ceiling (queue depth 0,
+# pods starving) — both are failures of the tier, not a pass.
+if [ "$pending" -gt 0 ]; then
+  echo "FAIL: $pending clusters never reached Running at N=$N" >&2
+  exit 1
+fi

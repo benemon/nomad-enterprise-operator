@@ -31,3 +31,12 @@ Reading the numbers:
 - Finding: ~3 transient reconcile errors per cluster during boot
   (not-ready conditions surfacing as errors rather than requeues) —
   pollutes error-rate alerting; tracked for cleanup.
+
+## GHA calibration (N=15, ubuntu-latest 4 vCPU, 2026-07-05)
+
+- Host ceiling found: 12/15 clusters converged (p50 37s — faster per
+  cluster than the local baseline); 3 starved to timeout with operator
+  queue depth 0 throughout (70MB RSS, 8 CPU-s) — the runner, not the
+  operator, is the limit. Standard-runner tier default is 12; larger
+  tiers need a bigger runner class.
+- Gate 1 pinned from this run: still-pending > 0 fails the rig.
