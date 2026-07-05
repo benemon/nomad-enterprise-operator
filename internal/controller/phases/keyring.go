@@ -45,6 +45,10 @@ import (
 // resumes mid-migration; status.keyring mirrors it for users.
 type KeyringPhase struct {
 	*PhaseContext
+
+	// probeDegraded marks a Ready state machine whose Nomad-side
+	// keyring failed the operational probe; publish() reports it.
+	probeDegraded bool
 }
 
 // NewKeyringPhase creates a new KeyringPhase.
@@ -71,6 +75,9 @@ type keyringState struct {
 	// Tokens is the per-entry managed Vault token lifecycle state,
 	// keyed by entry name (login methods only).
 	Tokens map[string]*tokenMeta `json:"tokens,omitempty"`
+
+	// LastDegraded dedupes degraded-cause events across revisits.
+	LastDegraded string `json:"lastDegraded,omitempty"`
 }
 
 // storedKeyring is one persisted keyring: the full spec entry, or nil
@@ -108,44 +115,28 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		return result
 	}
 
-	tokens, tokenRequeue, tokenResult := p.ensureVaultTokens(ctx, cluster, state, cm)
-	if tokenResult.Error != nil {
-		p.publish(cluster, state, tokens, nil)
-		return tokenResult
+	// Spec changes are absorbed BEFORE credential work: a stale entry
+	// whose login fails must never block the state update that
+	// replaces it (an early return here deadlocked a live migration —
+	// the failing credential gated its own cure).
+	if result := p.absorbSpecChanges(ctx, cluster, state, cm, desired); result.Error != nil {
+		return result
+	}
+
+	// Credential failures are tolerated per entry: the render proceeds
+	// with the tokens that resolved, the cause is surfaced, and the
+	// phase chain keeps flowing so config delivery can heal drift.
+	tokens, tokenRequeue, tokenFailures := p.ensureVaultTokens(ctx, cluster, state, cm)
+	if len(tokenFailures) > 0 {
+		p.surfaceDegraded(ctx, cluster, state, cm, "KeyringVaultLoginFailed", strings.Join(tokenFailures, "; "))
+		if p.RevisitAfter == 0 || p.RevisitAfter > 30*time.Second {
+			p.RevisitAfter = 30 * time.Second
+		}
 	}
 	cloudArgs, cloudResult := p.resolveCloudArgs(ctx, cluster, state)
 	if cloudResult.Error != nil {
 		p.publish(cluster, state, tokens, cloudArgs)
 		return cloudResult
-	}
-
-	// Spec changed relative to the active set: start (or extend) a
-	// migration. Demoted entries retire WITH their credentials; a
-	// migration off the implicit default retires an explicit aead
-	// block, and a disable activates one — permanently (keys wrapped
-	// under the explicit block are not loadable by the implicit
-	// default).
-	disableSteady := len(desired) == 0 && len(state.Active) == 1 && state.Active[0].Entry == nil
-	if !storedEqual(state.Active, desired) && !disableSteady {
-		demoted := storedMinus(state.Active, desired)
-		if len(state.Active) == 0 {
-			demoted = append(demoted, storedKeyring{})
-		}
-		active := desired
-		if len(desired) == 0 {
-			active = []storedKeyring{{}}
-			demoted = storedMinus(state.Active, nil)
-		}
-		state.Active = active
-		state.Retiring = mergeRetiring(state.Retiring, demoted)
-		state.Phase = keyringPhaseIntroducing
-		if err := p.saveState(ctx, cm, state); err != nil {
-			return Error(err, "Failed to persist keyring state")
-		}
-		if p.Recorder != nil {
-			p.Recorder.Event(cluster, corev1.EventTypeNormal, "KeyringMigrationStarted",
-				fmt.Sprintf("Migrating keyring set to [%s]", storedNames(state.Active)))
-		}
 	}
 
 	switch state.Phase {
@@ -155,14 +146,19 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		if p.statefulSetFullyRolled(ctx, cluster) && p.keyringConfigDelivered(ctx, cluster, state) {
 			token, terr := getManagementToken(ctx, p.Client, cluster)
 			if terr != nil {
-				p.publish(cluster, state, tokens, cloudArgs)
-				return RequeueWithReason(15*time.Second, "KeyringRotationPending",
+				// Pending, not fatal: a Requeue here stops the phase
+				// chain and freezes the config Secret — the exact
+				// deadlock when the rendered token has gone stale.
+				p.surfaceDegraded(ctx, cluster, state, cm, "KeyringRotationPending",
 					"Keyring rotation waiting for the management token")
+				p.RevisitAfter = 15 * time.Second
+				break
 			}
 			if rerr := p.rotate(ctx, cluster, token); rerr != nil {
-				p.publish(cluster, state, tokens, cloudArgs)
-				return RequeueWithReason(15*time.Second, "KeyringRotationPending",
+				p.surfaceDegraded(ctx, cluster, state, cm, "KeyringRotationPending",
 					fmt.Sprintf("Keyring rotation pending: %v", rerr))
+				p.RevisitAfter = 15 * time.Second
+				break
 			}
 			state.Phase = keyringPhaseRotating
 			if err := p.saveState(ctx, cm, state); err != nil {
@@ -177,9 +173,10 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		if terr == nil {
 			done, kerr := p.removeInactiveKeys(ctx, cluster, token)
 			if kerr != nil {
-				p.publish(cluster, state, tokens, cloudArgs)
-				return RequeueWithReason(15*time.Second, "KeyringRotationPending",
+				p.surfaceDegraded(ctx, cluster, state, cm, "KeyringRotationPending",
 					fmt.Sprintf("Keyring cleanup pending: %v", kerr))
+				p.RevisitAfter = 15 * time.Second
+				break
 			}
 			if done {
 				state.Retiring = nil
@@ -189,6 +186,9 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 				}
 			}
 		}
+
+	case keyringPhaseReady:
+		p.probeSteadyState(ctx, cluster, state, cm)
 
 	case keyringPhaseRetiring:
 		// Final roll delivers the retire render; then steady state.
@@ -234,7 +234,11 @@ func (p *KeyringPhase) publish(cluster *nomadv1alpha1.NomadCluster, state *keyri
 	}
 	p.KeyringEntries = entries
 
-	st := &nomadv1alpha1.KeyringStatus{Phase: state.Phase}
+	displayPhase := state.Phase
+	if p.probeDegraded {
+		displayPhase = "Degraded"
+	}
+	st := &nomadv1alpha1.KeyringStatus{Phase: displayPhase}
 	for _, sk := range state.Active {
 		st.Active = append(st.Active, storedName(sk))
 	}
@@ -536,6 +540,93 @@ func storedEqual(a, b []storedKeyring) bool {
 		}
 	}
 	return true
+}
+
+// absorbSpecChanges starts (or extends) a migration when the spec
+// diverges from the active set. Demoted entries retire WITH their
+// credentials; a migration off the implicit default retires an
+// explicit aead block, and a disable activates one — permanently
+// (keys wrapped under the explicit block are not loadable by the
+// implicit default).
+func (p *KeyringPhase) absorbSpecChanges(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap, desired []storedKeyring) PhaseResult {
+	disableSteady := len(desired) == 0 && len(state.Active) == 1 && state.Active[0].Entry == nil
+	if storedEqual(state.Active, desired) || disableSteady {
+		return OK()
+	}
+	demoted := storedMinus(state.Active, desired)
+	if len(state.Active) == 0 {
+		demoted = append(demoted, storedKeyring{})
+	}
+	active := desired
+	if len(desired) == 0 {
+		active = []storedKeyring{{}}
+		demoted = storedMinus(state.Active, nil)
+	}
+	state.Active = active
+	state.Retiring = mergeRetiring(state.Retiring, demoted)
+	state.Phase = keyringPhaseIntroducing
+	if err := p.saveState(ctx, cm, state); err != nil {
+		return Error(err, "Failed to persist keyring state")
+	}
+	if p.Recorder != nil {
+		p.Recorder.Event(cluster, corev1.EventTypeNormal, "KeyringMigrationStarted",
+			fmt.Sprintf("Migrating keyring set to [%s]", storedNames(state.Active)))
+	}
+	return OK()
+}
+
+// probeSteadyState verifies a Ready keyring is OPERATIONAL: config
+// delivery is not initialization — a live cluster once reported Ready
+// while every server failed keyring init (unreachable KMS CA). Only
+// Nomad's own keyring list proves the wrappers work.
+func (p *KeyringPhase) probeSteadyState(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) {
+	if !hasExternalEntries(state) || !p.statefulSetFullyRolled(ctx, cluster) {
+		return
+	}
+	token, terr := getManagementToken(ctx, p.Client, cluster)
+	if terr != nil {
+		return
+	}
+	client, cerr := p.keyringClient(cluster, token)
+	if cerr != nil {
+		return
+	}
+	keys, kerr := client.KeyringList(ctx, token)
+	if kerr == nil && len(keys) > 0 {
+		return
+	}
+	p.probeDegraded = true
+	msg := "Nomad keyring reports no keys — keyring not initialized"
+	if kerr != nil {
+		msg = fmt.Sprintf("Nomad keyring unreadable: %v", kerr)
+	}
+	p.surfaceDegraded(ctx, cluster, state, cm, "KeyringNotInitialized", msg)
+	p.RevisitAfter = 30 * time.Second
+}
+
+// surfaceDegraded emits a Warning event when the degraded cause
+// CHANGES (state-tracked — a 15s revisit loop must not spam events)
+// and always logs it.
+func (p *KeyringPhase) surfaceDegraded(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap, reason, msg string) {
+	p.Log.Info("keyring degraded", "reason", reason, "message", msg)
+	sig := reason + ": " + msg
+	if state.LastDegraded == sig {
+		return
+	}
+	state.LastDegraded = sig
+	_ = p.saveState(ctx, cm, state)
+	if p.Recorder != nil {
+		p.Recorder.Event(cluster, corev1.EventTypeWarning, reason, msg)
+	}
+}
+
+func hasExternalEntries(state *keyringState) bool {
+	for _, sk := range state.Active {
+		if sk.Entry != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // storedMinus returns entries of a not present (by hash) in b.

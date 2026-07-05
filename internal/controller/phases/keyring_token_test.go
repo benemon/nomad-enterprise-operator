@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
+	mock2 "github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +69,9 @@ func tokenFixture(t *testing.T, login VaultLoginFunc, renew VaultRenewFunc) (*Ke
 			},
 		}).Build()
 	mock := mocks.NewMockNomadAPI(t)
+	// Steady-state probes list the live keyring; healthy by default.
+	mock.EXPECT().KeyringList(mock2.Anything, mock2.Anything).
+		Return([]*nomad.RootKey{{KeyID: "k1", State: "active"}}, nil).Maybe()
 	phase := &KeyringPhase{PhaseContext: &PhaseContext{
 		Client:   c,
 		Scheme:   scheme.Scheme,
@@ -224,8 +229,23 @@ func TestKeyringTokenReviewerDenied(t *testing.T) {
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{authTransitEntry()}
 
 	result := phase.Execute(context.Background(), cluster)
-	if result.Error == nil || result.Reason != "KeyringVaultReviewerDenied" {
-		t.Fatalf("want KeyringVaultReviewerDenied, got %+v", result)
+	// Login failure is tolerated (the chain must keep flowing — a hard
+	// error here once blocked the spec update that would fix the
+	// failing entry), but the reviewer-denied diagnosis must survive
+	// into the surfaced degraded cause.
+	if result.Error != nil || result.Requeue {
+		t.Fatalf("login failure must not stop the chain, got %+v", result)
+	}
+	if phase.RevisitAfter != 30*time.Second {
+		t.Fatalf("RevisitAfter = %v, want 30s", phase.RevisitAfter)
+	}
+	cm := &corev1.ConfigMap{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: cluster.Name + "-keyring-state", Namespace: cluster.Namespace}, cm); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cm.Data["state"], "auth-delegator") && !strings.Contains(cm.Data["state"], "tokenreviews") {
+		t.Fatalf("degraded cause must carry the reviewer-denied diagnosis, state = %s", cm.Data["state"])
 	}
 }
 

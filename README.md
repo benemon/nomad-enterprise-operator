@@ -410,6 +410,15 @@ ClusterRoleBindings**; grant it per this table:
 | No reviewer JWT; Vault outside Kubernetes (or `disable_local_ca_jwt=true`) | the client's login JWT | the **cluster's** ServiceAccount — and the login JWT must be API-server-valid (vector 2, or vector 3 with API-server audience) |
 | `jwt` auth method | nobody (JWKS signature check) | nobody |
 
+The API-server-valid caveat in the last row is load-bearing: the
+operator's default `audiences` is `["vault"]` (VSO convention), and a
+`vault`-audience JWT cannot authenticate to the apiserver to perform
+its own TokenReview — login fails with `permission denied`. Against
+external Vault, either set `audiences: ["https://kubernetes.default.svc"]`
+(and the matching `audience` on the Vault role), or configure a
+`token_reviewer_jwt` on the auth method. Verified live against Vault
+Enterprise on OpenShift.
+
 A denied TokenReview surfaces on the cluster as the
 `KeyringVaultReviewerDenied` condition reason with this table's
 remediation.

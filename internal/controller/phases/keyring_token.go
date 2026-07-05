@@ -243,38 +243,41 @@ func (p *KeyringPhase) resolveCloudArgs(ctx context.Context, cluster *nomadv1alp
 // per-entry mint/renew/re-mint machinery. Returns the resolved token
 // values (rendered inline into the keyring blocks), the earliest
 // renewal revisit, and the first error.
-func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (map[string]string, time.Duration, PhaseResult) {
+func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (map[string]string, time.Duration, []string) {
 	tokens := map[string]string{}
 	var revisit time.Duration
+	// Failures are collected, never returned early: one entry's dead
+	// credential (a retiring mount, a stale token) must not block the
+	// others' resolution or the phase chain behind them.
+	var failures []string
 	for _, entry := range authEntries(entriesUnion(state)) {
 		auth := entry.Transit.Auth
 		if auth.Method == "token" {
 			secret := &corev1.Secret{}
 			if err := p.Client.Get(ctx, types.NamespacedName{
 				Name: auth.Token.SecretRef.Name, Namespace: cluster.Namespace}, secret); err != nil {
-				return tokens, 0, ErrorWithReason(err, "KeyringVaultLoginFailed",
-					fmt.Sprintf("entry %q: token Secret %q: %v", entry.Name, auth.Token.SecretRef.Name, err))
+				failures = append(failures, fmt.Sprintf("entry %q: token Secret %q: %v", entry.Name, auth.Token.SecretRef.Name, err))
+				continue
 			}
 			tok := string(secret.Data["VAULT_TOKEN"])
 			if tok == "" {
-				return tokens, 0, ErrorWithReason(
-					fmt.Errorf("secret %q has no VAULT_TOKEN key", auth.Token.SecretRef.Name),
-					"KeyringVaultLoginFailed",
-					fmt.Sprintf("entry %q: token Secret %q has no VAULT_TOKEN key", entry.Name, auth.Token.SecretRef.Name))
+				failures = append(failures, fmt.Sprintf("entry %q: token Secret %q has no VAULT_TOKEN key", entry.Name, auth.Token.SecretRef.Name))
+				continue
 			}
 			tokens[entry.Name] = tok
 			continue
 		}
 		tok, entryRevisit, result := p.ensureManagedToken(ctx, cluster, state, cm, entry)
 		if result.Error != nil {
-			return tokens, 0, result
+			failures = append(failures, fmt.Sprintf("entry %q: %s", entry.Name, result.Message))
+			continue
 		}
 		tokens[entry.Name] = tok
 		if entryRevisit > 0 && (revisit == 0 || entryRevisit < revisit) {
 			revisit = entryRevisit
 		}
 	}
-	return tokens, revisit, OK()
+	return tokens, revisit, failures
 }
 
 // ensureManagedToken runs one entry's lifecycle: mint when absent or

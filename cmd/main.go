@@ -19,9 +19,12 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -209,7 +212,8 @@ func main() {
 	// ready (AC-F4.4). No-op on clusters without Prometheus Operator CRDs.
 	operatorNamespace := namespaceFromEnv()
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if err := operatormetrics.EnsureOperatorServiceMonitor(ctx, mgr.GetClient(), operatorNamespace); err != nil {
+		sa := serviceAccountFromToken()
+		if err := operatormetrics.EnsureOperatorServiceMonitor(ctx, mgr.GetClient(), operatorNamespace, sa); err != nil {
 			setupLog.Error(err, "unable to ensure operator ServiceMonitor; continuing without it")
 		}
 		return nil
@@ -247,6 +251,34 @@ func main() {
 // downward-API POD_NAMESPACE env var with a fallback to the install-time
 // default. Used by the optional metrics-ServiceMonitor runnable so it
 // targets the operator's own service.
+// serviceAccountFromToken derives the operator's own ServiceAccount
+// name from the mounted token's subject — the deployment does not
+// inject it as env, and the scrape token Secret must name it.
+func serviceAccountFromToken() string {
+	raw, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return "nomad-enterprise-operator-controller-manager"
+	}
+	parts := strings.Split(string(raw), ".")
+	if len(parts) < 2 {
+		return "nomad-enterprise-operator-controller-manager"
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "nomad-enterprise-operator-controller-manager"
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return "nomad-enterprise-operator-controller-manager"
+	}
+	if segs := strings.Split(claims.Sub, ":"); len(segs) == 4 && segs[0] == "system" {
+		return segs[3]
+	}
+	return "nomad-enterprise-operator-controller-manager"
+}
+
 func namespaceFromEnv() string {
 	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
 		return ns
