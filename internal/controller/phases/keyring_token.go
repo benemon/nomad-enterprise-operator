@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	vaultapi "github.com/hashicorp/vault/api"
 
@@ -243,38 +244,41 @@ func (p *KeyringPhase) resolveCloudArgs(ctx context.Context, cluster *nomadv1alp
 // per-entry mint/renew/re-mint machinery. Returns the resolved token
 // values (rendered inline into the keyring blocks), the earliest
 // renewal revisit, and the first error.
-func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (map[string]string, time.Duration, PhaseResult) {
+func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (map[string]string, time.Duration, []string) {
 	tokens := map[string]string{}
 	var revisit time.Duration
+	// Failures are collected, never returned early: one entry's dead
+	// credential (a retiring mount, a stale token) must not block the
+	// others' resolution or the phase chain behind them.
+	var failures []string
 	for _, entry := range authEntries(entriesUnion(state)) {
 		auth := entry.Transit.Auth
 		if auth.Method == "token" {
 			secret := &corev1.Secret{}
 			if err := p.Client.Get(ctx, types.NamespacedName{
 				Name: auth.Token.SecretRef.Name, Namespace: cluster.Namespace}, secret); err != nil {
-				return tokens, 0, ErrorWithReason(err, "KeyringVaultLoginFailed",
-					fmt.Sprintf("entry %q: token Secret %q: %v", entry.Name, auth.Token.SecretRef.Name, err))
+				failures = append(failures, fmt.Sprintf("entry %q: token Secret %q: %v", entry.Name, auth.Token.SecretRef.Name, err))
+				continue
 			}
 			tok := string(secret.Data["VAULT_TOKEN"])
 			if tok == "" {
-				return tokens, 0, ErrorWithReason(
-					fmt.Errorf("secret %q has no VAULT_TOKEN key", auth.Token.SecretRef.Name),
-					"KeyringVaultLoginFailed",
-					fmt.Sprintf("entry %q: token Secret %q has no VAULT_TOKEN key", entry.Name, auth.Token.SecretRef.Name))
+				failures = append(failures, fmt.Sprintf("entry %q: token Secret %q has no VAULT_TOKEN key", entry.Name, auth.Token.SecretRef.Name))
+				continue
 			}
 			tokens[entry.Name] = tok
 			continue
 		}
 		tok, entryRevisit, result := p.ensureManagedToken(ctx, cluster, state, cm, entry)
 		if result.Error != nil {
-			return tokens, 0, result
+			failures = append(failures, fmt.Sprintf("entry %q: %s", entry.Name, result.Message))
+			continue
 		}
 		tokens[entry.Name] = tok
 		if entryRevisit > 0 && (revisit == 0 || entryRevisit < revisit) {
 			revisit = entryRevisit
 		}
 	}
-	return tokens, revisit, OK()
+	return tokens, revisit, failures
 }
 
 // ensureManagedToken runs one entry's lifecycle: mint when absent or
@@ -320,6 +324,7 @@ func (p *KeyringPhase) ensureManagedToken(ctx context.Context, cluster *nomadv1a
 		if meta.Renewable {
 			renewed, rerr := p.renewFunc()(ctx, cfg, current)
 			if rerr == nil {
+				metrics.KeyringTokenRenewals.WithLabelValues(cluster.Name, cluster.Namespace, entry.Name).Inc()
 				state.Tokens[entry.Name] = &tokenMeta{
 					ExpiresAt: metav1.NewTime(now.Add(renewed.LeaseDuration)),
 					Renewable: renewed.Renewable,
@@ -354,6 +359,7 @@ func (p *KeyringPhase) ensureManagedToken(ctx context.Context, cluster *nomadv1a
 		}
 		return "", 0, ErrorWithReason(lerr, reason, msg)
 	}
+	metrics.KeyringTokenMints.WithLabelValues(cluster.Name, cluster.Namespace, entry.Name).Inc()
 
 	if err := p.writeTokenStore(ctx, cluster, store, storeAbsent, entry.Name, result.Token); err != nil {
 		return "", 0, Error(err, "Failed to write managed keyring token Secret")

@@ -21,10 +21,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
+	mock2 "github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,8 +41,17 @@ import (
 // keyringFixture builds a cluster with a rolled StatefulSet and a
 // rendered config Secret whose content tracks whatever the phase renders —
 // simulating the ConfigMap/StatefulSet phases having delivered it.
-func keyringFixture(t *testing.T, mock nomad.NomadAPI) (*KeyringPhase, *nomadv1alpha1.NomadCluster, *record.FakeRecorder) {
+func keyringFixture(t *testing.T, mock *mocks.MockNomadAPI) (*KeyringPhase, *nomadv1alpha1.NomadCluster, *record.FakeRecorder, *[]*nomad.RootKey) {
 	t.Helper()
+	// One steerable KeyringList expectation for the whole test: the
+	// steady-state probe and the rotating-phase cleanup both list keys,
+	// and a fixed .Once() chain cannot serve both. Tests mutate the
+	// backing slice to steer responses.
+	keys := &[]*nomad.RootKey{{KeyID: "k1", State: "active"}}
+	mock.EXPECT().KeyringList(mock2.Anything, mock2.Anything).
+		RunAndReturn(func(context.Context, string) ([]*nomad.RootKey, error) {
+			return *keys, nil
+		}).Maybe()
 	cluster := newTestCluster("kr-ns", "kr")
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "kr", Namespace: "kr-ns"},
@@ -70,7 +81,7 @@ func keyringFixture(t *testing.T, mock nomad.NomadAPI) (*KeyringPhase, *nomadv1a
 			return mock, nil
 		},
 	}}
-	return phase, cluster, recorder
+	return phase, cluster, recorder, keys
 }
 
 // deliverConfig writes the rendered config Secret the way the config
@@ -119,7 +130,7 @@ func transitSpec(name string) nomadv1alpha1.KeyringEntry {
 // touched.
 func TestKeyringBornWithKMS(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t) // fails on ANY call
-	phase, cluster, recorder := keyringFixture(t, mock)
+	phase, cluster, recorder, _ := keyringFixture(t, mock)
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil || result.Requeue {
@@ -142,7 +153,7 @@ func TestKeyringBornWithKMS(t *testing.T) {
 // rolled+delivered, remove inactive keys, retire (aead dropped), Ready.
 func TestKeyringEnableLifecycle(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
-	phase, cluster, recorder := keyringFixture(t, mock)
+	phase, cluster, recorder, keys := keyringFixture(t, mock)
 
 	// Reconcile 1: no keyrings — establishes the implicit-aead state.
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
@@ -187,9 +198,9 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 
 	// Reconcile 3b: a rekeying key means re-encryption is in flight —
 	// wait, and crucially do NOT attempt deletion (Nomad refuses).
-	mock.EXPECT().KeyringList(context.Background(), "").Return([]*nomad.RootKey{
+	*keys = []*nomad.RootKey{
 		{KeyID: "old", State: "rekeying"}, {KeyID: "new", State: "active"},
-	}, nil).Once()
+	}
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
@@ -198,9 +209,9 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 	}
 
 	// Reconcile 4: one inactive key -> deleted; not done this pass.
-	mock.EXPECT().KeyringList(context.Background(), "").Return([]*nomad.RootKey{
+	*keys = []*nomad.RootKey{
 		{KeyID: "old", State: "inactive"}, {KeyID: "new", State: "active"},
-	}, nil).Once()
+	}
 	mock.EXPECT().KeyringDelete(context.Background(), "", "old").Return(nil).Once()
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
@@ -210,9 +221,9 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 	}
 
 	// Reconcile 5: clean list -> Retiring; aead leaves the render.
-	mock.EXPECT().KeyringList(context.Background(), "").Return([]*nomad.RootKey{
+	*keys = []*nomad.RootKey{
 		{KeyID: "new", State: "active"},
-	}, nil).Once()
+	}
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
@@ -252,7 +263,7 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 // state collapses to the implicit default (no blocks rendered).
 func TestKeyringDisableLifecycle(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
-	phase, cluster, _ := keyringFixture(t, mock)
+	phase, cluster, _, keys := keyringFixture(t, mock)
 
 	// Born with transit.
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
@@ -294,9 +305,9 @@ func TestKeyringDisableLifecycle(t *testing.T) {
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
-	mock.EXPECT().KeyringList(context.Background(), "").Return([]*nomad.RootKey{
+	*keys = []*nomad.RootKey{
 		{KeyID: "k", State: "active"},
-	}, nil).Once()
+	}
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
@@ -319,7 +330,7 @@ func TestKeyringDisableLifecycle(t *testing.T) {
 // Nomad's wrapped-key disambiguation.
 func TestKeyringMultiTransitPrefixRequired(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
-	phase, cluster, _ := keyringFixture(t, mock)
+	phase, cluster, _, _ := keyringFixture(t, mock)
 	e1 := transitSpec("a")
 	e2 := transitSpec("b")
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{e1, e2}
@@ -343,7 +354,7 @@ func TestKeyringMultiTransitPrefixRequired(t *testing.T) {
 // with a legible reason and keeps the union render (nothing is lost).
 func TestKeyringRotationDefersWhenNomadDown(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
-	phase, cluster, _ := keyringFixture(t, mock)
+	phase, cluster, recorder, _ := keyringFixture(t, mock)
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
@@ -357,10 +368,130 @@ func TestKeyringRotationDefersWhenNomadDown(t *testing.T) {
 
 	mock.EXPECT().KeyringRotateFull(context.Background(), "").Return(fmt.Errorf("connection refused")).Once()
 	result := phase.Execute(context.Background(), cluster)
-	if !result.Requeue || result.Reason != "KeyringRotationPending" {
-		t.Fatalf("want KeyringRotationPending requeue, got %+v", result)
+	// Deferral must NOT stop the phase chain: a Requeue here freezes
+	// the config Secret, deadlocking exactly when a rendered token has
+	// gone stale (neo-0m0, observed live). OK + RevisitAfter instead.
+	if result.Error != nil || result.Requeue {
+		t.Fatalf("rotation deferral must keep the chain flowing, got %+v", result)
+	}
+	if phase.RevisitAfter != 15*time.Second {
+		t.Fatalf("RevisitAfter = %v, want 15s", phase.RevisitAfter)
 	}
 	if len(phase.Keyrings) != 2 {
 		t.Fatalf("union render must survive the deferral: %+v", phase.Keyrings)
+	}
+	if cluster.Status.Keyring.Phase != "Introducing" {
+		t.Fatalf("phase = %s, want Introducing", cluster.Status.Keyring.Phase)
+	}
+	var sawPending bool
+	for {
+		select {
+		case e := <-recorder.Events:
+			if strings.Contains(e, "KeyringRotationPending") {
+				sawPending = true
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if !sawPending {
+		t.Fatal("degraded cause must surface as a KeyringRotationPending event")
+	}
+}
+
+// TestKeyringSpecChangeAbsorbedDespiteTokenFailure pins the neo-vxh
+// fix: a stale entry whose credential resolution fails must never
+// block the state update that replaces it — the failing credential
+// gated its own cure in a live migration.
+func TestKeyringSpecChangeAbsorbedDespiteTokenFailure(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, recorder, _ := keyringFixture(t, mock)
+
+	// Born with an entry whose token Secret does NOT exist.
+	broken := transitSpec("primary")
+	broken.Transit.Auth.Token.SecretRef.Name = "missing-secret"
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{broken}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil || result.Requeue {
+		t.Fatalf("credential failure must not stop the chain, got %+v", result)
+	}
+	if phase.RevisitAfter != 30*time.Second {
+		t.Fatalf("RevisitAfter = %v, want 30s", phase.RevisitAfter)
+	}
+
+	// Same-name spec change (the fix: point at the good Secret) must be
+	// absorbed in the very next reconcile, while the old entry still
+	// fails to resolve.
+	fixed := transitSpec("primary")
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{fixed}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	var tokenSeen bool
+	for _, b := range phase.Keyrings {
+		if b.Name == "primary" {
+			for _, a := range b.Args {
+				if a.Key == "token" && a.Value == "hvs.static" {
+					tokenSeen = true
+				}
+			}
+		}
+	}
+	if !tokenSeen {
+		t.Fatal("updated entry must render with the good Secret's token — spec change was not absorbed")
+	}
+	drainEvents(recorder)
+}
+
+// TestKeyringSteadyProbeDegraded pins the neo-tkx fix: a Ready state
+// machine whose Nomad-side keyring holds no keys (init failed on the
+// servers) must report Degraded, not Ready.
+func TestKeyringSteadyProbeDegraded(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, recorder, keys := keyringFixture(t, mock)
+
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if cluster.Status.Keyring.Phase != "Ready" {
+		t.Fatalf("born-with-KMS baseline = %s, want Ready", cluster.Status.Keyring.Phase)
+	}
+
+	// Nomad reports an uninitialized keyring: Ready must degrade.
+	*keys = nil
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil || result.Requeue {
+		t.Fatalf("probe failure must not stop the chain, got %+v", result)
+	}
+	if cluster.Status.Keyring.Phase != "Degraded" {
+		t.Fatalf("phase = %s, want Degraded", cluster.Status.Keyring.Phase)
+	}
+	if phase.RevisitAfter == 0 {
+		t.Fatal("degraded probe must schedule a revisit")
+	}
+	var sawEvent bool
+	for {
+		select {
+		case e := <-recorder.Events:
+			if strings.Contains(e, "KeyringNotInitialized") {
+				sawEvent = true
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if !sawEvent {
+		t.Fatal("KeyringNotInitialized must surface as a Warning event")
+	}
+
+	// Keyring recovers: Ready restored.
+	*keys = []*nomad.RootKey{{KeyID: "k2", State: "active"}}
+	phase.probeDegraded = false
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if cluster.Status.Keyring.Phase != "Ready" {
+		t.Fatalf("phase = %s, want Ready after recovery", cluster.Status.Keyring.Phase)
 	}
 }

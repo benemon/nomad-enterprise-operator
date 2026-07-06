@@ -656,8 +656,9 @@ type KeyringStatus struct {
 	// +optional
 	TokenExpiry *metav1.Time `json:"tokenExpiry,omitempty"`
 
-	// Phase is Ready, Introducing, Rotating, or Retiring.
-	// +kubebuilder:validation:Enum=Ready;Introducing;Rotating;Retiring
+	// Phase is Ready, Introducing, Rotating, Retiring, or Degraded
+	// (Ready state machine, but Nomad reports the keyring inoperable).
+	// +kubebuilder:validation:Enum=Ready;Introducing;Rotating;Retiring;Degraded
 	// +optional
 	Phase string `json:"phase,omitempty"`
 }

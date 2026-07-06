@@ -1221,12 +1221,15 @@ spec:
                       type: string
                     type: array
                   phase:
-                    description: Phase is Ready, Introducing, Rotating, or Retiring.
+                    description: |-
+                      Phase is Ready, Introducing, Rotating, Retiring, or Degraded
+                      (Ready state machine, but Nomad reports the keyring inoperable).
                     enum:
                     - Ready
                     - Introducing
                     - Rotating
                     - Retiring
+                    - Degraded
                     type: string
                   retiring:
                     description: |-

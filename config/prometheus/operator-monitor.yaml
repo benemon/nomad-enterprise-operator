@@ -17,7 +17,14 @@ spec:
     - path: /metrics
       port: https
       scheme: https
-      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      # Secret-backed authorization, never a file path: OpenShift
+      # user-workload monitoring rejects bearerTokenFile. The Secret is
+      # a service-account-token type for an identity bound to the
+      # metrics-reader ClusterRole.
+      authorization:
+        credentials:
+          name: nomad-enterprise-operator-metrics-scrape-token
+          key: token
       tlsConfig:
         insecureSkipVerify: true
   selector:

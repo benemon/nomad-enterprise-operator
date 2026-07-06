@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -37,15 +38,51 @@ var serviceMonitorGVK = schema.GroupVersionKind{
 	Kind:    "ServiceMonitor",
 }
 
+// scrapeTokenSecret is a service-account-token Secret the token
+// controller keeps populated for the operator's own ServiceAccount.
+// The ServiceMonitor references it via authorization.credentials —
+// file-path auth (bearerTokenFile) is prohibited by OpenShift
+// user-workload monitoring, which rejected the previous shape outright.
+const scrapeTokenSecret = "nomad-enterprise-operator-metrics-scrape-token"
+
+func ensureScrapeTokenSecret(ctx context.Context, c client.Client, namespace, serviceAccount string) error {
+	existing := &corev1.Secret{}
+	err := c.Get(ctx, types.NamespacedName{Name: scrapeTokenSecret, Namespace: namespace}, existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to check for scrape token Secret: %w", err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      scrapeTokenSecret,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				corev1.ServiceAccountNameKey: serviceAccount,
+			},
+		},
+		Type: corev1.SecretTypeServiceAccountToken,
+	}
+	if err := c.Create(ctx, secret); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create scrape token Secret: %w", err)
+	}
+	return nil
+}
+
 // EnsureOperatorServiceMonitor creates (or leaves in place) a
 // ServiceMonitor scraping the operator's own :8443/metrics endpoint
-// (AC-F4.4). Gated on Prometheus Operator CRD availability via the shared
+// (AC-F4.4), plus the token Secret its authorization references.
+// Gated on Prometheus Operator CRD availability via the shared
 // discovery helper — on clusters without the CRDs it is a clean no-op.
 // The static equivalent ships at config/prometheus/operator-monitor.yaml,
 // serving GitOps flows that prefer declarative installation.
-func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespace string) error {
+func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespace, serviceAccount string) error {
 	if !discovery.HasGVK(c.RESTMapper(), serviceMonitorGVK) {
 		return nil
+	}
+	if err := ensureScrapeTokenSecret(ctx, c, namespace, serviceAccount); err != nil {
+		return err
 	}
 
 	name := "nomad-enterprise-operator-metrics-monitor"
@@ -73,16 +110,30 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 		},
 		Spec: monitoringv1.ServiceMonitorSpec{
 			Endpoints: []monitoringv1.Endpoint{{
-				Path:            "/metrics",
-				Port:            "https",
-				Scheme:          &httpsScheme,
-				BearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token",
+				Path:   "/metrics",
+				Port:   "https",
+				Scheme: &httpsScheme,
+
 				// prometheus-operator/apis v0.88+ moved Endpoint.TLSConfig
 				// inside the embedded HTTPConfigWithProxyAndTLSFiles ->
 				// HTTPConfigWithTLSFiles struct. Reach it via the embed
 				// path in struct-literal form.
 				HTTPConfigWithProxyAndTLSFiles: monitoringv1.HTTPConfigWithProxyAndTLSFiles{
 					HTTPConfigWithTLSFiles: monitoringv1.HTTPConfigWithTLSFiles{
+						// Secret-backed authorization, never a file
+						// path: OpenShift user-workload monitoring
+						// rejects bearerTokenFile. The scraping
+						// identity is the operator's own SA, which the
+						// bundled metrics-reader binding authorizes
+						// through kube-rbac-proxy.
+						HTTPConfigWithoutTLS: monitoringv1.HTTPConfigWithoutTLS{
+							Authorization: &monitoringv1.SafeAuthorization{
+								Credentials: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: scrapeTokenSecret},
+									Key:                  "token",
+								},
+							},
+						},
 						TLSConfig: &monitoringv1.TLSConfig{
 							SafeTLSConfig: monitoringv1.SafeTLSConfig{
 								// The metrics endpoint serves a

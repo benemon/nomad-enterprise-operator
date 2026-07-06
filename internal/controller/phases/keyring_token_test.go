@@ -22,12 +22,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	mock2 "github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +71,9 @@ func tokenFixture(t *testing.T, login VaultLoginFunc, renew VaultRenewFunc) (*Ke
 			},
 		}).Build()
 	mock := mocks.NewMockNomadAPI(t)
+	// Steady-state probes list the live keyring; healthy by default.
+	mock.EXPECT().KeyringList(mock2.Anything, mock2.Anything).
+		Return([]*nomad.RootKey{{KeyID: "k1", State: "active"}}, nil).Maybe()
 	phase := &KeyringPhase{PhaseContext: &PhaseContext{
 		Client:   c,
 		Scheme:   scheme.Scheme,
@@ -109,11 +116,21 @@ func TestKeyringTokenMint(t *testing.T) {
 		}, nil)
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{authTransitEntry()}
 
+	mintsStart := testutil.ToFloat64(metrics.KeyringTokenMints.WithLabelValues("kt", "kt-ns", "primary"))
+	renewsStart := testutil.ToFloat64(metrics.KeyringTokenRenewals.WithLabelValues("kt", "kt-ns", "primary"))
+
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
 	if logins != 1 {
 		t.Fatalf("logins = %d, want 1", logins)
+	}
+	// Mint path bumps the mint counter once; renewals stay flat.
+	if got := testutil.ToFloat64(metrics.KeyringTokenMints.WithLabelValues("kt", "kt-ns", "primary")) - mintsStart; got != 1 {
+		t.Fatalf("mint counter delta = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(metrics.KeyringTokenRenewals.WithLabelValues("kt", "kt-ns", "primary")) - renewsStart; got != 0 {
+		t.Fatalf("renewal counter delta = %v, want 0 on mint", got)
 	}
 	secret := &corev1.Secret{}
 	if err := phase.Client.Get(context.Background(),
@@ -137,6 +154,10 @@ func TestKeyringTokenMint(t *testing.T) {
 	}
 	if logins != 1 {
 		t.Fatalf("steady-state pass logged in again (logins=%d)", logins)
+	}
+	// Flat mints in steady state is the soak's healthy-baseline invariant.
+	if got := testutil.ToFloat64(metrics.KeyringTokenMints.WithLabelValues("kt", "kt-ns", "primary")) - mintsStart; got != 1 {
+		t.Fatalf("steady-state minted again: mint counter delta = %v, want 1", got)
 	}
 	if phase.RevisitAfter <= 0 {
 		t.Fatal("steady state must keep a renewal revisit scheduled")
@@ -181,11 +202,20 @@ func TestKeyringTokenRenewAndRemint(t *testing.T) {
 	}
 	shortenExpiry()
 
+	renewsStart := testutil.ToFloat64(metrics.KeyringTokenRenewals.WithLabelValues("kt", "kt-ns", "primary"))
+	mintsStart := testutil.ToFloat64(metrics.KeyringTokenMints.WithLabelValues("kt", "kt-ns", "primary"))
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
 	if renews != 1 || logins != 1 {
 		t.Fatalf("renew path: renews=%d logins=%d, want 1/1", renews, logins)
+	}
+	// Renew path bumps renewals once; mints stay flat.
+	if got := testutil.ToFloat64(metrics.KeyringTokenRenewals.WithLabelValues("kt", "kt-ns", "primary")) - renewsStart; got != 1 {
+		t.Fatalf("renewal counter delta = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(metrics.KeyringTokenMints.WithLabelValues("kt", "kt-ns", "primary")) - mintsStart; got != 0 {
+		t.Fatalf("mint counter delta = %v, want 0 on renew", got)
 	}
 	secret := &corev1.Secret{}
 	_ = phase.Client.Get(context.Background(),
@@ -207,6 +237,10 @@ func TestKeyringTokenRenewAndRemint(t *testing.T) {
 	if logins != 2 {
 		t.Fatalf("re-mint expected after renewal failure (logins=%d)", logins)
 	}
+	// Re-mint after a failed renewal is the storm signature: mints climb.
+	if got := testutil.ToFloat64(metrics.KeyringTokenMints.WithLabelValues("kt", "kt-ns", "primary")) - mintsStart; got != 1 {
+		t.Fatalf("re-mint mint counter delta = %v, want 1", got)
+	}
 	_ = phase.Client.Get(context.Background(),
 		types.NamespacedName{Name: "kt-keyring-token", Namespace: "kt-ns"}, secret)
 	if string(secret.Data["primary"]) != "hvs.mint2" {
@@ -224,8 +258,23 @@ func TestKeyringTokenReviewerDenied(t *testing.T) {
 	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{authTransitEntry()}
 
 	result := phase.Execute(context.Background(), cluster)
-	if result.Error == nil || result.Reason != "KeyringVaultReviewerDenied" {
-		t.Fatalf("want KeyringVaultReviewerDenied, got %+v", result)
+	// Login failure is tolerated (the chain must keep flowing — a hard
+	// error here once blocked the spec update that would fix the
+	// failing entry), but the reviewer-denied diagnosis must survive
+	// into the surfaced degraded cause.
+	if result.Error != nil || result.Requeue {
+		t.Fatalf("login failure must not stop the chain, got %+v", result)
+	}
+	if phase.RevisitAfter != 30*time.Second {
+		t.Fatalf("RevisitAfter = %v, want 30s", phase.RevisitAfter)
+	}
+	cm := &corev1.ConfigMap{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: cluster.Name + "-keyring-state", Namespace: cluster.Namespace}, cm); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cm.Data["state"], "auth-delegator") && !strings.Contains(cm.Data["state"], "tokenreviews") {
+		t.Fatalf("degraded cause must carry the reviewer-denied diagnosis, state = %s", cm.Data["state"])
 	}
 }
 

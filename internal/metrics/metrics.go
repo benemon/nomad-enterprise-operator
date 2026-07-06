@@ -78,6 +78,21 @@ var (
 		Name: "nomad_operator_nomad_version_info",
 		Help: "Observed Nomad server version per cluster; value is always 1, version carried as a label.",
 	}, []string{"cluster", "namespace", "version"})
+
+	// KeyringTokenRenewals counts successful managed-token renewals per
+	// transit entry (neo-065); read as a rate against KeyringTokenMints.
+	KeyringTokenRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "nomad_operator_keyring_token_renewals_total",
+		Help: "Total successful Vault keyring-token renewals, per cluster and transit entry.",
+	}, []string{"cluster", "namespace", "entry"})
+
+	// KeyringTokenMints counts managed-token mints (fresh Vault logins)
+	// per transit entry (neo-065); a rising rate with flat renewals is
+	// the re-mint storm that signals the rc.3 render/store divergence.
+	KeyringTokenMints = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "nomad_operator_keyring_token_mints_total",
+		Help: "Total Vault keyring-token mints, per cluster and transit entry; a rising rate with flat renewals signals a re-mint storm.",
+	}, []string{"cluster", "namespace", "entry"})
 )
 
 func init() {
@@ -89,6 +104,8 @@ func init() {
 		ACLBootstrapFailures,
 		ScaleDownInProgress,
 		NomadVersionInfo,
+		KeyringTokenRenewals,
+		KeyringTokenMints,
 	)
 
 	// Seed each vec with an empty-label child so every family appears
@@ -101,4 +118,6 @@ func init() {
 	ACLBootstrapFailures.WithLabelValues("", "").Add(0)
 	ScaleDownInProgress.WithLabelValues("", "").Set(0)
 	NomadVersionInfo.WithLabelValues("", "", "").Set(0)
+	KeyringTokenRenewals.WithLabelValues("", "", "").Add(0)
+	KeyringTokenMints.WithLabelValues("", "", "").Add(0)
 }
