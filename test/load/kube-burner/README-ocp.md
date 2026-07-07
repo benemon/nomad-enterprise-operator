@@ -311,6 +311,79 @@ operator creates `<cluster>-tls`, and the nomad-load container until
 `<cluster>-acl-bootstrap` exists — both appear during cluster boot, so
 the drivers start as their cluster converges.
 
+## Ramp-to-failure: one long-lived cluster (`config-ramp.yml`)
+
+A second, independent profile (neo-1je; the fleet rig above is untouched).
+Instead of many ephemeral clusters, ONE long-lived 3-server HA cluster at
+the operand's **shipped defaults** (req 250m/512Mi, lim 2/2Gi — `resources`
+omitted) takes a stepped client+dispatch ramp until it fails
+**functionally**. The question it answers: where does a default-sized HA
+cluster actually break, and how does it degrade?
+
+Deploy the target once (prereqs as above: operator deployed, `nomad-load`
+namespace + license secret, driver images pushed):
+
+```sh
+oc apply -f ramp-cluster.yml
+oc -n nomad-load wait nomadcluster/ramp --for=jsonpath='{.status.phase}'=Running --timeout=15m
+LB=$(oc -n nomad-load get nomadcluster ramp -o jsonpath='{.status.advertiseAddress}')
+```
+
+The external Service is the CRD-default **LoadBalancer** (the lab's
+MetalLB assigns a VIP), and Nomad serves its UI on the same HTTP port —
+watch the run live at `https://$LB:4646/ui` (self-signed cert; log in with
+the `ramp-acl-bootstrap` token: `oc -n nomad-load get secret
+ramp-acl-bootstrap -o jsonpath='{.data.secret-id}' | base64 -d`).
+
+Each ramp-wave iteration adds one nodesim step (`STEP_NODES` clients) and
+one nomad-load step (`STEP_RATE` disp/s) against the fixed cluster, then
+plateaus for `STEP_DELAY` (default 5m). Load AGGREGATES: step *i* brings
+the cluster to `(i+1)·STEP_NODES` clients and `(i+1)·STEP_RATE` disp/s.
+The nomad-load instances share one deterministic parameterized job
+(`test_job_0_1`), so rates sum cleanly. The neo-0g1 profile ratio is 10
+clients : 0.5 disp/s — keep `STEP_RATE = STEP_NODES/20` for
+cross-comparison. There is no alerts profile: en-route operand OOMKills
+are expected data points, not the verdict — a 3-server cluster should
+ride out single-server kills.
+
+```sh
+STEPS=20 STEP_NODES=50 STEP_RATE=2.5 \
+  NODESIM_IMAGE=image-registry.openshift-image-registry.svc:5000/nomad-load/nomad-nodesim:<tag> \
+  NOMAD_LOAD_IMAGE=image-registry.openshift-image-registry.svc:5000/nomad-load/nomad-load:<tag> \
+  kube-burner init -c config-ramp.yml --log-level=info
+```
+
+**The failure verdict is functional, watched from outside via the LB**
+(the watcher, run alongside; timestamps + step boundaries locate the
+failure point):
+
+```sh
+TOKEN=$(oc -n nomad-load get secret ramp-acl-bootstrap -o jsonpath='{.data.secret-id}' | base64 -d)
+while true; do
+  ts=$(date -u +%FT%TZ)
+  leader=$(curl -sk --max-time 5 "https://$LB:4646/v1/status/leader" || echo UNRESPONSIVE)
+  nodes=$(curl -sk --max-time 5 -H "X-Nomad-Token: $TOKEN" "https://$LB:4646/v1/nodes" | jq 'map(select(.Status=="ready")) | length' 2>/dev/null || echo '?')
+  echo "$ts leader=$leader ready_nodes=$nodes"
+  sleep 15
+done | tee ramp-watch.log
+```
+
+Failure = leader empty/`UNRESPONSIVE` sustained across a plateau, or the
+API refusing service. Registration stalls (`ready_nodes` stops tracking
+the cumulative target) are degradation data, not the verdict. Capture
+server pod state (`oc -n nomad-load get pods -l app.kubernetes.io/instance=ramp
+-o wide`, restart counts, `lastState`) at each event — pod-level events
+are en-route data.
+
+On functional failure, abort the run (Ctrl-C kube-burner) and reap the
+step drivers by hand — the in-config delete-wave only runs on a
+survived-to-ceiling run. The cluster itself is never kube-burner's (no
+`kube-burner.io/job` label) and stays up for post-mortem either way:
+
+```sh
+oc -n nomad-load delete deploy -l kube-burner.io/job=ramp-wave
+```
+
 ## Reading a run
 
 `collected-metrics/` holds one JSON document per metrics-profile query

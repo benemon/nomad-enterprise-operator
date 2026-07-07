@@ -1,0 +1,65 @@
+# Ramp-to-failure profile (neo-1je) — a second, independent profile; the
+# fleet rig (config.yml) is untouched. One long-lived NomadCluster named
+# ramp (ramp-cluster.yml, applied manually before the run) takes a stepped
+# client+dispatch ramp: each iteration adds STEP_NODES sim clients and
+# STEP_RATE dispatches/s, paced by STEP_DELAY plateaus, until the cluster
+# fails FUNCTIONALLY (leader loss / API unresponsive — watch via the LB
+# endpoint, see README-ocp) or the STEPS ceiling. All aggregate: step i
+# brings the cluster to (i+1)*STEP_NODES clients and (i+1)*STEP_RATE
+# disp/s. nomad-load instances share one parameterized job (the name is
+# deterministic: test_job_0_1), so their rates sum cleanly.
+#
+# No alerts profile: en-route operand OOMKills are expected data points,
+# not the verdict — an HA cluster is expected to ride out single-server
+# kills. Metrics are still indexed for post-analysis.
+---
+global:
+  measurements: []
+
+metricsEndpoints:
+  - endpoint: {{ .PROMETHEUS_URL }}
+    {{- if env "PROMETHEUS_TOKEN" }}
+    token: {{ env "PROMETHEUS_TOKEN" }}
+    skipTLSVerify: true
+    {{- end }}
+    metrics: [metrics.yml]
+    indexer:
+      type: local
+      metricsDirectory: collected-metrics
+
+jobs:
+  - name: ramp-wave
+    jobType: create
+    jobIterations: {{ .STEPS }}
+    namespace: nomad-load
+    namespacedIterations: false
+    # Same cross-namespace registry constraint as the fleet rig: the
+    # preload DaemonSet cannot pull from this project; the drivers can.
+    preLoadImages: false
+    # The plateau: each step registers (~2s/client) then soaks under the
+    # accumulated load before the next step lands.
+    jobIterationDelay: {{ env "STEP_DELAY" | default "5m" }}
+    waitWhenFinished: true
+    # Ceiling hold: only reached if the cluster survives every step.
+    jobPause: {{ env "CEILING_HOLD" | default "10m" }}
+    objects:
+      - objectTemplate: templates/nodesim-ramp.yml
+        replicas: 1
+        inputVars:
+          step_nodes: {{ .STEP_NODES }}
+          nodesim_image: {{ .NODESIM_IMAGE }}
+      - objectTemplate: templates/nomad-load-ramp.yml
+        replicas: 1
+        inputVars:
+          step_rate: {{ .STEP_RATE }}
+          load_image: {{ .NOMAD_LOAD_IMAGE }}
+
+  # Reaps the step drivers only. The ramp cluster is not kube-burner's:
+  # it carries no kube-burner.io/job label and stays up for post-mortem.
+  - name: delete-wave
+    jobType: delete
+    waitWhenFinished: true
+    objects:
+      - kind: Deployment
+        apiVersion: apps/v1
+        labelSelector: {kube-burner.io/job: ramp-wave}
