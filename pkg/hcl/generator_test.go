@@ -417,9 +417,18 @@ func TestGenerator_Generate_ServerGC(t *testing.T) {
 			want     string
 			unwanted []string
 		}{
-			{"jobHistory", nomadv1alpha1.ServerGCSpec{JobHistory: "1h"}, `job_gc_threshold = "1h"`, []string{batchLine, evalLine}},
-			{"batchEvalHistory", nomadv1alpha1.ServerGCSpec{BatchEvalHistory: "2h"}, `batch_eval_gc_threshold = "2h"`, []string{jobLine, evalLine}},
-			{"evalHistory", nomadv1alpha1.ServerGCSpec{EvalHistory: "30m"}, `eval_gc_threshold = "30m"`, []string{jobLine, batchLine}},
+			{
+				name: "jobHistory", gc: nomadv1alpha1.ServerGCSpec{JobHistory: "1h"},
+				want: `job_gc_threshold = "1h"`, unwanted: []string{batchLine, evalLine},
+			},
+			{
+				name: "batchEvalHistory", gc: nomadv1alpha1.ServerGCSpec{BatchEvalHistory: "2h"},
+				want: `batch_eval_gc_threshold = "2h"`, unwanted: []string{jobLine, evalLine},
+			},
+			{
+				name: "evalHistory", gc: nomadv1alpha1.ServerGCSpec{EvalHistory: "30m"},
+				want: `eval_gc_threshold = "30m"`, unwanted: []string{jobLine, batchLine},
+			},
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {

@@ -366,6 +366,33 @@ spec:
                           default if empty)
                         type: string
                     type: object
+                  gc:
+                    description: |-
+                      GC tunes terminal job/eval/alloc history retention. Unset fields
+                      inherit Nomad's own (asymmetric) defaults.
+                    properties:
+                      batchEvalHistory:
+                        description: |-
+                          BatchEvalHistory sets the minimum time a terminal batch-job
+                          evaluation and its allocations are retained before GC (Nomad
+                          batch_eval_gc_threshold; default 24h). Dominant driver of leader
+                          working set under dispatch load. Nomad duration, e.g. "2h".
+                        pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
+                        type: string
+                      evalHistory:
+                        description: |-
+                          EvalHistory sets the minimum time a terminal non-batch evaluation
+                          and its allocations are retained before GC (Nomad
+                          eval_gc_threshold; default 1h). Nomad duration, e.g. "30m".
+                        pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
+                        type: string
+                      jobHistory:
+                        description: |-
+                          JobHistory sets the minimum time a dead job is retained before GC
+                          (Nomad job_gc_threshold; default 4h). Nomad duration, e.g. "1h".
+                        pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
+                        type: string
+                    type: object
                   keyrings:
                     description: |-
                       Keyrings configures external KMS protection for Nomad's root
