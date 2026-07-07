@@ -237,7 +237,8 @@ make undeploy
 
 Server-scoped configuration is split across the subsections below:
 [TLS](#tls-specservertls), [ACL](#acl-specserveracl),
-[Audit](#audit-specserveraudit), and
+[Audit](#audit-specserveraudit),
+[Garbage Collection](#garbage-collection-specservergc), and
 [Keyrings](#keyrings-specserverkeyrings).
 
 ### TLS (`spec.server.tls`)
@@ -273,6 +274,12 @@ Delivery guarantee (`enforced`), format (`json`), and rotation
 (`24h` × 15 files) are operator-owned. Ship logs with a
 sidecar if you need different retention.
 
+Two [audit filters](https://developer.hashicorp.com/nomad/docs/configuration/audit)
+ship by default: the `/v1/metrics` endpoint and the `OperationReceived`
+half of every `GET`. These drop high-volume, low-value events so
+enforced delivery is not gated on scrape traffic under load. The filter
+set is operator-owned and not user-configurable.
+
 Audit storage is independent of data storage: when audit is enabled the
 StatefulSet always carries a dedicated audit PVC sized per
 `server.audit.size`, even when `spec.persistence.size` is empty and
@@ -284,6 +291,24 @@ configuration.
 | `server.audit.enabled` | `bool` | `true` | Enable audit logging. Auto-creates a dedicated audit PVC (independent of `spec.persistence`); requires `server.audit.size` |
 | `server.audit.size` | `string` | `5Gi` | Audit volume size |
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
+
+### Garbage Collection (`spec.server.gc`)
+
+How long terminal job/eval/alloc history is kept before Nomad garbage
+collects it. Every field is optional; an unset field inherits Nomad's
+own default, and those defaults are asymmetric by design — batch history
+(24h) is kept far longer than disposable non-batch eval state (1h). Tune
+these down for high-churn dispatch workloads: dead batch state
+accumulates in Raft between GC runs and is the dominant driver of server
+memory growth under sustained dispatch load. Only the three history
+thresholds are exposed; node, deployment, CSI, and ACL GC keep Nomad's
+defaults. Values are Nomad durations (`s`/`m`/`h`, e.g. `30m`, `2h`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server.gc.jobHistory` | `string` | Nomad `4h` | Minimum retention of a dead job (`job_gc_threshold`) |
+| `server.gc.batchEvalHistory` | `string` | Nomad `24h` | Minimum retention of a terminal batch evaluation and its allocations (`batch_eval_gc_threshold`) |
+| `server.gc.evalHistory` | `string` | Nomad `1h` | Minimum retention of a terminal non-batch evaluation and its allocations (`eval_gc_threshold`) |
 
 ### Keyrings (`spec.server.keyrings`)
 

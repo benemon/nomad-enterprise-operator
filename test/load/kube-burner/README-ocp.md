@@ -173,23 +173,143 @@ apply here exactly as on the kind lane.
 
 The `SERVER_CPU` / `SERVER_MEMORY` knobs
 ([kind README](README.md#operand-pod-sizing-knob)) work here too, and
-this is the lane that can find the *real* floor rather than just the
-won't-boot floor: `thanos-querier` already exposes the operand
-containers' cadvisor series (working-set bytes, `OOMKilled` last-state,
-CFS-throttle ratio) that the kind lane cannot see. Step the values down
-across runs; the OOM/throttle boundary shows in those series while the
-convergence gate still catches outright won't-boot.
+this is the lane where the sweep is self-scoring: `thanos-querier`
+exposes the operand containers' cadvisor/kube-state series that the
+kind lane cannot see, `metrics.yml` collects them (working-set bytes,
+CFS-throttle ratio, OOMKilled last-state, restarts), and `alerts.yml`
+fails the run on any operand OOMKill or a sustained throttle ratio
+above 25%. Step the values down across runs; the convergence gate
+still catches outright won't-boot.
+
+Set `HOLD` to keep the converged fleet alive before the delete-wave —
+the steady-state samples come from that window (a size can pass boot
+yet OOM minutes later under GC/raft-snapshot pressure):
 
 ```sh
-OPENSHIFT=true SERVER_MEMORY=256Mi SERVER_CPU=250m ITERATIONS=25 \
+OPENSHIFT=true SERVER_MEMORY=256Mi SERVER_CPU=250m HOLD=15m ITERATIONS=25 \
   kube-burner init -c config.yml --log-level=info
 ```
 
-Note the two methodological limits from the neo-31u gap analysis: these
-waves size an **idle** server (no Nomad jobs dispatched), and a
-create→delete wave only proves the size holds at boot — a real floor
-wants a steady-state hold and real Nomad-side load. Treat a number from
-this knob alone as the idle-start floor, not the published default.
+First calibration (2026-07-07, N=10, idle single-replica servers):
+boot working set ~33Mi (drifts to ~46Mi over an 8m hold); 40Mi
+converges clean, 32Mi OOMKills 6/10. CPU throttle is boot-burst
+dominated — 55% at 50m / 42% at 75m over the wave window, but
+steady-state only 1.2% at 100m and 2.6% at 50m — so the sustained
+gate passes idle servers at every tested size; it exists for the
+load-backed sweep. Use `HOLD=10m` or more: the gate's coverage guard
+needs ~7 minutes of pod life before it can evaluate.
+
+First calibration caveat: those numbers were taken with **no Nomad
+jobs** — an idle-server floor. The load-backed floor comes from the
+next section.
+
+### Real Nomad-side load: nodesim + nomad-load
+
+The `SIM_NODES` / `LOAD_RATE` knobs put genuine scheduling pressure on
+each load cluster using HashiCorp's own bench tooling —
+[nomad-nodesim](https://github.com/hashicorp-forge/nomad-nodesim)
+(simulated client fleets, the instrument behind nomad-bench) and
+[nomad-bench](https://github.com/hashicorp-forge/nomad-bench)'s
+`tools/nomad-load` (job register/dispatch pressure). Each knob adds a
+per-cluster Deployment to the create-wave; the delete-wave reaps them
+by the same `kube-burner.io/job` label. Unset knobs render nothing —
+the run is byte-identical to a no-load one.
+
+- `SIM_NODES=<n>` — one nodesim pod per cluster registers *n* simulated
+  clients over RPC mTLS. It mounts the operator-issued `<cluster>-tls`
+  Secret and presents its cert (the EKU covers `clientAuth`), so no new
+  cert machinery. The simulated clients ship the `mock` driver, so
+  dispatched jobs actually place and "run".
+- `LOAD_RATE=<r>` — one nomad-load pod per cluster registers a
+  parameterized mock batch job and dispatches it at *r*/s over HTTPS,
+  authenticating with the CA plus the `<cluster>-acl-bootstrap` token.
+  Each dispatch is an eval + alloc on a simulated node (`run_for: 10s`),
+  so steady state carries ~10·*r* live allocations of state per cluster.
+- `NODESIM_IMAGE` / `NOMAD_LOAD_IMAGE` — required once the matching
+  knob is set (the config render fails loud if missing).
+- `LOAD_LADDER=true` — the scale sweep. Cluster *i* carries `(i+1) ×`
+  the base `SIM_NODES`/`LOAD_RATE`, so one run yields a full
+  scale-response row for the resource profile under test: the per-pod
+  operand series (`load-<i>-0` = rung *i+1*) read out as "this profile
+  sustains rung *k*, fails at rung *k+1*". Stepping
+  `SERVER_MEMORY`/`SERVER_CPU` down across ladder runs fills the
+  profile-vs-scale matrix — workload scale is the third sizing vector
+  alongside memory and CPU. In ladder runs the operand gates firing at
+  the upper rungs is the *expected readout*, not a rig failure; uniform
+  runs (no ladder) are the regression-gate mode for a chosen
+  profile-and-scale pair once the knee is known.
+
+The forge repos publish **no official images**; build and push to the
+internal registry (upstream Dockerfiles as-is, pin the tag to the
+upstream commit):
+
+```sh
+git clone https://github.com/hashicorp-forge/nomad-nodesim
+git clone https://github.com/hashicorp-forge/nomad-bench
+REG=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+oc registry login --registry="$REG"
+oc get namespace nomad-load || oc create namespace nomad-load  # registry rejects pushes to a nonexistent project
+# Pre-create the imagestreams: without them the registry answers the
+# push's manifest existence-check with 500 (not 404) and docker aborts.
+oc create imagestream nomad-nodesim -n nomad-load
+oc create imagestream nomad-load -n nomad-load
+docker buildx build --platform linux/amd64 --push \
+  -t "$REG/nomad-load/nomad-nodesim:$(git -C nomad-nodesim rev-parse --short HEAD)" nomad-nodesim/
+docker buildx build --platform linux/amd64 --push \
+  -t "$REG/nomad-load/nomad-load:$(git -C nomad-bench rev-parse --short HEAD)" nomad-bench/tools/nomad-load/
+```
+
+Run with the pods pulling via the in-cluster registry service — a
+ladder run sweeping rungs 10→100 sim nodes / 0.5→5 dispatches/s
+against one profile:
+
+```sh
+OPENSHIFT=true ITERATIONS=10 LOAD_LADDER=true \
+  SIM_NODES=10 NODESIM_IMAGE=image-registry.openshift-image-registry.svc:5000/nomad-load/nomad-nodesim:<tag> \
+  LOAD_RATE=0.5 NOMAD_LOAD_IMAGE=image-registry.openshift-image-registry.svc:5000/nomad-load/nomad-load:<tag> \
+  SERVER_MEMORY=128Mi SERVER_CPU=250m HOLD=8m MAX_WAIT=10m \
+  kube-burner init -c config.yml --log-level=info
+```
+
+`MAX_WAIT` trims the convergence timeout on runs where upper rungs are
+expected to fail — the OOM/throttle verdicts land in the metrics
+either way, so there is no point waiting out the full 20m gate window.
+Rung registration pace is ~2s per simulated client (a 100-node rung
+takes ~3½ minutes to fully populate), so keep `HOLD` ≥ 8m for a
+steady-state window at the top rungs.
+
+Reading ladder runs: capture live pod state (restart counts,
+`lastState: OOMKilled`) **before the delete-wave** — it is the
+authoritative verdict. The indexed metrics corroborate, but filter by
+the run's UUID (`collected-metrics/*.json` docs are appended across
+runs and tagged), and know that back-to-back runs reuse pod names, so
+a run's early Prometheus window can carry the previous run's dying
+samples (observed live: a ladder run's OOM alert fired at window start
+on ghosts from the prior run). Leave a gap between runs when alert
+exit codes must be clean.
+
+First load-backed calibration (2026-07-07, ladder runs at 250m CPU,
+HOLD=8m, rung = 10·i nodes / 0.5·i disp/s): **128Mi sustains rung 3**
+(30 nodes / 1.5 disp/s; rungs 4+ OOM), **256Mi sustains rung 6**
+(60 nodes / 3 disp/s, marginal; rungs 7+ OOM); working set grows
+roughly linearly with rung (90→255Mi across the 256Mi ladder) and
+grows through the hold — dead dispatch jobs accumulate until Nomad's
+job GC (default threshold 4h), so verdicts are hold-relative and
+conservative. CPU: momentary boot/restart throttle bursts up to 90%
+at top rungs, but the sustained gate never fired — memory fails first
+at 250m. Uniform control (50 nodes / 2 disp/s at 128Mi): all 10
+replicas OOMKilled ~6m into the hold. Consequence: the operator's
+shipped defaults (512Mi request / 2Gi limit) are sane under real load;
+do not publish the idle floor as sizing guidance.
+
+Spot-check that the simulation is real: `nomad node status` inside any
+server pod must count exactly `SIM_NODES` ready clients, and `nomad job
+status` shows the dispatched batch children churning.
+
+Sequencing is free: the kubelet blocks the nodesim pod until the
+operator creates `<cluster>-tls`, and the nomad-load container until
+`<cluster>-acl-bootstrap` exists — both appear during cluster boot, so
+the drivers start as their cluster converges.
 
 ## Reading a run
 

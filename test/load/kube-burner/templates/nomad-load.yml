@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-{{ .Iteration }}-nomad-load
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-{{ .Iteration }}-nomad-load
+  template:
+    metadata:
+      labels:
+        app: load-{{ .Iteration }}-nomad-load
+    spec:
+      containers:
+        - name: nomad-load
+          image: "{{ .load_image }}"
+          command: ["/bin/nomad-load"]
+          args:
+            # FQDN, not the bare service name: HTTPS verification matches
+            # the cert SAN <cluster>-internal.<ns>.svc. The namespace must
+            # match the job namespace in config.yml.
+            - -nomad-addr=https://load-{{ .Iteration }}-internal.nomad-load.svc:4646
+            # Ladder mode: same (i+1) scaling as nodesim's node-num, so
+            # node count and dispatch pressure climb the rungs together.
+            - -rate={{ if .load_ladder }}{{ mulf .load_rate (add .Iteration 1) }}{{ else }}{{ .load_rate }}{{ end }}
+            # Fixed worker pool: the rate limiter is shared, so workers set
+            # parallelism only; the default (10 x host cores) is sized for
+            # bare-metal bench hosts, not a pod.
+            - -workers=10
+            - -log-level=INFO
+          env:
+            # The Nomad Go SDK reads both natively (api.DefaultConfig).
+            # secretKeyRef blocks the container until ACL bootstrap has
+            # produced the token Secret — free sequencing.
+            - name: NOMAD_CACERT
+              value: /etc/nomad-tls/ca.crt
+            - name: NOMAD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: load-{{ .Iteration }}-acl-bootstrap
+                  key: secret-id
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/nomad-tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: load-{{ .Iteration }}-tls

@@ -4,7 +4,13 @@
 # unset knobs give the kind lane; the OpenShift lane (README-ocp.md)
 # sets PROMETHEUS_TOKEN (thanos-querier bearer auth) and OPENSHIFT=true.
 # SERVER_CPU/SERVER_MEMORY size the operand server pods for the floor
-# sweep (unset => operator defaults).
+# sweep (unset => operator defaults); HOLD keeps the converged fleet
+# alive before the delete-wave so steady-state operand series exist
+# (unset => no hold, waves back-to-back as before).
+{{- /* SIM_NODES/LOAD_RATE add per-cluster real-load drivers (nodesim
+client fleets, nomad-load job dispatch) — see the READMEs; unset => no
+driver objects rendered, keeping the render identical to a no-load run
+(template comment so unset-knob output is byte-identical to before). */}}
 ---
 global:
   # podLatency deliberately not enabled: it tracks pods created by the
@@ -39,8 +45,23 @@ jobs:
     namespacedIterations: false
     # Convergence gate: every NomadCluster must reach phase=Running
     # or the wait times out and the run fails (gate 1).
+    {{- /* MAX_WAIT trims the timeout for sweep runs at expected-fail
+    sizes, so the verdict (OOM/throttle series + gates) lands without
+    waiting out the full gate window. */}}
     waitWhenFinished: true
-    maxWaitTimeout: 20m
+    maxWaitTimeout: {{ env "MAX_WAIT" | default "20m" }}
+    {{- if or (env "SIM_NODES") (env "LOAD_RATE") }}
+    # No image pre-load: the driver images live in the job namespace's
+    # internal-registry project, which the preload DaemonSet's own
+    # namespace is not authorized to pull from (proven live: preload
+    # pods ImagePullBackOff cross-namespace). The drivers pull in-
+    # namespace, where the default SA is authorized.
+    preLoadImages: false
+    {{- end }}
+    # Steady-state hold: the pause runs before the job is marked
+    # finished, so the held fleet stays inside the create-wave
+    # metrics/alerts window (operand OOM/throttle gates see it).
+    jobPause: {{ env "HOLD" | default "0s" }}
     objects:
       - objectTemplate: templates/nomadcluster.yml
         replicas: 1
@@ -60,11 +81,44 @@ jobs:
           customStatusPaths:
             - key: '(.phase)'
               value: Running
+      {{- if env "SIM_NODES" }}
+      # Real-load drivers (neo-0g1): HashiCorp's own bench tooling as a
+      # per-cluster fleet — nodesim registers SIM_NODES simulated clients
+      # over RPC mTLS, nomad-load dispatches mock batch jobs at LOAD_RATE
+      # per second. Each knob gates its object: unset => not rendered =>
+      # the run is byte-identical to a no-load one. The image refs are
+      # dot-form deliberately: required (fail-loud) once the knob is set.
+      - objectTemplate: templates/nodesim.yml
+        replicas: 1
+        inputVars:
+          sim_nodes: {{ env "SIM_NODES" }}
+          nodesim_image: {{ .NODESIM_IMAGE }}
+          # LOAD_LADDER=true turns the fleet into a scale sweep: cluster i
+          # gets (i+1) x the base SIM_NODES/LOAD_RATE, so one run yields a
+          # scale-response row for the resource profile under test. Expect
+          # the operand gates to fire at the failing rungs — the per-pod
+          # series are the readout, not the run's exit code.
+          load_ladder: {{ env "LOAD_LADDER" | default "false" }}
+      {{- end }}
+      {{- if env "LOAD_RATE" }}
+      - objectTemplate: templates/nomad-load.yml
+        replicas: 1
+        inputVars:
+          load_rate: {{ env "LOAD_RATE" }}
+          load_image: {{ .NOMAD_LOAD_IMAGE }}
+          load_ladder: {{ env "LOAD_LADDER" | default "false" }}
+      {{- end }}
 
   - name: delete-wave
     jobType: delete
     waitWhenFinished: true
     objects:
+      {{- if or (env "SIM_NODES") (env "LOAD_RATE") }}
+      # Reap the load drivers before their target clusters vanish.
+      - kind: Deployment
+        apiVersion: apps/v1
+        labelSelector: {kube-burner.io/job: create-wave}
+      {{- end }}
       - kind: NomadCluster
         apiVersion: nomad.hashicorp.com/v1alpha1
         labelSelector: {kube-burner.io/job: create-wave}

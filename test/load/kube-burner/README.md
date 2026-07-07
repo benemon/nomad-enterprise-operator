@@ -86,13 +86,27 @@ unset fields per-field.
 This is the operand floor sweep: step the values **down** across runs
 and the convergence gate (every server must reach `phase=Running`
 inside `maxWaitTimeout`) catches the **won't-boot floor** for free — no
-extra instrumentation. The narrower OOM-vs-throttle floor needs
-operand-container metrics (cadvisor/OOMKill/CFS-throttle series) the
-kind lane does not collect; that is the OCP lane's thanos source, see
-[README-ocp.md](README-ocp.md).
+extra instrumentation. The narrower OOM-vs-throttle floor uses the
+operand-side series in `metrics.yml` and the OOMKilled / CFS-throttle
+gates in `alerts.yml` — those need cadvisor/kube-state sources the kind
+lane's bundled Prometheus does not scrape, so they only bite on the OCP
+lane ([README-ocp.md](README-ocp.md)); on kind they return empty and
+never fire.
+
+`HOLD` keeps the converged fleet alive for a duration before the
+delete-wave (`jobPause`, inside the create-wave measurement window), so
+steady-state operand samples exist — without it the pods live seconds
+and a size can pass at boot yet fail minutes later.
+
+`SIM_NODES` / `LOAD_RATE` add per-cluster load drivers (simulated
+client fleets + job-dispatch pressure) so the sweep sizes a *working*
+server rather than an idle one. They need purpose-built images, so they
+are documented with the OCP lane
+([README-ocp.md](README-ocp.md#real-nomad-side-load-nodesim--nomad-load));
+unset, they render nothing and this lane is untouched.
 
 ```sh
-SERVER_MEMORY=256Mi SERVER_CPU=250m ITERATIONS=10 kube-burner init -c config.yml
+SERVER_MEMORY=256Mi SERVER_CPU=250m HOLD=10m ITERATIONS=10 kube-burner init -c config.yml
 ```
 
 ## Measurements
