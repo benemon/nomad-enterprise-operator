@@ -18,8 +18,11 @@ metricsEndpoints:
     # OpenShift queries UWM's thanos-querier over TLS with a bearer
     # token; kind's port-forwarded Prometheus needs neither. Both fields
     # stay absent when PROMETHEUS_TOKEN is unset (the kind lane).
-    {{- if .PROMETHEUS_TOKEN }}
-    token: {{ .PROMETHEUS_TOKEN }}
+    # Optional knobs MUST use the sprig env function: config rendering
+    # is missingkey=error, so dot-notation on an unset var kills the
+    # run (proven live on both lanes, 2026-07-07).
+    {{- if env "PROMETHEUS_TOKEN" }}
+    token: {{ env "PROMETHEUS_TOKEN" }}
     skipTLSVerify: true
     {{- end }}
     metrics: [metrics.yml]
@@ -45,11 +48,11 @@ jobs:
         # rejects, letting the SCC assign the namespace range. default
         # keeps the kind lane (fixed UID) when unset.
         inputVars:
-          openshift: {{ .OPENSHIFT | default "false" }}
+          openshift: {{ env "OPENSHIFT" | default "false" }}
           # Operand pod sizing (neo-31u floor sweep). Empty => operator
           # defaults; set to bisect the server pods' request/limit floor.
-          server_cpu: {{ .SERVER_CPU | default "" }}
-          server_memory: {{ .SERVER_MEMORY | default "" }}
+          server_cpu: {{ env "SERVER_CPU" }}
+          server_memory: {{ env "SERVER_MEMORY" }}
         waitOptions:
           # The jq key is evaluated against the object's .status map
           # (kube-burner waiters.go: NestedMap(item, "status")), so the
