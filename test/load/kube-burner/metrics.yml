@@ -6,9 +6,13 @@
   metricName: operatorQueueLatencyAvg
 - query: controller_runtime_reconcile_total{controller="nomadcluster"}
   metricName: operatorReconcileTotal
-- query: process_resident_memory_bytes{job=~".*controller-manager.*"}
+# RSS/CPU are namespace-scoped: on OCP, thanos-querier also sees the
+# platform's kube-/openshift-controller-manager, which match the job
+# regex. The namespace label comes from ServiceMonitor discovery on
+# both lanes.
+- query: process_resident_memory_bytes{job=~".*controller-manager.*", namespace="nomad-enterprise-operator-system"}
   metricName: operatorRSS
-- query: rate(process_cpu_seconds_total{job=~".*controller-manager.*"}[2m])
+- query: rate(process_cpu_seconds_total{job=~".*controller-manager.*", namespace="nomad-enterprise-operator-system"}[2m])
   metricName: operatorCPURate
 - query: nomad_operator_nomad_api_requests_total
   metricName: operatorNomadAPIRequests
