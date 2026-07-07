@@ -109,6 +109,24 @@ unset, they render nothing and this lane is untouched.
 SERVER_MEMORY=256Mi SERVER_CPU=250m HOLD=10m ITERATIONS=10 kube-burner init -c config.yml
 ```
 
+### Operand GC-retention knob
+
+`JOB_GC`, `BATCH_EVAL_GC`, and `EVAL_GC` set `spec.server.gc`
+(`jobHistory` / `batchEvalHistory` / `evalHistory`) — how long terminal
+job/eval/alloc history is kept before Nomad garbage-collects it. Each is
+a Nomad duration (`30m`, `2h`); unset omits the field and Nomad's own
+defaults apply (job 4h / batch-eval 24h / eval 1h). Requires an operator
+that carries the `spec.server.gc` fields (v0.2.1-rc.6+).
+
+The neo-1je ramp-to-failure runs showed the leader's memory floor is
+driven by un-GC'd **batch** dispatch state accumulating in Raft between
+GC runs. `BATCH_EVAL_GC` is the lever for that: lower it and re-run the
+sweep to measure how far the OOM/failure point moves.
+
+```sh
+SERVER_MEMORY=256Mi BATCH_EVAL_GC=30m HOLD=10m ITERATIONS=10 kube-burner init -c config.yml
+```
+
 ## Measurements
 
 Doc: [measurements](https://kube-burner.github.io/kube-burner/latest/measurements/)

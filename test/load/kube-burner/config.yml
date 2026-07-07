@@ -74,6 +74,12 @@ jobs:
           # defaults; set to bisect the server pods' request/limit floor.
           server_cpu: {{ env "SERVER_CPU" }}
           server_memory: {{ env "SERVER_MEMORY" }}
+          # Operand GC retention (neo-dgf). Empty => Nomad defaults;
+          # set to reclaim dead job/eval/alloc state sooner (dominant
+          # driver of leader memory under dispatch load — see neo-1je).
+          job_gc: {{ env "JOB_GC" }}
+          batch_eval_gc: {{ env "BATCH_EVAL_GC" }}
+          eval_gc: {{ env "EVAL_GC" }}
         waitOptions:
           # The jq key is evaluated against the object's .status map
           # (kube-burner waiters.go: NestedMap(item, "status")), so the

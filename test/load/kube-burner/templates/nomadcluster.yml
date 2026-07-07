@@ -38,3 +38,19 @@ spec:
       memory: "{{ .server_memory }}"
       {{- end }}
   {{- end }}
+  # Operand GC retention (neo-dgf levers). Unset => operator/Nomad
+  # defaults (job 4h / batch-eval 24h / eval 1h); set to reclaim dead
+  # job/eval/alloc state sooner and probe its effect on the memory floor.
+  {{- if or .job_gc .batch_eval_gc .eval_gc }}
+  server:
+    gc:
+      {{- if .job_gc }}
+      jobHistory: "{{ .job_gc }}"
+      {{- end }}
+      {{- if .batch_eval_gc }}
+      batchEvalHistory: "{{ .batch_eval_gc }}"
+      {{- end }}
+      {{- if .eval_gc }}
+      evalHistory: "{{ .eval_gc }}"
+      {{- end }}
+  {{- end }}

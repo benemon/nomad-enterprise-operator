@@ -335,6 +335,18 @@ watch the run live at `https://$LB:4646/ui` (self-signed cert; log in with
 the `ramp-acl-bootstrap` token: `oc -n nomad-load get secret
 ramp-acl-bootstrap -o jsonpath='{.data.secret-id}' | base64 -d`).
 
+`ramp-cluster.yml` runs at the operator's shipped defaults — the
+baseline neo-1je measured. For a **GC-tuning variant** (does reclaiming
+dead batch state sooner move the failure point?), add `spec.server.gc`
+before applying and re-run the ramp against a v0.2.1-rc.6+ operator:
+
+```yaml
+spec:
+  server:
+    gc:
+      batchEvalHistory: 30m   # vs the Nomad default 24h
+```
+
 Each ramp-wave iteration adds one nodesim step (`STEP_NODES` clients) and
 one nomad-load step (`STEP_RATE` disp/s) against the fixed cluster, then
 plateaus for `STEP_DELAY` (default 5m). Load AGGREGATES: step *i* brings
