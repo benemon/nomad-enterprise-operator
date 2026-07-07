@@ -1,6 +1,8 @@
 # Fleet-scale operator load test (neo-31u) — kube-burner edition.
 # The operator is the measurement target; NomadClusters are the load.
-# Tier size comes from the ITERATIONS env var.
+# Tier size comes from the ITERATIONS env var. Substrate is env-driven:
+# unset knobs give the kind lane; the OpenShift lane (README-ocp.md)
+# sets PROMETHEUS_TOKEN (thanos-querier bearer auth) and OPENSHIFT=true.
 ---
 global:
   # podLatency deliberately not enabled: it tracks pods created by the
@@ -11,6 +13,13 @@ global:
 
 metricsEndpoints:
   - endpoint: {{ .PROMETHEUS_URL }}
+    # OpenShift queries UWM's thanos-querier over TLS with a bearer
+    # token; kind's port-forwarded Prometheus needs neither. Both fields
+    # stay absent when PROMETHEUS_TOKEN is unset (the kind lane).
+    {{- if .PROMETHEUS_TOKEN }}
+    token: {{ .PROMETHEUS_TOKEN }}
+    skipTLSVerify: true
+    {{- end }}
     metrics: [metrics.yml]
     alerts: [alerts.yml]
     indexer:
@@ -30,6 +39,11 @@ jobs:
     objects:
       - objectTemplate: templates/nomadcluster.yml
         replicas: 1
+        # OPENSHIFT=true drops the fixed 65532 UID that restricted-v2
+        # rejects, letting the SCC assign the namespace range. default
+        # keeps the kind lane (fixed UID) when unset.
+        inputVars:
+          openshift: {{ .OPENSHIFT | default "false" }}
         waitOptions:
           # The jq key is evaluated against the object's .status map
           # (kube-burner waiters.go: NestedMap(item, "status")), so the

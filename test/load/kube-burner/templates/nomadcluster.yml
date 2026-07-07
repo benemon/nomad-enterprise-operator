@@ -11,3 +11,8 @@ spec:
   services:
     external:
       type: NodePort
+  # SCC-compatible pods on OpenShift (no Route: route.enabled stays
+  # false, so NodePort remains the external service). The kind lane
+  # passes false and keeps the fixed non-root UID.
+  openshift:
+    enabled: {{ .openshift }}

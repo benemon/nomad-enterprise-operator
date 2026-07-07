@@ -13,6 +13,11 @@ Run it via the **Load Test** GitHub Actions workflow (manual dispatch,
 one-replica clusters — the ceiling was established empirically, with
 the operator's queue depth at zero while the host starved.
 
+To run this same rig against a real OpenShift cluster for larger tiers
+and to exercise SCCs + User Workload Monitoring, see
+[README-ocp.md](README-ocp.md). This file documents the kind lane; the
+config is env-driven and shared between both.
+
 ## How a run works
 
 `kube-burner init -c config.yml` executes the *jobs* in `config.yml`
