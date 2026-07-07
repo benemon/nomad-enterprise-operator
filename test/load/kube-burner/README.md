@@ -73,6 +73,28 @@ rather than PVC churn; `NodePort` avoids the LoadBalancer-IP wait that
 never resolves on kind. The license Secret is pre-created by the
 workflow (the operator retries cleanly until it exists).
 
+### Operand pod-sizing knob
+
+`SERVER_CPU` and `SERVER_MEMORY` set the Nomad **server** pods'
+`spec.resources` — request and limit together, so each squeezed
+resource is Guaranteed QoS and its OOM/throttle boundary *is* the value
+under test. Unset (the default, and the whole GHA lane) omits the field
+and the operator supplies its own default (requests 250m/512Mi, limits
+2/2Gi); either knob may be set alone, since the operator fills the
+unset fields per-field.
+
+This is the operand floor sweep: step the values **down** across runs
+and the convergence gate (every server must reach `phase=Running`
+inside `maxWaitTimeout`) catches the **won't-boot floor** for free — no
+extra instrumentation. The narrower OOM-vs-throttle floor needs
+operand-container metrics (cadvisor/OOMKill/CFS-throttle series) the
+kind lane does not collect; that is the OCP lane's thanos source, see
+[README-ocp.md](README-ocp.md).
+
+```sh
+SERVER_MEMORY=256Mi SERVER_CPU=250m ITERATIONS=10 kube-burner init -c config.yml
+```
+
 ## Measurements
 
 Doc: [measurements](https://kube-burner.github.io/kube-burner/latest/measurements/)

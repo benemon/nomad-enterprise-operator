@@ -16,3 +16,25 @@ spec:
   # passes false and keeps the fixed non-root UID.
   openshift:
     enabled: {{ .openshift }}
+  # Operand pod-sizing knob (neo-31u floor sweep). Unset => block omitted,
+  # so servers inherit the operator defaults (req 250m/512Mi, lim 2/2Gi).
+  # SERVER_CPU/SERVER_MEMORY set request==limit (Guaranteed QoS) so the
+  # OOM/throttle boundary is the value under test; either may be set alone
+  # (the operator fills the unset fields from its per-field defaults).
+  {{- if or .server_cpu .server_memory }}
+  resources:
+    requests:
+      {{- if .server_cpu }}
+      cpu: "{{ .server_cpu }}"
+      {{- end }}
+      {{- if .server_memory }}
+      memory: "{{ .server_memory }}"
+      {{- end }}
+    limits:
+      {{- if .server_cpu }}
+      cpu: "{{ .server_cpu }}"
+      {{- end }}
+      {{- if .server_memory }}
+      memory: "{{ .server_memory }}"
+      {{- end }}
+  {{- end }}

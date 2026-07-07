@@ -3,6 +3,8 @@
 # Tier size comes from the ITERATIONS env var. Substrate is env-driven:
 # unset knobs give the kind lane; the OpenShift lane (README-ocp.md)
 # sets PROMETHEUS_TOKEN (thanos-querier bearer auth) and OPENSHIFT=true.
+# SERVER_CPU/SERVER_MEMORY size the operand server pods for the floor
+# sweep (unset => operator defaults).
 ---
 global:
   # podLatency deliberately not enabled: it tracks pods created by the
@@ -44,6 +46,10 @@ jobs:
         # keeps the kind lane (fixed UID) when unset.
         inputVars:
           openshift: {{ .OPENSHIFT | default "false" }}
+          # Operand pod sizing (neo-31u floor sweep). Empty => operator
+          # defaults; set to bisect the server pods' request/limit floor.
+          server_cpu: {{ .SERVER_CPU | default "" }}
+          server_memory: {{ .SERVER_MEMORY | default "" }}
         waitOptions:
           # The jq key is evaluated against the object's .status map
           # (kube-burner waiters.go: NestedMap(item, "status")), so the

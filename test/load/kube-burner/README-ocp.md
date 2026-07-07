@@ -99,9 +99,12 @@ make docker-buildx IMG=$IMG PLATFORMS=linux/amd64   # cross-build for amd64 node
 ```
 
 Or the cluster's internal registry (pods then pull via the internal
-service name):
+service name). The target namespace must exist *before* the push — the
+registry rejects pushes to a nonexistent project (`make deploy` only
+creates it in step 3):
 
 ```sh
+oc create namespace nomad-enterprise-operator-system
 oc patch configs.imageregistry.operator.openshift.io/cluster --type merge \
   -p '{"spec":{"defaultRoute":true}}'
 REG=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
@@ -165,6 +168,28 @@ OPENSHIFT=true ITERATIONS=25 kube-burner init -c config.yml --log-level=info
 Convergence gate 1 (every NomadCluster reaches `phase=Running` inside
 `maxWaitTimeout`, else the run fails) and the workqueue-depth alert
 apply here exactly as on the kind lane.
+
+### Operand pod-sizing sweep
+
+The `SERVER_CPU` / `SERVER_MEMORY` knobs
+([kind README](README.md#operand-pod-sizing-knob)) work here too, and
+this is the lane that can find the *real* floor rather than just the
+won't-boot floor: `thanos-querier` already exposes the operand
+containers' cadvisor series (working-set bytes, `OOMKilled` last-state,
+CFS-throttle ratio) that the kind lane cannot see. Step the values down
+across runs; the OOM/throttle boundary shows in those series while the
+convergence gate still catches outright won't-boot.
+
+```sh
+OPENSHIFT=true SERVER_MEMORY=256Mi SERVER_CPU=250m ITERATIONS=25 \
+  kube-burner init -c config.yml --log-level=info
+```
+
+Note the two methodological limits from the neo-31u gap analysis: these
+waves size an **idle** server (no Nomad jobs dispatched), and a
+create→delete wave only proves the size holds at boot — a real floor
+wants a steady-state hold and real Nomad-side load. Treat a number from
+this knob alone as the idle-start floor, not the published default.
 
 ## Reading a run
 
