@@ -64,11 +64,18 @@ func (p *ServicesPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Noma
 }
 
 func (p *ServicesPhase) ensureHeadlessService(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	// Marker scopes the ServiceMonitor to this service alone: all three
+	// services carry identical labels, and matching them all scrapes
+	// each pod once per service. Headless is the scrape target because
+	// publishNotReadyAddresses keeps telemetry flowing while leaderless
+	// pods are unready (neo-q1d).
+	labels := GetLabels(cluster)
+	labels["nomad.hashicorp.com/metrics"] = "true"
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name + "-headless",
 			Namespace: cluster.Namespace,
-			Labels:    GetLabels(cluster),
+			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Type:                     corev1.ServiceTypeClusterIP,

@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 
@@ -136,12 +137,15 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 					{Name: "rpc", ContainerPort: 4647, Protocol: corev1.ProtocolTCP},
 					{Name: "serf", ContainerPort: 4648, Protocol: corev1.ProtocolTCP},
 				},
+				// Liveness must be leader-INDEPENDENT (neo-pl4):
+				// /v1/agent/health returns 500 without a cluster leader,
+				// so an HTTP liveness check kills healthy followers
+				// mid-election and turns one OOM into a quorum-loss
+				// cascade. TCP asserts only that the agent is alive.
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path:   "/v1/agent/health",
-							Port:   intstr.FromInt(4646),
-							Scheme: corev1.URISchemeHTTPS,
+						TCPSocket: &corev1.TCPSocketAction{
+							Port: intstr.FromInt(4646),
 						},
 					},
 					InitialDelaySeconds: 30,
@@ -527,6 +531,14 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 			return true, fmt.Sprintf("image %q -> %q",
 				existing.Spec.Template.Spec.Containers[0].Image,
 				desired.Spec.Template.Spec.Containers[0].Image)
+		}
+		// Handler-only comparison: numeric probe fields get
+		// API-server defaults, so a full DeepEqual would roll forever.
+		existingLiveness := existing.Spec.Template.Spec.Containers[0].LivenessProbe
+		desiredLiveness := desired.Spec.Template.Spec.Containers[0].LivenessProbe
+		if (existingLiveness == nil) != (desiredLiveness == nil) ||
+			(existingLiveness != nil && !reflect.DeepEqual(existingLiveness.ProbeHandler, desiredLiveness.ProbeHandler)) {
+			return true, "liveness probe handler"
 		}
 	}
 

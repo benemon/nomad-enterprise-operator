@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -64,6 +65,71 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	if checksumThree != checksumOne {
 		t.Errorf("checksum/config drifted across replica counts: %q (N=3) vs %q (N=1) — scale operations must not trigger pod restarts (AC-2.3.4f)",
 			checksumThree, checksumOne)
+	}
+}
+
+// Liveness must be leader-independent (neo-pl4): /v1/agent/health
+// 500s during a leaderless window, so an HTTP liveness check kills
+// healthy followers mid-election and cascades one OOM into quorum
+// loss. Readiness keeps the leader-gated endpoint.
+func TestServerProbes(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	sts := phase.buildStatefulSet(context.Background(), newTestCluster("ns", "probes"))
+	c := sts.Spec.Template.Spec.Containers[0]
+
+	live := c.LivenessProbe
+	if live == nil || live.TCPSocket == nil || live.TCPSocket.Port.IntValue() != 4646 {
+		t.Fatalf("liveness must be a TCP check on 4646, got %+v", live)
+	}
+	if live.HTTPGet != nil {
+		t.Fatal("liveness must not use the leader-dependent HTTP health endpoint")
+	}
+
+	ready := c.ReadinessProbe
+	if ready == nil || ready.HTTPGet == nil {
+		t.Fatalf("readiness must be an HTTP check, got %+v", ready)
+	}
+	if ready.HTTPGet.Path != "/v1/agent/health" || ready.HTTPGet.Scheme != corev1.URISchemeHTTPS {
+		t.Errorf("readiness must gate on HTTPS /v1/agent/health, got %s %s", ready.HTTPGet.Scheme, ready.HTTPGet.Path)
+	}
+}
+
+// Existing installs carry the pre-fix HTTP liveness shape; needsUpdate
+// must report it as drift so the fix converges on operator upgrade,
+// and must not report drift once converged (no restart churn).
+func TestNeedsUpdateLivenessHandler(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	desired := phase.buildStatefulSet(context.Background(), newTestCluster("ns", "probes"))
+
+	converged := desired.DeepCopy()
+	// API-server defaulting of numeric probe fields must not read as drift.
+	converged.Spec.Template.Spec.Containers[0].LivenessProbe.SuccessThreshold = 1
+	if update, reason := phase.needsUpdate(converged, desired); update {
+		t.Errorf("converged probe shape reported as drift: %s", reason)
+	}
+
+	stale := desired.DeepCopy()
+	stale.Spec.Template.Spec.Containers[0].LivenessProbe.ProbeHandler = corev1.ProbeHandler{
+		HTTPGet: &corev1.HTTPGetAction{
+			Path:   "/v1/agent/health",
+			Port:   intstr.FromInt(4646),
+			Scheme: corev1.URISchemeHTTPS,
+		},
+	}
+	update, reason := phase.needsUpdate(stale, desired)
+	if !update {
+		t.Fatal("pre-fix HTTP liveness handler must be reported as drift")
+	}
+	if reason != "liveness probe handler" {
+		t.Errorf("unexpected drift reason %q", reason)
 	}
 }
 

@@ -237,7 +237,8 @@ make undeploy
 
 Server-scoped configuration is split across the subsections below:
 [TLS](#tls-specservertls), [ACL](#acl-specserveracl),
-[Audit](#audit-specserveraudit), and
+[Audit](#audit-specserveraudit),
+[Garbage Collection](#garbage-collection-specservergc), and
 [Keyrings](#keyrings-specserverkeyrings).
 
 ### TLS (`spec.server.tls`)
@@ -273,6 +274,12 @@ Delivery guarantee (`enforced`), format (`json`), and rotation
 (`24h` × 15 files) are operator-owned. Ship logs with a
 sidecar if you need different retention.
 
+Two [audit filters](https://developer.hashicorp.com/nomad/docs/configuration/audit)
+ship by default: the `/v1/metrics` endpoint and the `OperationReceived`
+half of every `GET`. These drop high-volume, low-value events so
+enforced delivery is not gated on scrape traffic under load. The filter
+set is operator-owned and not user-configurable.
+
 Audit storage is independent of data storage: when audit is enabled the
 StatefulSet always carries a dedicated audit PVC sized per
 `server.audit.size`, even when `spec.persistence.size` is empty and
@@ -284,6 +291,24 @@ configuration.
 | `server.audit.enabled` | `bool` | `true` | Enable audit logging. Auto-creates a dedicated audit PVC (independent of `spec.persistence`); requires `server.audit.size` |
 | `server.audit.size` | `string` | `5Gi` | Audit volume size |
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
+
+### Garbage Collection (`spec.server.gc`)
+
+How long terminal job/eval/alloc history is kept before Nomad garbage
+collects it. Every field is optional; an unset field inherits Nomad's
+own default, and those defaults are asymmetric by design — batch history
+(24h) is kept far longer than disposable non-batch eval state (1h). Tune
+these down for high-churn dispatch workloads: dead batch state
+accumulates in Raft between GC runs and is the dominant driver of server
+memory growth under sustained dispatch load. Only the three history
+thresholds are exposed; node, deployment, CSI, and ACL GC keep Nomad's
+defaults. Values are Nomad durations (`s`/`m`/`h`, e.g. `30m`, `2h`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server.gc.jobHistory` | `string` | Nomad `4h` | Minimum retention of a dead job (`job_gc_threshold`) |
+| `server.gc.batchEvalHistory` | `string` | Nomad `24h` | Minimum retention of a terminal batch evaluation and its allocations (`batch_eval_gc_threshold`) |
+| `server.gc.evalHistory` | `string` | Nomad `1h` | Minimum retention of a terminal non-batch evaluation and its allocations (`eval_gc_threshold`) |
 
 ### Keyrings (`spec.server.keyrings`)
 
@@ -460,9 +485,33 @@ Clusters without the CRDs skip monitoring resources cleanly.
 | `monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
 | `monitoring.prometheusRulesEnabled` | `bool` | `false` | Create PrometheusRule |
 
-Scrape cadence is operator-owned (30s interval, 10s
-timeout); ServiceMonitor label/relabel customisation belongs in
-Prometheus configuration.
+Scrape cadence is operator-owned (30s interval, 10s timeout). The
+ServiceMonitor scrapes `/v1/metrics` over HTTPS and targets the
+headless service only (marked `nomad.hashicorp.com/metrics: "true"`)
+— `publishNotReadyAddresses` keeps telemetry flowing while pods are
+unready during a leaderless window, which is exactly when you need it.
+
+**Dispatched-job series are dropped by default.** The ServiceMonitor
+ships a `metricRelabelings` rule discarding series with
+`exported_job=~".*dispatch-.*"` (per-child `job_summary_*` and
+`blocked_evals_job_*`). Dispatch children are ephemeral and each one
+mints new series; under a dispatch workload this floods shared
+Prometheus with thousands of short-lived series. Nomad acknowledges
+the same trade server-side with
+[`disable_dispatched_job_summary_metrics`](https://developer.hashicorp.com/nomad/docs/configuration/telemetry).
+Consequences to plan for:
+
+- **`NomadJobFailed` cannot fire for dispatched jobs** — the series is
+  dropped at scrape, so no downstream rule can recover it. Track
+  dispatch outcomes in the system that calls `job dispatch` (dispatch
+  response + [event stream](https://developer.hashicorp.com/nomad/api-docs/events)),
+  not via Prometheus.
+- Blocked-eval *attribution* for dispatch children is unavailable in
+  Prometheus; the aggregate `NomadEvalsBlocked` alert still fires, and
+  `nomad eval list` identifies the job at debug time.
+- If your Prometheus is sized for the churn, create an additional
+  ServiceMonitor without the drop rule targeting the marked headless
+  service — the operator does not prevent supplementary monitors.
 
 The shipped PrometheusRule covers three concern groups: health
 (leader loss, server down, job failures, memory, Raft backlog and

@@ -88,6 +88,11 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 }
 
 func (p *MonitoringPhase) ensureServiceMonitor(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	// Nomad serves 4646 as TLS (tls.http is always on); without an
+	// explicit scheme the scrape is plain HTTP and every sample is
+	// lost (neo-q1d). Verification is skipped: targets are pod IPs,
+	// which the server cert carries no SAN for.
+	httpsScheme := monitoringv1.Scheme("https")
 	sm := &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
@@ -95,22 +100,49 @@ func (p *MonitoringPhase) ensureServiceMonitor(ctx context.Context, cluster *nom
 			Labels:    GetLabels(cluster),
 		},
 		Spec: monitoringv1.ServiceMonitorSpec{
+			// Selects the headless service only (see its marker label):
+			// GetSelectorLabels is the POD selector — Services don't
+			// carry app/component, so it matched nothing (neo-q1d).
 			Selector: metav1.LabelSelector{
-				MatchLabels: GetSelectorLabels(cluster),
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/instance":  cluster.Name,
+					"nomad.hashicorp.com/metrics": "true",
+				},
 			},
 			NamespaceSelector: monitoringv1.NamespaceSelector{
 				MatchNames: []string{cluster.Namespace},
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
-					Port: "http",
-					Path: "/v1/metrics",
+					Port:   "http",
+					Path:   "/v1/metrics",
+					Scheme: &httpsScheme,
 					// Scrape cadence is operator-owned per ADR 0003;
 					// advanced tuning belongs in Prometheus config.
 					Interval:      monitoringv1.Duration("30s"),
 					ScrapeTimeout: monitoringv1.Duration("10s"),
 					Params: map[string][]string{
 						"format": {"prometheus"},
+					},
+					HTTPConfigWithProxyAndTLSFiles: monitoringv1.HTTPConfigWithProxyAndTLSFiles{
+						HTTPConfigWithTLSFiles: monitoringv1.HTTPConfigWithTLSFiles{
+							TLSConfig: &monitoringv1.TLSConfig{
+								SafeTLSConfig: monitoringv1.SafeTLSConfig{
+									InsecureSkipVerify: ptr.To(true),
+								},
+							},
+						},
+					},
+					// Dispatched jobs emit per-job series
+					// (blocked_evals_job_*, job_summary_*) — thousands
+					// of short-lived series under a dispatch workload
+					// that would flood shared Prometheus/thanos.
+					MetricRelabelConfigs: []monitoringv1.RelabelConfig{
+						{
+							SourceLabels: []monitoringv1.LabelName{"exported_job"},
+							Regex:        ".*dispatch-.*",
+							Action:       "drop",
+						},
 					},
 				},
 			},
@@ -372,17 +404,9 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 	return OK()
 }
 
+// serviceMonitorNeedsUpdate compares the full spec, not hand-picked
+// fields: a partial comparison left pre-fix scheme-less ServiceMonitors
+// in place across operator upgrades (neo-q1d).
 func (p *MonitoringPhase) serviceMonitorNeedsUpdate(existing, desired *monitoringv1.ServiceMonitor) bool {
-	if len(existing.Spec.Endpoints) != len(desired.Spec.Endpoints) {
-		return true
-	}
-	if len(existing.Spec.Endpoints) > 0 && len(desired.Spec.Endpoints) > 0 {
-		if existing.Spec.Endpoints[0].Interval != desired.Spec.Endpoints[0].Interval {
-			return true
-		}
-		if existing.Spec.Endpoints[0].ScrapeTimeout != desired.Spec.Endpoints[0].ScrapeTimeout {
-			return true
-		}
-	}
-	return false
+	return !equality.Semantic.DeepEqual(existing.Spec, desired.Spec)
 }

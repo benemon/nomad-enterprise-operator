@@ -273,6 +273,11 @@ type ServerSpec struct {
 	// +optional
 	Audit AuditSpec `json:"audit,omitempty"`
 
+	// GC tunes terminal job/eval/alloc history retention. Unset fields
+	// inherit Nomad's own (asymmetric) defaults.
+	// +optional
+	GC ServerGCSpec `json:"gc,omitempty"`
+
 	// Keyrings configures external KMS protection for Nomad's root
 	// encryption keys (Variables encryption, workload-identity signing).
 	// Every listed keyring is active: new keys are wrapped by all
@@ -578,6 +583,38 @@ type AuditSpec struct {
 // IsEnabled resolves the tri-state pointer: nil (unset) follows the
 // default (true).
 func (a AuditSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
+
+// ServerGCSpec tunes how long terminal job/eval/alloc history is kept
+// before garbage collection. Each field is optional; an unset field
+// emits no override, so Nomad's own default stands. Those defaults are
+// asymmetric on purpose — batch history (24h) far outlives disposable
+// eval state (1h) — so tuning one leaves the others untouched.
+// High-churn dispatch workloads accumulate dead batch state (the driver
+// of leader working-set growth under load); lowering these reclaims it
+// sooner. Only the three history thresholds are exposed; node, deploy,
+// CSI, and ACL GC keep Nomad's defaults.
+type ServerGCSpec struct {
+	// JobHistory sets the minimum time a dead job is retained before GC
+	// (Nomad job_gc_threshold; default 4h). Nomad duration, e.g. "1h".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	JobHistory string `json:"jobHistory,omitempty"`
+
+	// BatchEvalHistory sets the minimum time a terminal batch-job
+	// evaluation and its allocations are retained before GC (Nomad
+	// batch_eval_gc_threshold; default 24h). Dominant driver of leader
+	// working set under dispatch load. Nomad duration, e.g. "2h".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	BatchEvalHistory string `json:"batchEvalHistory,omitempty"`
+
+	// EvalHistory sets the minimum time a terminal non-batch evaluation
+	// and its allocations are retained before GC (Nomad
+	// eval_gc_threshold; default 1h). Nomad duration, e.g. "30m".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	EvalHistory string `json:"evalHistory,omitempty"`
+}
 
 // PersistenceSpec defines storage configuration
 type PersistenceSpec struct {

@@ -107,6 +107,9 @@ type templateData struct {
 	AuditFormat            string
 	AuditRotateDur         string
 	AuditRotateMax         int
+	JobGCThreshold         string
+	BatchEvalGCThreshold   string
+	EvalGCThreshold        string
 	Autopilot              autopilotData
 	Keyrings               []KeyringBlock
 }
@@ -162,6 +165,12 @@ func (g *Generator) buildTemplateData() templateData {
 		AuditFormat:            "json",
 		AuditRotateDur:         "24h",
 		AuditRotateMax:         15,
+		// Terminal-history GC (spec.server.gc). Each unset field emits
+		// nothing, leaving Nomad's own default (job 4h / batch-eval 24h /
+		// eval 1h) — the other GC thresholds stay operator-defaulted.
+		JobGCThreshold:       cluster.Spec.Server.GC.JobHistory,
+		BatchEvalGCThreshold: cluster.Spec.Server.GC.BatchEvalHistory,
+		EvalGCThreshold:      cluster.Spec.Server.GC.EvalHistory,
 		// Autopilot is operator-owned per ADR 0003: cleanup_dead_servers
 		// must stay true for Serf cleanup delegation (AC-2.3.4e); the
 		// thresholds are Nomad's own defaults.
@@ -219,6 +228,20 @@ server {
 
   # Gossip encryption
   encrypt = "{{ .GossipKey }}"
+{{- if or .JobGCThreshold .BatchEvalGCThreshold .EvalGCThreshold }}
+
+  # Terminal-history GC (spec.server.gc); unset thresholds inherit
+  # Nomad defaults (job 4h / batch-eval 24h / eval 1h).
+{{- if .JobGCThreshold }}
+  job_gc_threshold = "{{ .JobGCThreshold }}"
+{{- end }}
+{{- if .BatchEvalGCThreshold }}
+  batch_eval_gc_threshold = "{{ .BatchEvalGCThreshold }}"
+{{- end }}
+{{- if .EvalGCThreshold }}
+  eval_gc_threshold = "{{ .EvalGCThreshold }}"
+{{- end }}
+{{- end }}
 }
 
 {{ if .ACLEnabled -}}
@@ -255,6 +278,23 @@ tls {
 # Audit logging configuration
 audit {
   enabled = true
+
+  # Operator-owned filters (https://developer.hashicorp.com/nomad/docs/configuration/audit):
+  # drop scrape traffic and the received-half of every read so enforced
+  # delivery is not gated on high-volume, low-value events.
+  filter "default" {
+    type       = "HTTPEvent"
+    endpoints  = ["/v1/metrics"]
+    stages     = ["*"]
+    operations = ["*"]
+  }
+  filter "OperationReceived GETs" {
+    type       = "HTTPEvent"
+    endpoints  = ["*"]
+    stages     = ["OperationReceived"]
+    operations = ["GET"]
+  }
+
   sink "file" {
     type               = "file"
     format             = "{{ .AuditFormat }}"

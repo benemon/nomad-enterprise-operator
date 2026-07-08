@@ -240,11 +240,42 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 		{"path", `path               = "/nomad/audit/audit.log"`},
 		{"rotate_duration", `rotate_duration    = "24h"`},
 		{"rotate_max_files", "rotate_max_files   = 15"},
+		// Operator-owned filters that cut high-volume, low-value events.
+		{"metrics filter", `filter "default" {`},
+		{"metrics endpoint", `endpoints  = ["/v1/metrics"]`},
+		{"received-GET filter", `filter "OperationReceived GETs" {`},
+		{"received stage", `stages     = ["OperationReceived"]`},
+		{"GET operation", `operations = ["GET"]`},
 	}
 
 	for _, a := range assertions {
 		if !strings.Contains(hcl, a.contains) {
 			t.Errorf("Generate() missing audit %s: expected to contain %q", a.name, a.contains)
+		}
+	}
+
+	// Filters live inside the audit block, before its sink.
+	if fi, si := strings.Index(hcl, `filter "default"`), strings.Index(hcl, `sink "file"`); fi == -1 || fi > si {
+		t.Error("audit filters must render inside the audit block, before the sink")
+	}
+}
+
+// Audit disabled => no audit block and therefore no filter blocks.
+func TestGenerator_Generate_AuditDisabledNoFilters(t *testing.T) {
+	cluster := &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "nomad"},
+		Spec: nomadv1alpha1.NomadClusterSpec{
+			Replicas: 3,
+			Server:   nomadv1alpha1.ServerSpec{Audit: nomadv1alpha1.AuditSpec{Enabled: ptr.To(false)}},
+		},
+	}
+	hcl, err := NewGenerator(cluster, "10.0.0.100", "key").Generate()
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	for _, block := range []string{"audit {", `filter "default"`, `filter "OperationReceived GETs"`} {
+		if strings.Contains(hcl, block) {
+			t.Errorf("audit disabled: %q must not render", block)
 		}
 	}
 }
@@ -344,6 +375,121 @@ func TestGenerator_Generate_SingleReplica(t *testing.T) {
 // TestGenerateKeyringBlocks covers the keyring stanza rendering: no
 // blocks when unset (implicit aead), full args per block, and the
 // dual-block migration shape (active new + inactive old).
+func TestGenerator_Generate_ServerGC(t *testing.T) {
+	newGen := func(gc nomadv1alpha1.ServerGCSpec) *Generator {
+		return NewGenerator(&nomadv1alpha1.NomadCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "gc", Namespace: "ns"},
+			Spec: nomadv1alpha1.NomadClusterSpec{
+				Replicas: 3,
+				Server:   nomadv1alpha1.ServerSpec{GC: gc},
+			},
+		}, "10.0.0.1", "key==")
+	}
+
+	const (
+		jobLine   = "job_gc_threshold ="
+		batchLine = "batch_eval_gc_threshold ="
+		// Leading space so this does not substring-match the batch line
+		// (…batch_eval_gc_threshold contains eval_gc_threshold).
+		evalLine = " eval_gc_threshold ="
+		comment  = "Terminal-history GC"
+	)
+
+	// Unset: no GC lines and no comment — render is identical to a
+	// no-GC cluster (the byte-stability guarantee).
+	t.Run("unset emits nothing", func(t *testing.T) {
+		out, err := newGen(nomadv1alpha1.ServerGCSpec{}).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range []string{jobLine, batchLine, evalLine, comment} {
+			if strings.Contains(out, s) {
+				t.Errorf("unset GC should not emit %q", s)
+			}
+		}
+	})
+
+	// Each field alone emits only its own line.
+	t.Run("each field alone", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			gc       nomadv1alpha1.ServerGCSpec
+			want     string
+			unwanted []string
+		}{
+			{
+				name: "jobHistory", gc: nomadv1alpha1.ServerGCSpec{JobHistory: "1h"},
+				want: `job_gc_threshold = "1h"`, unwanted: []string{batchLine, evalLine},
+			},
+			{
+				name: "batchEvalHistory", gc: nomadv1alpha1.ServerGCSpec{BatchEvalHistory: "2h"},
+				want: `batch_eval_gc_threshold = "2h"`, unwanted: []string{jobLine, evalLine},
+			},
+			{
+				name: "evalHistory", gc: nomadv1alpha1.ServerGCSpec{EvalHistory: "30m"},
+				want: `eval_gc_threshold = "30m"`, unwanted: []string{jobLine, batchLine},
+			},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				out, err := newGen(c.gc).Generate()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(out, c.want) {
+					t.Errorf("missing %q", c.want)
+				}
+				if !strings.Contains(out, comment) {
+					t.Error("comment should appear when any GC field is set")
+				}
+				for _, u := range c.unwanted {
+					if strings.Contains(out, u) {
+						t.Errorf("unset field leaked %q", u)
+					}
+				}
+			})
+		}
+	})
+
+	// Partial config leaves the untouched fields at their Nomad default
+	// (no line emitted).
+	t.Run("partial leaves others at default", func(t *testing.T) {
+		out, err := newGen(nomadv1alpha1.ServerGCSpec{BatchEvalHistory: "90m"}).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, `batch_eval_gc_threshold = "90m"`) {
+			t.Error("missing batch_eval_gc_threshold")
+		}
+		if strings.Contains(out, jobLine) || strings.Contains(out, evalLine) {
+			t.Error("only batchEvalHistory was set; job/eval lines must be absent")
+		}
+	})
+
+	// All three render together, inside the server block.
+	t.Run("all set", func(t *testing.T) {
+		out, err := newGen(nomadv1alpha1.ServerGCSpec{
+			JobHistory: "1h", BatchEvalHistory: "2h", EvalHistory: "30m",
+		}).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			`job_gc_threshold = "1h"`,
+			`batch_eval_gc_threshold = "2h"`,
+			`eval_gc_threshold = "30m"`,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q", want)
+			}
+		}
+		// The thresholds live inside the server { } block, before its close.
+		if gcAt, serverAt := strings.Index(out, jobLine), strings.Index(out, "server {"); gcAt < serverAt {
+			t.Error("GC thresholds must render inside the server block")
+		}
+	})
+}
+
 func TestGenerateKeyringBlocks(t *testing.T) {
 	cluster := &nomadv1alpha1.NomadCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "kr", Namespace: "ns"},

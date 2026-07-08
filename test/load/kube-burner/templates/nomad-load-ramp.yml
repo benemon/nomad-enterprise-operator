@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ramp-step-{{ .Iteration }}-load
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ramp-step-{{ .Iteration }}-load
+  template:
+    metadata:
+      labels:
+        app: ramp-step-{{ .Iteration }}-load
+    spec:
+      containers:
+        - name: nomad-load
+          image: "{{ .load_image }}"
+          command: ["/bin/nomad-load"]
+          args:
+            # FQDN matches the cert SAN <cluster>-internal.<ns>.svc.
+            - -nomad-addr=https://ramp-internal.nomad-load.svc:4646
+            # Per-instance rate; instances share one parameterized job, so
+            # the cluster's aggregate dispatch rate is the sum of steps.
+            - -rate={{ .step_rate }}
+            - -workers=10
+            - -log-level=INFO
+          env:
+            - name: NOMAD_CACERT
+              value: /etc/nomad-tls/ca.crt
+            - name: NOMAD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ramp-acl-bootstrap
+                  key: secret-id
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/nomad-tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: ramp-tls

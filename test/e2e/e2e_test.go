@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -595,12 +596,12 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(ContainSubstring("4647"), "rpc port missing")
 			Expect(output).To(ContainSubstring("4648"), "serf port missing")
 
-			By("verifying liveness probe")
+			By("verifying liveness probe is a leader-independent TCP check (neo-pl4)")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.httpGet.path}`)
+				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.tcpSocket.port}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("/v1/agent/health"), "wrong liveness probe path")
+			Expect(output).To(Equal("4646"), "liveness must be a TCP check on 4646")
 
 			By("verifying readiness probe")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
@@ -3303,6 +3304,144 @@ spec:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).NotTo(BeEmpty(), "leaderAddress must be populated after the upgrade")
+		})
+	})
+
+	// neo-pl4: a leaderless window must not cascade. The pre-fix HTTP
+	// liveness probe hit /v1/agent/health, which 500s without a
+	// leader, so losing one server got the healthy followers
+	// liveness-killed mid-election and turned a survivable failure
+	// into quorum loss. Force-kill the leader (OOM analog: SIGKILL,
+	// no graceful leave) and assert the followers are never restarted
+	// while the cluster recovers on its own.
+	Context("Server leader loss does not cascade (neo-pl4)", Ordered, func() {
+		const clusterName = "leaderloss"
+		clusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 3
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: NodePort
+  server:
+    acl:
+      enabled: true
+`, clusterName, namespace)
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", clusterName,
+				"-n", namespace, "--ignore-not-found", "--wait=true", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+		})
+
+		It("recovers from a force-killed leader without follower restarts", func() {
+			By("creating a 3-replica cluster")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the cluster to be Ready with healthy autopilot")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", clusterName, "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status} {.status.autopilot.healthy}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True true"))
+			}, 12*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("mapping status.leaderAddress to the leader pod")
+			cmd = exec.Command("kubectl", "get", "nomadcluster", clusterName, "-n", namespace,
+				"-o", "jsonpath={.status.leaderAddress}")
+			leaderAddr, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(leaderAddr).NotTo(BeEmpty())
+			leaderIP := strings.Split(leaderAddr, ":")[0]
+
+			cmd = exec.Command("kubectl", "get", "pods", "-n", namespace,
+				"-l", "app.kubernetes.io/instance="+clusterName,
+				"-o", `jsonpath={range .items[*]}{.metadata.name} {.status.podIP}{"\n"}{end}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			var leaderPod string
+			followers := []string{}
+			for _, line := range utils.GetNonEmptyLines(output) {
+				fields := strings.Fields(line)
+				Expect(fields).To(HaveLen(2))
+				if fields[1] == leaderIP {
+					leaderPod = fields[0]
+				} else {
+					followers = append(followers, fields[0])
+				}
+			}
+			Expect(leaderPod).NotTo(BeEmpty(), "no pod matches leader IP %s", leaderIP)
+			Expect(followers).To(HaveLen(2))
+
+			followerRestarts := func(g Gomega, pod string) (int, string) {
+				cmd := exec.Command("kubectl", "get", "pod", pod, "-n", namespace,
+					"-o", "jsonpath={.status.containerStatuses[0].restartCount} {.status.containerStatuses[0].state.waiting.reason}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				fields := strings.Fields(output)
+				g.Expect(fields).NotTo(BeEmpty())
+				restarts, err := strconv.Atoi(fields[0])
+				g.Expect(err).NotTo(HaveOccurred())
+				reason := ""
+				if len(fields) > 1 {
+					reason = fields[1]
+				}
+				return restarts, reason
+			}
+			baseline := map[string]int{}
+			for _, pod := range followers {
+				restarts, _ := followerRestarts(Default, pod)
+				baseline[pod] = restarts
+			}
+
+			By(fmt.Sprintf("force-killing the leader pod %s (no graceful leave)", leaderPod))
+			cmd = exec.Command("kubectl", "delete", "pod", leaderPod, "-n", namespace,
+				"--grace-period=0", "--force", "--wait=false")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("asserting the followers ride out the leaderless window untouched")
+			// The pre-fix probe killed followers within ~60s
+			// (3 failures x 10s + kill); 90s covers that budget.
+			Consistently(func(g Gomega) {
+				for _, pod := range followers {
+					restarts, waiting := followerRestarts(g, pod)
+					g.Expect(restarts).To(Equal(baseline[pod]),
+						"follower %s was restarted during the leaderless window", pod)
+					g.Expect(waiting).NotTo(Equal("CrashLoopBackOff"),
+						"follower %s entered CrashLoopBackOff", pod)
+				}
+			}, 90*time.Second, 10*time.Second).Should(Succeed())
+
+			By("verifying the cluster recovered on its own: Ready, healthy, new leader")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", clusterName, "-n", namespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status} `+
+						`{.status.autopilot.healthy} {.status.leaderAddress}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts := strings.Fields(output)
+				g.Expect(parts).To(HaveLen(3))
+				g.Expect(parts[0]).To(Equal("True"), "Ready after leader loss")
+				g.Expect(parts[1]).To(Equal("true"), "autopilot healthy after leader loss")
+				g.Expect(parts[2]).NotTo(BeEmpty(), "a leader must be elected")
+			}, 8*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying no follower was restarted at any point")
+			for _, pod := range followers {
+				restarts, _ := followerRestarts(Default, pod)
+				Expect(restarts).To(Equal(baseline[pod]),
+					"follower %s restarted during recovery", pod)
+			}
 		})
 	})
 
