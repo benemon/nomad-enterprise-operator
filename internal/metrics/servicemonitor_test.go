@@ -23,6 +23,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -87,6 +88,115 @@ func TestEnsureOperatorServiceMonitor(t *testing.T) {
 		}
 		if err := EnsureOperatorServiceMonitor(ctx, c, ns, "controller-manager-sa"); err != nil {
 			t.Fatalf("second ensure should be idempotent: %v", err)
+		}
+	})
+
+	t.Run("unchanged ServiceMonitor is not rewritten", func(t *testing.T) {
+		mapper := meta.NewDefaultRESTMapper(nil)
+		mapper.Add(serviceMonitorGVK, meta.RESTScopeNamespace)
+		c := fakeClientWithMapper(mapper)
+
+		if err := EnsureOperatorServiceMonitor(ctx, c, ns, "controller-manager-sa"); err != nil {
+			t.Fatalf("first ensure: %v", err)
+		}
+		sm := &monitoringv1.ServiceMonitor{}
+		key := types.NamespacedName{Name: "nomad-enterprise-operator-metrics-monitor", Namespace: ns}
+		if err := c.Get(ctx, key, sm); err != nil {
+			t.Fatal(err)
+		}
+		rv := sm.ResourceVersion
+
+		if err := EnsureOperatorServiceMonitor(ctx, c, ns, "controller-manager-sa"); err != nil {
+			t.Fatalf("second ensure: %v", err)
+		}
+		if err := c.Get(ctx, key, sm); err != nil {
+			t.Fatal(err)
+		}
+		if sm.ResourceVersion != rv {
+			t.Errorf("ServiceMonitor was rewritten without drift: resourceVersion %s -> %s", rv, sm.ResourceVersion)
+		}
+	})
+
+	// Guards the neo-wkn upgrade bug: a create-only ensure left the
+	// rc.3-era bearerTokenFile shape in place across operator upgrades.
+	t.Run("converges existing ServiceMonitor with old bearerTokenFile shape", func(t *testing.T) {
+		mapper := meta.NewDefaultRESTMapper(nil)
+		mapper.Add(serviceMonitorGVK, meta.RESTScopeNamespace)
+		c := fakeClientWithMapper(mapper)
+
+		old := &monitoringv1.ServiceMonitor{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "nomad-enterprise-operator-metrics-monitor",
+				Namespace: ns,
+				Labels:    map[string]string{"foreign-label": "keep-me"},
+			},
+			Spec: monitoringv1.ServiceMonitorSpec{
+				Endpoints: []monitoringv1.Endpoint{{
+					Path:            "/metrics",
+					Port:            "https",
+					BearerTokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token", //nolint:staticcheck // recreating the pre-fix shape is the point
+				}},
+			},
+		}
+		if err := c.Create(ctx, old); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := EnsureOperatorServiceMonitor(ctx, c, ns, "controller-manager-sa"); err != nil {
+			t.Fatalf("ensure over old shape: %v", err)
+		}
+
+		sm := &monitoringv1.ServiceMonitor{}
+		if err := c.Get(ctx, types.NamespacedName{
+			Name: "nomad-enterprise-operator-metrics-monitor", Namespace: ns,
+		}, sm); err != nil {
+			t.Fatal(err)
+		}
+		ep := sm.Spec.Endpoints[0]
+		if ep.BearerTokenFile != "" { //nolint:staticcheck // asserting the deprecated field was cleared
+			t.Error("bearerTokenFile survived convergence")
+		}
+		if ep.Authorization == nil || ep.Authorization.Credentials == nil ||
+			ep.Authorization.Credentials.Name != scrapeTokenSecret {
+			t.Error("converged endpoint must carry Secret-backed authorization")
+		}
+		if sm.Labels["foreign-label"] != "keep-me" {
+			t.Error("foreign label stripped: label merge must be additive")
+		}
+		if sm.Labels["app.kubernetes.io/name"] != "nomad-enterprise-operator" {
+			t.Error("selector-relevant label not converged")
+		}
+	})
+
+	t.Run("converges scrape token Secret SA annotation on drift", func(t *testing.T) {
+		mapper := meta.NewDefaultRESTMapper(nil)
+		mapper.Add(serviceMonitorGVK, meta.RESTScopeNamespace)
+		c := fakeClientWithMapper(mapper)
+
+		stale := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      scrapeTokenSecret,
+				Namespace: ns,
+				Annotations: map[string]string{
+					corev1.ServiceAccountNameKey: "old-sa",
+				},
+			},
+			Type: corev1.SecretTypeServiceAccountToken,
+		}
+		if err := c.Create(ctx, stale); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := EnsureOperatorServiceMonitor(ctx, c, ns, "controller-manager-sa"); err != nil {
+			t.Fatalf("ensure over stale Secret: %v", err)
+		}
+
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{Name: scrapeTokenSecret, Namespace: ns}, secret); err != nil {
+			t.Fatal(err)
+		}
+		if got := secret.Annotations[corev1.ServiceAccountNameKey]; got != "controller-manager-sa" {
+			t.Errorf("SA annotation not converged: got %q", got)
 		}
 	})
 }

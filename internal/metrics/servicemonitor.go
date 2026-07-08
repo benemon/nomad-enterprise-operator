@@ -22,6 +22,7 @@ import (
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -48,29 +49,41 @@ const scrapeTokenSecret = "nomad-enterprise-operator-metrics-scrape-token"
 func ensureScrapeTokenSecret(ctx context.Context, c client.Client, namespace, serviceAccount string) error {
 	existing := &corev1.Secret{}
 	err := c.Get(ctx, types.NamespacedName{Name: scrapeTokenSecret, Namespace: namespace}, existing)
-	if err == nil {
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to check for scrape token Secret: %w", err)
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      scrapeTokenSecret,
+				Namespace: namespace,
+				Annotations: map[string]string{
+					corev1.ServiceAccountNameKey: serviceAccount,
+				},
+			},
+			Type: corev1.SecretTypeServiceAccountToken,
+		}
+		if err := c.Create(ctx, secret); err != nil && !errors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create scrape token Secret: %w", err)
+		}
 		return nil
 	}
-	if !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check for scrape token Secret: %w", err)
+	// Converge the SA annotation on drift; Secret type is immutable, so
+	// that is the only field worth reconciling in place (neo-wkn).
+	if existing.Annotations[corev1.ServiceAccountNameKey] == serviceAccount {
+		return nil
 	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      scrapeTokenSecret,
-			Namespace: namespace,
-			Annotations: map[string]string{
-				corev1.ServiceAccountNameKey: serviceAccount,
-			},
-		},
-		Type: corev1.SecretTypeServiceAccountToken,
+	if existing.Annotations == nil {
+		existing.Annotations = map[string]string{}
 	}
-	if err := c.Create(ctx, secret); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to create scrape token Secret: %w", err)
+	existing.Annotations[corev1.ServiceAccountNameKey] = serviceAccount
+	if err := c.Update(ctx, existing); err != nil {
+		return fmt.Errorf("failed to update scrape token Secret: %w", err)
 	}
 	return nil
 }
 
-// EnsureOperatorServiceMonitor creates (or leaves in place) a
+// EnsureOperatorServiceMonitor creates (or converges) a
 // ServiceMonitor scraping the operator's own :8443/metrics endpoint
 // (AC-F4.4), plus the token Secret its authorization references.
 // Gated on Prometheus Operator CRD availability via the shared
@@ -86,14 +99,6 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 	}
 
 	name := "nomad-enterprise-operator-metrics-monitor"
-	existing := &monitoringv1.ServiceMonitor{}
-	err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, existing)
-	if err == nil {
-		return nil
-	}
-	if !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to check for operator ServiceMonitor: %w", err)
-	}
 
 	httpsScheme := monitoringv1.Scheme("https")
 	// One label set serves as both the ServiceMonitor's own labels and
@@ -152,8 +157,42 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 		},
 	}
 
-	if err := c.Create(ctx, sm); err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to create operator ServiceMonitor: %w", err)
+	existing := &monitoringv1.ServiceMonitor{}
+	err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, existing)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			return fmt.Errorf("failed to check for operator ServiceMonitor: %w", err)
+		}
+		if err := c.Create(ctx, sm); err != nil && !errors.IsAlreadyExists(err) {
+			return fmt.Errorf("failed to create operator ServiceMonitor: %w", err)
+		}
+		return nil
+	}
+
+	// Converge on drift — a create-only ensure left the rc.3-era
+	// bearerTokenFile shape in place across operator upgrades, keeping
+	// the UWM rejection alert firing until deleted by hand (neo-wkn).
+	// Labels merge additively; selector-relevant keys must win, foreign
+	// labels survive.
+	labelDrift := false
+	for k, v := range labels {
+		if existing.Labels[k] != v {
+			labelDrift = true
+			break
+		}
+	}
+	if !labelDrift && equality.Semantic.DeepEqual(existing.Spec, sm.Spec) {
+		return nil
+	}
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+	}
+	for k, v := range labels {
+		existing.Labels[k] = v
+	}
+	existing.Spec = sm.Spec
+	if err := c.Update(ctx, existing); err != nil {
+		return fmt.Errorf("failed to update operator ServiceMonitor: %w", err)
 	}
 	return nil
 }
