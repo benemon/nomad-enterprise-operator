@@ -133,6 +133,49 @@ func TestNeedsUpdateLivenessHandler(t *testing.T) {
 	}
 }
 
+// Toggling spec.openshift.enabled changes the rendered pod
+// securityContext (fixed UID/fsGroup vs SCC-assigned); needsUpdate must
+// report that as drift so the toggle reaches a live StatefulSet — on
+// OpenShift the pre-toggle template is SCC-rejected outright, so
+// without convergence the pod can never schedule (neo-8nc). A
+// converged pair must not read as drift (no restart churn).
+func TestNeedsUpdateSecurityContext(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	vanilla := newTestCluster("ns", "scc")
+	openshift := newTestCluster("ns", "scc")
+	openshift.Spec.OpenShift.Enabled = true
+
+	existing := phase.buildStatefulSet(context.Background(), vanilla)
+	desired := phase.buildStatefulSet(context.Background(), openshift)
+
+	update, reason := phase.needsUpdate(existing, desired)
+	if !update {
+		t.Fatal("openshift.enabled toggle must be reported as securityContext drift")
+	}
+	if reason != "pod securityContext" {
+		t.Errorf("unexpected drift reason %q", reason)
+	}
+
+	converged := desired.DeepCopy()
+	if update, reason := phase.needsUpdate(converged, desired); update {
+		t.Errorf("converged securityContext reported as drift: %s", reason)
+	}
+
+	stale := desired.DeepCopy()
+	stale.Spec.Template.Spec.Containers[0].SecurityContext.ReadOnlyRootFilesystem = nil
+	update, reason = phase.needsUpdate(stale, desired)
+	if !update {
+		t.Fatal("container securityContext drift must be reported")
+	}
+	if reason != "container securityContext" {
+		t.Errorf("unexpected drift reason %q", reason)
+	}
+}
+
 // The audit claim template must exist whenever audit is enabled,
 // independent of data persistence — nesting it under persistence once
 // produced audit mounts with no backing claim.

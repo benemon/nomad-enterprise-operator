@@ -540,6 +540,18 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 			(existingLiveness != nil && !reflect.DeepEqual(existingLiveness.ProbeHandler, desiredLiveness.ProbeHandler)) {
 			return true, "liveness probe handler"
 		}
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].SecurityContext,
+			desired.Spec.Template.Spec.Containers[0].SecurityContext) {
+			return true, "container securityContext"
+		}
+	}
+
+	// Both contexts are operator-rendered with every field set, so a
+	// full comparison cannot loop on API-server defaulting. Without
+	// this, toggling spec.openshift.enabled never reaches a live
+	// StatefulSet and SCC-rejected pods stay rejected (neo-8nc).
+	if !reflect.DeepEqual(existing.Spec.Template.Spec.SecurityContext, desired.Spec.Template.Spec.SecurityContext) {
+		return true, "pod securityContext"
 	}
 
 	existingChecksum := existing.Spec.Template.Annotations["checksum/config"]
