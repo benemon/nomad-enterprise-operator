@@ -18,15 +18,132 @@ package phases
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
+
+// TestServiceMonitorContent covers neo-q1d: Nomad serves 4646 as TLS,
+// so a scheme-less ServiceMonitor scrapes plain HTTP and silently
+// loses every nomad_* series; dispatched jobs emit per-job series
+// that must be dropped before they flood shared Prometheus.
+func TestServiceMonitorContent(t *testing.T) {
+	_ = monitoringv1.AddToScheme(scheme.Scheme)
+
+	cluster := newTestCluster("mon-ns", "mon")
+	phase := &MonitoringPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	if result := phase.ensureServiceMonitor(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("ensureServiceMonitor() error = %v", result.Error)
+	}
+
+	sm := &monitoringv1.ServiceMonitor{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: "mon", Namespace: "mon-ns"}, sm); err != nil {
+		t.Fatalf("ServiceMonitor not created: %v", err)
+	}
+
+	// Must select the marked headless service — GetSelectorLabels is
+	// the pod selector and matches no Service at all; matching all
+	// services scrapes each pod once per service.
+	wantSel := map[string]string{
+		"app.kubernetes.io/instance":  "mon",
+		"nomad.hashicorp.com/metrics": "true",
+	}
+	if !reflect.DeepEqual(sm.Spec.Selector.MatchLabels, wantSel) {
+		t.Errorf("selector = %v, want %v", sm.Spec.Selector.MatchLabels, wantSel)
+	}
+
+	ep := sm.Spec.Endpoints[0]
+	if ep.Scheme == nil || *ep.Scheme != "https" {
+		t.Errorf("endpoint scheme = %v, want https", ep.Scheme)
+	}
+	if ep.TLSConfig == nil || ep.TLSConfig.InsecureSkipVerify == nil || !*ep.TLSConfig.InsecureSkipVerify {
+		t.Error("endpoint must carry a tlsConfig with insecureSkipVerify")
+	}
+	if ep.Port != "http" || ep.Path != "/v1/metrics" {
+		t.Errorf("endpoint target = %s %s, want http /v1/metrics", ep.Port, ep.Path)
+	}
+
+	var dropsDispatch bool
+	for _, rc := range ep.MetricRelabelConfigs {
+		if rc.Action == "drop" && len(rc.SourceLabels) == 1 && rc.SourceLabels[0] == "exported_job" &&
+			strings.Contains(rc.Regex, "dispatch") {
+			dropsDispatch = true
+		}
+	}
+	if !dropsDispatch {
+		t.Error("metricRelabelings must drop per-dispatched-job series on exported_job")
+	}
+}
+
+// Pre-fix installs carry a scheme-less ServiceMonitor; ensure must
+// converge it in place (neo-q1d) and must not rewrite an already
+// converged object (no churn).
+func TestServiceMonitorConverges(t *testing.T) {
+	_ = monitoringv1.AddToScheme(scheme.Scheme)
+
+	cluster := newTestCluster("mon-ns", "mon")
+	stale := &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{Name: "mon", Namespace: "mon-ns"},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			// Pre-fix shape: pod-selector labels that match no Service.
+			Selector: metav1.LabelSelector{
+				MatchLabels: GetSelectorLabels(newTestCluster("mon-ns", "mon")),
+			},
+			Endpoints: []monitoringv1.Endpoint{{
+				Port:          "http",
+				Path:          "/v1/metrics",
+				Interval:      monitoringv1.Duration("30s"),
+				ScrapeTimeout: monitoringv1.Duration("10s"),
+				Params:        map[string][]string{"format": {"prometheus"}},
+			}},
+		},
+	}
+	phase := &MonitoringPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(stale).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+
+	if result := phase.ensureServiceMonitor(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("ensureServiceMonitor() error = %v", result.Error)
+	}
+	sm := &monitoringv1.ServiceMonitor{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: "mon", Namespace: "mon-ns"}, sm); err != nil {
+		t.Fatalf("ServiceMonitor missing: %v", err)
+	}
+	ep := sm.Spec.Endpoints[0]
+	if ep.Scheme == nil || *ep.Scheme != "https" || ep.TLSConfig == nil {
+		t.Fatal("existing scheme-less ServiceMonitor was not converged to https+tlsConfig")
+	}
+	if sm.Spec.Selector.MatchLabels["nomad.hashicorp.com/metrics"] != "true" {
+		t.Fatal("existing pod-selector-shaped ServiceMonitor was not converged to the service marker selector")
+	}
+
+	rv := sm.ResourceVersion
+	if result := phase.ensureServiceMonitor(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("ensureServiceMonitor() second pass error = %v", result.Error)
+	}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: "mon", Namespace: "mon-ns"}, sm); err != nil {
+		t.Fatalf("ServiceMonitor missing after second pass: %v", err)
+	}
+	if sm.ResourceVersion != rv {
+		t.Error("converged ServiceMonitor was rewritten on a no-op reconcile")
+	}
+}
 
 // TestPrometheusRuleContent covers neo-ru9: the shipped PrometheusRule
 // carries the operator-gauge-backed certificate alerts alongside the

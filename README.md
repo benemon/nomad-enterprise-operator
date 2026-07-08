@@ -485,9 +485,33 @@ Clusters without the CRDs skip monitoring resources cleanly.
 | `monitoring.enabled` | `bool` | `true` | Create ServiceMonitor |
 | `monitoring.prometheusRulesEnabled` | `bool` | `false` | Create PrometheusRule |
 
-Scrape cadence is operator-owned (30s interval, 10s
-timeout); ServiceMonitor label/relabel customisation belongs in
-Prometheus configuration.
+Scrape cadence is operator-owned (30s interval, 10s timeout). The
+ServiceMonitor scrapes `/v1/metrics` over HTTPS and targets the
+headless service only (marked `nomad.hashicorp.com/metrics: "true"`)
+— `publishNotReadyAddresses` keeps telemetry flowing while pods are
+unready during a leaderless window, which is exactly when you need it.
+
+**Dispatched-job series are dropped by default.** The ServiceMonitor
+ships a `metricRelabelings` rule discarding series with
+`exported_job=~".*dispatch-.*"` (per-child `job_summary_*` and
+`blocked_evals_job_*`). Dispatch children are ephemeral and each one
+mints new series; under a dispatch workload this floods shared
+Prometheus with thousands of short-lived series. Nomad acknowledges
+the same trade server-side with
+[`disable_dispatched_job_summary_metrics`](https://developer.hashicorp.com/nomad/docs/configuration/telemetry).
+Consequences to plan for:
+
+- **`NomadJobFailed` cannot fire for dispatched jobs** — the series is
+  dropped at scrape, so no downstream rule can recover it. Track
+  dispatch outcomes in the system that calls `job dispatch` (dispatch
+  response + [event stream](https://developer.hashicorp.com/nomad/api-docs/events)),
+  not via Prometheus.
+- Blocked-eval *attribution* for dispatch children is unavailable in
+  Prometheus; the aggregate `NomadEvalsBlocked` alert still fires, and
+  `nomad eval list` identifies the job at debug time.
+- If your Prometheus is sized for the churn, create an additional
+  ServiceMonitor without the drop rule targeting the marked headless
+  service — the operator does not prevent supplementary monitors.
 
 The shipped PrometheusRule covers three concern groups: health
 (leader loss, server down, job failures, memory, Raft backlog and
