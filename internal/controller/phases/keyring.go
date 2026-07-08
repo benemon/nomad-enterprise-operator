@@ -554,6 +554,47 @@ func (p *KeyringPhase) absorbSpecChanges(ctx context.Context, cluster *nomadv1al
 		return OK()
 	}
 	demoted := storedMinus(state.Active, desired)
+
+	// A same-name mutation is an in-place replace, never a demotion:
+	// blocks are identified by name, so a demoted entry cannot coexist
+	// in the union render with its same-name successor (the duplicate
+	// blocks left Nomad Ready with an unloadable root key, neo-h6y).
+	// A same-name edit addresses the same wrapper — a credential fix;
+	// changing an entry's transit TARGET requires a new entry name.
+	names := map[string]bool{}
+	for _, sk := range desired {
+		names[storedName(sk)] = true
+	}
+	var retired []storedKeyring
+	for _, sk := range demoted {
+		if !names[storedName(sk)] {
+			retired = append(retired, sk)
+		}
+	}
+	current := map[string]bool{}
+	for _, sk := range state.Active {
+		current[storedName(sk)] = true
+	}
+	additions := false
+	for _, sk := range desired {
+		if !current[storedName(sk)] {
+			additions = true
+			break
+		}
+	}
+	if len(retired) == 0 && !additions {
+		state.Active = desired
+		if err := p.saveState(ctx, cm, state); err != nil {
+			return Error(err, "Failed to persist keyring state")
+		}
+		if p.Recorder != nil {
+			p.Recorder.Event(cluster, corev1.EventTypeNormal, "KeyringEntryUpdated",
+				fmt.Sprintf("Keyring entries updated in place: [%s]", storedNames(state.Active)))
+		}
+		return OK()
+	}
+
+	demoted = retired
 	if len(state.Active) == 0 {
 		demoted = append(demoted, storedKeyring{})
 	}

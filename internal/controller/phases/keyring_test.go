@@ -495,3 +495,186 @@ func TestKeyringSteadyProbeDegraded(t *testing.T) {
 		t.Fatalf("phase = %s, want Ready after recovery", cluster.Status.Keyring.Phase)
 	}
 }
+
+// TestKeyringSameNameMutationReplacesInPlace pins the neo-h6y fix: a
+// same-name entry edit (credential fix, same wrapper) must replace the
+// entry in place — never demote it into Retiring, whose union render
+// would carry two same-name blocks (the duplicate render left a live
+// cluster Ready with a root key Nomad could not load).
+func TestKeyringSameNameMutationReplacesInPlace(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, recorder, _ := keyringFixture(t, mock)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+
+	// Same name, new credential Secret.
+	vt2 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vt2", Namespace: "kr-ns"},
+		Data:       map[string][]byte{"VAULT_TOKEN": []byte("hvs.replaced")},
+	}
+	if err := phase.Client.Create(context.Background(), vt2); err != nil {
+		t.Fatal(err)
+	}
+	mutated := transitSpec("primary")
+	mutated.Transit.Auth.Token.SecretRef.Name = "vt2"
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{mutated}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if got := cluster.Status.Keyring; got.Phase != "Ready" ||
+		len(got.Active) != 1 || got.Active[0] != "primary" || len(got.Retiring) != 0 {
+		t.Fatalf("status = %+v, want Ready/[primary] with nothing retiring", cluster.Status.Keyring)
+	}
+	if len(phase.Keyrings) != 1 {
+		t.Fatalf("render = %+v, want exactly ONE block — duplicate same-name blocks are the neo-h6y incident", phase.Keyrings)
+	}
+	var tokenArg string
+	for _, a := range phase.Keyrings[0].Args {
+		if a.Key == "token" {
+			tokenArg = a.Value
+		}
+	}
+	if tokenArg != "hvs.replaced" {
+		t.Fatalf("rendered token = %q, want the replacement credential", tokenArg)
+	}
+	var updated bool
+	for len(recorder.Events) > 0 {
+		e := <-recorder.Events
+		if strings.Contains(e, "KeyringMigrationStarted") {
+			t.Fatalf("in-place replace must not start a migration, got %q", e)
+		}
+		if strings.Contains(e, "KeyringEntryUpdated") {
+			updated = true
+		}
+	}
+	if !updated {
+		t.Fatal("in-place replace must surface a KeyringEntryUpdated event")
+	}
+}
+
+// TestKeyringSameNameMutationWithAddition: mutating an entry while
+// adding another starts a migration for the ADDITION only — the
+// same-name predecessor is replaced, not retired.
+func TestKeyringSameNameMutationWithAddition(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, _, _ := keyringFixture(t, mock)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+
+	mutated := transitSpec("primary")
+	mutated.Transit.KeyIDPrefix = "a-"
+	second := transitSpec("secondary")
+	second.Transit.KeyIDPrefix = "b-"
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{mutated, second}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if cluster.Status.Keyring.Phase != "Introducing" {
+		t.Fatalf("phase = %s, want Introducing for the added entry", cluster.Status.Keyring.Phase)
+	}
+	if len(cluster.Status.Keyring.Retiring) != 0 {
+		t.Fatalf("retiring = %v, want empty — the same-name predecessor must be replaced, not retired",
+			cluster.Status.Keyring.Retiring)
+	}
+	seen := map[string]int{}
+	for _, b := range phase.Keyrings {
+		seen[b.Name]++
+	}
+	if seen["primary"] != 1 || seen["secondary"] != 1 || len(phase.Keyrings) != 2 {
+		t.Fatalf("render = %+v, want exactly one block per name", phase.Keyrings)
+	}
+}
+
+func deleteKeyringStateCM(t *testing.T, p *KeyringPhase, cluster *nomadv1alpha1.NomadCluster) {
+	t.Helper()
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: keyringStateName(cluster), Namespace: cluster.Namespace}}
+	if err := p.Client.Delete(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestKeyringStateLossSteadyState pins the loadState re-seed semantics
+// for the runbook's operator-state custody table (neo-7ph): deleting
+// the state ConfigMap on a STEADY-STATE cluster is safe — the next
+// reconcile re-seeds {Active: desired-from-spec, Phase: Ready} and
+// converges without starting a migration.
+func TestKeyringStateLossSteadyState(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, recorder, _ := keyringFixture(t, mock)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	deleteKeyringStateCM(t, phase, cluster)
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil || result.Requeue {
+		t.Fatalf("Execute() after state loss = %+v", result)
+	}
+	if got := cluster.Status.Keyring; got.Phase != "Ready" ||
+		len(got.Active) != 1 || got.Active[0] != "primary" || len(got.Retiring) != 0 {
+		t.Fatalf("re-seeded status = %+v, want Ready/[primary]", cluster.Status.Keyring)
+	}
+	for len(recorder.Events) > 0 {
+		if e := <-recorder.Events; strings.Contains(e, "KeyringMigration") {
+			t.Fatalf("steady-state re-seed must not start a migration, got %q", e)
+		}
+	}
+}
+
+// TestKeyringStateLossMidMigration documents the CURRENT mid-migration
+// loss semantics truthfully (neo-7ph): deleting the state ConfigMap
+// while Retiring is non-empty re-seeds straight to Ready and FORGETS
+// the retiring entries — their blocks leave the render immediately, so
+// keys wrapped only by them become undecryptable. The runbook's
+// Scenario 5 warns operators never to delete the state CM while
+// status.keyring.phase != Ready; this test makes the semantics visible,
+// it does not bless them.
+func TestKeyringStateLossMidMigration(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, _, _ := keyringFixture(t, mock)
+
+	// Establish the implicit-aead baseline, then start a migration to
+	// transit: Introducing, with the demoted aead entry in Retiring.
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if cluster.Status.Keyring.Phase != "Introducing" || len(cluster.Status.Keyring.Retiring) == 0 {
+		t.Fatalf("mid-migration baseline = %+v, want Introducing with retiring entries", cluster.Status.Keyring)
+	}
+
+	deleteKeyringStateCM(t, phase, cluster)
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if got := cluster.Status.Keyring; got.Phase != "Ready" ||
+		len(got.Active) != 1 || got.Active[0] != "primary" {
+		t.Fatalf("re-seeded status = %+v, want Ready/[primary]", cluster.Status.Keyring)
+	}
+	if len(cluster.Status.Keyring.Retiring) != 0 {
+		t.Fatalf("retiring = %v — if re-seed ever learns to preserve retiring entries, update runbook Scenario 5",
+			cluster.Status.Keyring.Retiring)
+	}
+	for _, b := range phase.Keyrings {
+		if b.Type == "aead" {
+			t.Fatalf("retiring aead block still rendered after re-seed — semantics changed, update runbook Scenario 5")
+		}
+	}
+}
