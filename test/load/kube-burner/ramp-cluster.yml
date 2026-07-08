@@ -1,11 +1,16 @@
-# Ramp-to-failure target (neo-1je) — applied with oc, NOT a kube-burner
-# template. One long-lived HA cluster at the operand's shipped defaults:
-# resources omitted => operator defaults (req 250m/512Mi, lim 2/2Gi);
-# services.external.type omitted => LoadBalancer (CRD default); persistence
-# omitted => 10Gi PVC on the default StorageClass. The UI is served on the
-# LB HTTP port: https://<status.advertiseAddress>:4646 (log in with the
+# Ramp-to-failure target — applied with oc, NOT a kube-burner
+# template. One long-lived 3-server HA cluster. services.external.type
+# omitted => LoadBalancer (CRD default); persistence omitted => 10Gi PVC
+# on the default StorageClass. UI on the LB HTTP port and the operator
+# Route: https://<status.advertiseAddress>:4646 (log in with the
 # ramp-acl-bootstrap token). OCP lane only: openshift.enabled passes
 # restricted-v2.
+#
+# resources.memory is req=lim (Guaranteed QoS) so the OOM boundary is the
+# value under test; sweep it 2Gi/4Gi/8Gi across runs. spec.server.gc tunes
+# terminal-history retention down from Nomad's 24h batch default so dead
+# dispatch state is reclaimed mid-run — the GC-tuned variant of the
+# baseline sweep. Requires an operator carrying spec.server.gc (v0.2.1-rc.6+).
 apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
 metadata:
@@ -17,8 +22,15 @@ spec:
     secretName: nomad-license
   openshift:
     enabled: true
-    # Operator-managed Route for the Nomad UI (reencrypt, HTTP->HTTPS
-    # redirect, backs <cluster>-internal). Enabling it does not roll the
-    # StatefulSet — the Route phase touches no certs/HCL/pod template.
     route:
       enabled: true
+  resources:
+    requests:
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+  server:
+    gc:
+      jobHistory: 10m
+      batchEvalHistory: 10m
+      evalHistory: 5m

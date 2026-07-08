@@ -27,3 +27,18 @@
   metricName: operandOOMKills
 - query: kube_pod_container_status_restarts_total{namespace="nomad-load"}
   metricName: operandRestarts
+# Nomad's own telemetry — the GC-tuning evidence. Needs /v1/metrics
+# scraped into the queried Prometheus; the operator ServiceMonitor does
+# not scrape TLS clusters, so a corrected PodMonitor supplies these.
+# Empty when absent (baseline runs, kind) — harmless. nomadHeapAllocBytes
+# is the direct signal: flat = GC reclaiming, climbing = accumulating.
+- query: nomad_runtime_alloc_bytes{namespace="nomad-load"}
+  metricName: nomadHeapAllocBytes
+- query: nomad_runtime_sys_bytes{namespace="nomad-load"}
+  metricName: nomadHeapSysBytes
+- query: nomad_nomad_blocked_evals_total_blocked{namespace="nomad-load"}
+  metricName: nomadBlockedEvals
+- query: nomad_nomad_plan_queue_depth{namespace="nomad-load"}
+  metricName: nomadPlanQueueDepth
+- query: nomad_nomad_job_dispatch_count{namespace="nomad-load"}
+  metricName: nomadDispatchCount
