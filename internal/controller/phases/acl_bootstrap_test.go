@@ -18,8 +18,10 @@ package phases
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/utils/ptr"
 
@@ -550,5 +552,78 @@ func TestC2WritesUseManagementToken(t *testing.T) {
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() error = %v", result.Error)
+	}
+}
+
+// bootstrapFixture: ACL-enabled cluster with a ready pod, so Execute
+// reaches the bootstrap attempt itself.
+func bootstrapFixture(t *testing.T, mockNomad *mocks.MockNomadAPI) (*ACLBootstrapPhase, *nomadv1alpha1.NomadCluster) {
+	t.Helper()
+	cluster := newTestCluster("test-ns", "test-cluster")
+	cluster.Spec.Server.ACL.Enabled = ptr.To(true)
+	readyPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-0",
+			Namespace: "test-ns",
+			Labels:    GetSelectorLabels(cluster),
+		},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithRuntimeObjects(cluster, readyPod).
+		WithStatusSubresource(cluster).
+		Build()
+	return NewACLBootstrapPhase(&PhaseContext{
+		Client: fakeClient,
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+		NomadClientFactory: func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+			return mockNomad, nil
+		},
+	}), cluster
+}
+
+// An unreachable Nomad API at bootstrap time is ordinary boot
+// sequencing (pods pass readiness before the API answers) — it must
+// surface as a wait, not a reconcile error: the error returns made
+// every fleet create-wave look like an incident on error-rate
+// alerting (neo-ngr).
+func TestBootstrapAPIUnreachableWaitsNotErrors(t *testing.T) {
+	mockNomad := mocks.NewMockNomadAPI(t)
+	// Internal attempt fails with a network error; no LoadBalancer
+	// address is set, so executeBootstrap reports unreachability.
+	mockNomad.EXPECT().BootstrapACL().
+		Return(nil, fmt.Errorf(`Put "https://test-cluster-internal.test-ns.svc:4646/v1/acl/bootstrap": dial tcp: connect: connection refused`)).
+		Once()
+	phase, cluster := bootstrapFixture(t, mockNomad)
+
+	result := phase.Execute(context.Background(), cluster)
+	if result.Error != nil {
+		t.Fatalf("API-not-up must not be a reconcile error, got %v", result.Error)
+	}
+	if !result.Requeue || result.RequeueAfter != 15*time.Second {
+		t.Fatalf("expected a 15s requeue, got %+v", result)
+	}
+	if result.Reason != "WaitingForNomadAPI" {
+		t.Errorf("reason = %q, want WaitingForNomadAPI", result.Reason)
+	}
+}
+
+// A genuine API rejection (non-network) must stay a reconcile error —
+// the neo-ngr fix narrows only the connectivity class.
+func TestBootstrapGenuineRejectionStaysError(t *testing.T) {
+	mockNomad := mocks.NewMockNomadAPI(t)
+	mockNomad.EXPECT().BootstrapACL().
+		Return(nil, fmt.Errorf("Unexpected response code: 403 (Permission denied)")).
+		Once()
+	phase, cluster := bootstrapFixture(t, mockNomad)
+
+	result := phase.Execute(context.Background(), cluster)
+	if result.Error == nil {
+		t.Fatal("a non-network bootstrap failure must remain a reconcile error")
 	}
 }

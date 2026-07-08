@@ -149,9 +149,18 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 			// Create marker secret to prevent future attempts
 			return p.createMarkerSecret(ctx, cluster, bootstrapSecretName)
 		}
+		// Pods pass readiness before the API answers, so an unreachable
+		// API during first convergence is ordinary boot sequencing, not
+		// a fault — returned as an error it made every fleet create-wave
+		// look like an incident on error-rate alerting (neo-ngr).
+		if nomad.IsNetworkError(err) {
+			p.Log.Info("Nomad API not yet reachable for ACL bootstrap, waiting", "cause", err.Error())
+			return RequeueWithReason(15*time.Second, "WaitingForNomadAPI",
+				"Waiting for the Nomad API to answer before ACL bootstrap")
+		}
 		// D4e / AC-8.1.5: count genuine bootstrap failures (external
-		// bootstrap above is not a failure; pod-not-ready never reaches
-		// this point).
+		// bootstrap above is not a failure; pod-not-ready and API-not-up
+		// never reach this point).
 		metrics.ACLBootstrapFailures.WithLabelValues(cluster.Name, cluster.Namespace).Inc()
 		return Error(err, "Failed to execute ACL bootstrap")
 	}

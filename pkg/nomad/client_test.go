@@ -234,6 +234,12 @@ func TestIsNetworkError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "http client timeout message",
+			err: errors.New(`Put "https://c-internal.ns.svc:4646/v1/acl/bootstrap": ` +
+				`context deadline exceeded (Client.Timeout exceeded while awaiting headers)`),
+			want: true,
+		},
+		{
 			name: "DNS error",
 			err:  &net.DNSError{Err: "no such host", Name: "nomad.local"},
 			want: true,

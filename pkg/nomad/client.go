@@ -580,6 +580,10 @@ func IsNetworkError(err error) bool {
 		"i/o timeout",
 		"network is unreachable",
 		"no route to host",
+		// http.Client timeout: the socket accepts but the agent never
+		// answers — the boot-window shape of unreachability (neo-ngr).
+		"context deadline exceeded",
+		"client.timeout exceeded",
 	}
 	for _, netErr := range networkErrors {
 		if strings.Contains(errMsg, netErr) {
