@@ -359,6 +359,11 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
+	# Stamp the olm.skipRange upper bound with this release's version:
+	# the catalogs are single-bundle, so without the range no OLM
+	# upgrade ever fires (neo-7th).
+	sed -i.bak 's/SKIP_RANGE_UPPER_BOUND/$(VERSION)/' bundle/manifests/nomad-enterprise-operator.clusterserviceversion.yaml
+	rm -f bundle/manifests/nomad-enterprise-operator.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle
 
 .PHONY: bundle-build

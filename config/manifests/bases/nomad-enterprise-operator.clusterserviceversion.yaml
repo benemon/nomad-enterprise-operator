@@ -8,6 +8,7 @@ metadata:
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
+    olm.skipRange: '>=0.1.0 <SKIP_RANGE_UPPER_BOUND'
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
