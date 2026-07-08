@@ -37,6 +37,21 @@ operator neither helps nor hinders. If federation management becomes a
 real need, it will arrive as its own design cycle, not as a side
 effect.
 
+## Multi-tenancy
+
+One operator instance watches the whole Kubernetes cluster and
+reconciles NomadClusters in any namespace (all OLM install modes are
+supported, `AllNamespaces` is the default). The supported tenant
+layout is namespace-scoped: each NomadCluster lives in a namespace
+together with its own dependency Secrets — the license Secret
+(`spec.license.secretName`), any user CA, and any Vault token Secrets
+are resolved in the CR's namespace only, never from a shared central
+namespace. Multiple NomadClusters per namespace work (names must
+differ); the same cluster name in different namespaces also works.
+This topology is exercised by the multi-namespace e2e fleet test.
+Running more than one operator instance against the same Kubernetes
+cluster (sharding) is unsupported.
+
 ## Security posture
 
 All workloads — the operator, Nomad server pods, and snapshot agents —
@@ -357,6 +372,15 @@ keys, retire the demoted keyrings, and roll once more.
 the operator manages a Vault token. A cluster with keyrings removed
 parks on an explicit `aead` keyring permanently — its keys are not
 loadable by the implicit default, so the operator never collapses back.
+
+**Editing an entry in place (same `name`) is a credential fix, not a
+migration.** The operator replaces the entry, re-renders, and rolls —
+no key rotation runs, because the wrapper is unchanged. Consequently,
+changing where an entry points — a different Vault, mount, or key —
+must be done under a **new entry name** so the old wrapper retires
+through the migration cycle and existing root keys are re-wrapped;
+editing the target in place would leave previously wrapped keys
+unloadable.
 
 #### Transit authentication (`transit.auth`)
 
