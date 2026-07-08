@@ -596,12 +596,12 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(ContainSubstring("4647"), "rpc port missing")
 			Expect(output).To(ContainSubstring("4648"), "serf port missing")
 
-			By("verifying liveness probe")
+			By("verifying liveness probe is a leader-independent TCP check (neo-pl4)")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
-				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.httpGet.path}`)
+				"-o", `jsonpath={.spec.template.spec.containers[0].livenessProbe.tcpSocket.port}`)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("/v1/agent/health"), "wrong liveness probe path")
+			Expect(output).To(Equal("4646"), "liveness must be a TCP check on 4646")
 
 			By("verifying readiness probe")
 			cmd = exec.Command("kubectl", "get", "sts", testClusterName, "-n", namespace,
