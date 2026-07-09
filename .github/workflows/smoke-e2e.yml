@@ -106,6 +106,13 @@ jobs:
       # Stage 1 (≤120s): StatefulSet pods Ready.
       - name: 'Stage 1: StatefulSet pods Ready (≤120s)'
         run: |
+          # `kubectl wait --for=jsonpath` errors immediately if the object
+          # doesn't yet exist, so guard the readiness assertion with a
+          # create-wait — the operator's first reconcile lands a few seconds
+          # after startup and races the sample apply (as Stages 2-3 already do).
+          kubectl -n "${SAMPLE_NS}" wait \
+            --for=create statefulset/"${CLUSTER_NAME}" \
+            --timeout=60s
           kubectl -n "${SAMPLE_NS}" wait \
             --for=jsonpath='{.status.readyReplicas}'=3 \
             statefulset/"${CLUSTER_NAME}" \
