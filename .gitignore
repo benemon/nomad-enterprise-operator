@@ -8,6 +8,8 @@
 docs/*
 # User-facing migration guide referenced from README — repo content, not scratch
 !docs/migration-oidc-to-terraform.md
+# Operational runbooks referenced from README — repo content, not scratch
+!docs/runbooks/
 CONTRIBUTING.md
 CHANGELOG.md
 .github/PULL_REQUEST_TEMPLATE.md

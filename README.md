@@ -368,14 +368,20 @@ operator-managed cycle: render the union of old and new keyrings, roll
 the servers, rotate every root key under the new set, remove the old
 keys, retire the demoted keyrings, and roll once more.
 `status.keyring` reports `phase` (`Ready`, `Introducing`, `Rotating`,
-`Retiring`), the `active` and `retiring` sets, and `tokenExpiry` when
-the operator manages a Vault token. A cluster with keyrings removed
-parks on an explicit `aead` keyring permanently — its keys are not
-loadable by the implicit default, so the operator never collapses back.
+`Retiring`, `Degraded`), the `active` and `retiring` sets, and
+`tokenExpiry` when the operator manages a Vault token. `Degraded` means
+the state machine is settled but Nomad itself reports the keyring
+inoperable — config delivery is not initialization, so the operator
+probes Nomad's own key list and emits a `KeyringNotInitialized` Warning
+Event naming the cause (typically unreachable KMS or a bad CA). A
+cluster with keyrings removed parks on an explicit `aead` keyring
+permanently — its keys are not loadable by the implicit default, so the
+operator never collapses back.
 
 **Editing an entry in place (same `name`) is a credential fix, not a
-migration.** The operator replaces the entry, re-renders, and rolls —
-no key rotation runs, because the wrapper is unchanged. Consequently,
+migration.** The operator replaces the entry (emitting a
+`KeyringEntryUpdated` Event), re-renders, and rolls — no key rotation
+runs, because the wrapper is unchanged. Consequently,
 changing where an entry points — a different Vault, mount, or key —
 must be done under a **new entry name** so the old wrapper retires
 through the migration cycle and existing root keys are re-wrapped;
@@ -490,7 +496,7 @@ remediation.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `openshift.enabled` | `bool` | `false` | Enable OpenShift-specific resources (Routes). If true on a cluster without Route CRDs, the operator emits a `RouteCRDMissing` Warning Event and skips Route creation |
+| `openshift.enabled` | `bool` | `false` | **Effectively required on OpenShift.** Switches the pod securityContext from a fixed non-root UID to SCC-assigned identity — without it, OpenShift's `restricted-v2` admission rejects the server pods outright and the cluster never schedules. Also enables OpenShift-specific resources (Routes); if true on a cluster without Route CRDs, the operator emits a `RouteCRDMissing` Warning Event and skips Route creation. Set it at creation time: toggling it later requires operator ≥ 0.2.1 to converge the running StatefulSet |
 | `openshift.route.enabled` | `bool` | `false` | Create an OpenShift Route. Always uses `reencrypt` termination with `Redirect` |
 | `openshift.route.host` | `string` | | Custom hostname. Auto-generated if empty |
 | `openshift.route.tls.certificateSecretName` | `string` | | Secret containing a custom external-facing certificate. If omitted, the platform wildcard certificate is used |
@@ -1086,6 +1092,7 @@ sub-field keeps its last-known value).
 | `CAExpired` | The CA certificate has expired; TLS handshakes fail cluster-wide — see `status.certificateAuthority`. Takes precedence over `WaitingForReplicas` so the cascading pod failures are attributed to their cause |
 | `PhaseFailed` | A reconcile phase errored; the message names the phase |
 | `Reconciling` | A phase requested requeue (generic wait) |
+| `WaitingForNomadAPI` | Pods are ready but the Nomad API is not answering yet (ordinary during first boot); ACL bootstrap retries shortly |
 | `ScaleDownBlocked` | Scale-down waiting on a Raft leader |
 | `DegradedQuorumNotAccepted` | Scale-down below 3 replicas lacks the [opt-in annotation](#scaling-down) |
 | `KeyringInvalid` | Keyring spec fails reconcile-time validation (e.g. multi-transit without distinct `keyIDPrefix`) |
