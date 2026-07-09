@@ -22,6 +22,19 @@ echo "=== Pods ==="
 kubectl -n "${NS}" get pods -o wide || true
 kubectl -n "${NS}" describe pods || true
 echo
+echo "=== Nomad pod logs (current + previous) ==="
+# The StatefulSet pods run a single `nomad` container. Capture both the
+# current and the previous (post-restart) logs so a readiness-probe failure
+# or crash surfaces its cause in the workflow log without a re-run.
+for pod in $(kubectl -n "${NS}" get pods \
+  -l "app.kubernetes.io/instance=${CLUSTER}" \
+  -o name 2>/dev/null); do
+  echo "--- ${pod} (current) ---"
+  kubectl -n "${NS}" logs "${pod}" -c nomad --tail=200 || true
+  echo "--- ${pod} (previous) ---"
+  kubectl -n "${NS}" logs "${pod}" -c nomad --previous --tail=200 || true
+done
+echo
 echo "=== Secrets (names only) ==="
 kubectl -n "${NS}" get secrets || true
 echo
