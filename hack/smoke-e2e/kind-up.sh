@@ -43,14 +43,16 @@ kubectl -n metallb-system wait --for=condition=Ready pods --all --timeout=180s
 
 # Compute the docker kind-bridge subnet and reserve its high /28 for
 # metallb. Example: kind bridge 172.18.0.0/16 → 172.18.255.200-172.18.255.250.
+# The kind network is dual-stack on some hosts (GHA runners list the
+# IPv6 subnet FIRST), so select the IPv4 entry explicitly — the pool
+# arithmetic below is IPv4-only.
 subnet=$(docker network inspect kind \
-  --format '{{ (index .IPAM.Config 0).Subnet }}')
+  --format '{{ range .IPAM.Config }}{{ println .Subnet }}{{ end }}' \
+  | grep -m1 -E '^[0-9]+\.')
 if [ -z "${subnet}" ]; then
-  echo "[kind-up] failed to inspect docker kind bridge subnet" >&2
+  echo "[kind-up] no IPv4 subnet on the docker kind bridge" >&2
   exit 1
 fi
-# Strip the trailing /NN and split the IPv4 address; we assume IPv4 because
-# kind defaults to IPv4-only and metallb's L2 mode is IPv4-only too.
 base=${subnet%/*}
 IFS=. read -r o1 o2 _ _ <<<"${base}"
 pool_start="${o1}.${o2}.255.200"
