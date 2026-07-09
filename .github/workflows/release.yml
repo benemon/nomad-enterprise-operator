@@ -27,7 +27,8 @@ jobs:
     name: Build and Push Images
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # contents: write for the GitHub Release step below.
+      contents: write
       packages: write
     steps:
       - name: Clone the code
@@ -73,3 +74,14 @@ jobs:
           make catalog-build catalog-push \
             CATALOG_IMG=${{ env.IMAGE_TAG_BASE }}-catalog:v${{ env.VERSION }} \
             BUNDLE_IMGS=${{ env.IMAGE_TAG_BASE }}-bundle:v${{ env.VERSION }}
+
+      - name: Create GitHub Release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Prerelease for any tag with a hyphenated qualifier (rc, beta).
+          PRERELEASE=""
+          case "${GITHUB_REF_NAME}" in *-*) PRERELEASE="--prerelease" ;; esac
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" --generate-notes ${PRERELEASE}
