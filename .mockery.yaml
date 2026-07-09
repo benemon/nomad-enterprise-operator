@@ -1,0 +1,10 @@
+# mockery v3 schema (neo-hkz). The v2 flags with-expecter/outpkg/
+# issue-845-fix are defaults or template-level settings in v3.
+template: testify
+dir: pkg/nomad/mocks
+pkgname: mocks
+filename: "{{ .InterfaceName }}.go"
+packages:
+  github.com/hashicorp/nomad-enterprise-operator/pkg/nomad:
+    interfaces:
+      NomadAPI: {}

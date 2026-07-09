@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/utils/ptr"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -163,7 +165,7 @@ var _ = Describe("NomadCluster Controller", func() {
 				if err != nil {
 					break
 				}
-				if result.RequeueAfter == 30*time.Second {
+				if result.RequeueAfter == defaultRequeueInterval {
 					// Default requeue interval means reconciliation completed
 					break
 				}
@@ -236,7 +238,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			Expect(gossipSecret.Data).To(HaveKey("gossip-key"))
 
 			By("Verifying ConfigMap was created")
-			cm := &corev1.ConfigMap{}
+			cm := &corev1.Secret{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster-config",
@@ -244,8 +246,8 @@ var _ = Describe("NomadCluster Controller", func() {
 				}, cm)
 			}, timeout, interval).Should(Succeed())
 			Expect(cm.Data).To(HaveKey("server.hcl"))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`region     = "us-west-1"`))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`datacenter = "dc1"`))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(`region     = "us-west-1"`))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(`datacenter = "dc1"`))
 
 			By("Verifying StatefulSet was created")
 			sts := &appsv1.StatefulSet{}
@@ -305,7 +307,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			By("Verifying reconciliation returns error")
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("license secret"))
-			Expect(result.RequeueAfter).To(Equal(30 * time.Second))
+			Expect(result.RequeueAfter).To(Equal(defaultRequeueInterval))
 
 			By("Verifying status shows failure")
 			updatedCluster := &nomadv1alpha1.NomadCluster{}
@@ -366,7 +368,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			Expect(updatedCluster.Status.Conditions).NotTo(BeEmpty())
 			foundCAError := false
 			for _, cond := range updatedCluster.Status.Conditions {
-				if cond.Type == nomadv1alpha1.ConditionTypeReady && cond.Status == metav1.ConditionFalse {
+				if cond.Type == "Ready" && cond.Status == metav1.ConditionFalse {
 					if containsIgnoreCase(cond.Message, "CA") || containsIgnoreCase(cond.Message, "Certificate") {
 						foundCAError = true
 						break
@@ -414,25 +416,25 @@ var _ = Describe("NomadCluster Controller", func() {
 				if err != nil {
 					Fail(fmt.Sprintf("Reconciliation failed with error: %v", err))
 				}
-				if result.RequeueAfter == 30*time.Second {
+				if result.RequeueAfter == defaultRequeueInterval {
 					break
 				}
 			}
 
 			By("Verifying ConfigMap contains TLS configuration")
-			cm := &corev1.ConfigMap{}
+			cm := &corev1.Secret{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster-config",
 					Namespace: namespace,
 				}, cm)
 			}, timeout, interval).Should(Succeed())
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring("tls {"))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring("http = true"))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring("rpc  = true"))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`ca_file   = "/nomad/tls/ca.crt"`))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`cert_file = "/nomad/tls/tls.crt"`))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`key_file  = "/nomad/tls/tls.key"`))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring("tls {"))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring("http = true"))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring("rpc  = true"))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(`ca_file   = "/nomad/tls/ca.crt"`))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(`cert_file = "/nomad/tls/tls.crt"`))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(`key_file  = "/nomad/tls/tls.key"`))
 
 			By("Verifying StatefulSet has TLS volume mount")
 			sts := &appsv1.StatefulSet{}
@@ -559,14 +561,14 @@ var _ = Describe("NomadCluster Controller", func() {
 			Expect(errors.IsNotFound(err)).To(BeTrue(), "Auto-generated gossip secret should not exist")
 
 			By("Verifying ConfigMap uses the external gossip key")
-			cm := &corev1.ConfigMap{}
+			cm := &corev1.Secret{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster-config",
 					Namespace: namespace,
 				}, cm)
 			}, timeout, interval).Should(Succeed())
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring("my-external-key"))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring("my-external-key"))
 		})
 	})
 
@@ -596,7 +598,7 @@ var _ = Describe("NomadCluster Controller", func() {
 		It("should configure ACL in generated HCL", func() {
 			By("Creating a NomadCluster with ACL enabled")
 			cluster = newTestCluster(namespace, "test-cluster")
-			cluster.Spec.Server.ACL.Enabled = true
+			cluster.Spec.Server.ACL.Enabled = ptr.To(true)
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			namespacedName := types.NamespacedName{Name: "test-cluster", Namespace: namespace}
@@ -607,15 +609,15 @@ var _ = Describe("NomadCluster Controller", func() {
 			}
 
 			By("Verifying ConfigMap contains ACL configuration")
-			cm := &corev1.ConfigMap{}
+			cm := &corev1.Secret{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster-config",
 					Namespace: namespace,
 				}, cm)
 			}, timeout, interval).Should(Succeed())
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring("acl {"))
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring("enabled = true"))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring("acl {"))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring("enabled = true"))
 		})
 	})
 
@@ -676,7 +678,7 @@ var _ = Describe("NomadCluster Controller", func() {
 			}
 
 			By("Verifying ConfigMap uses default values")
-			cm := &corev1.ConfigMap{}
+			cm := &corev1.Secret{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster-config",
@@ -685,9 +687,9 @@ var _ = Describe("NomadCluster Controller", func() {
 			}, timeout, interval).Should(Succeed())
 
 			// Default region is "global"
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(`region     = "global"`))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(`region     = "global"`))
 			// Default datacenter should be namespace name
-			Expect(cm.Data["server.hcl"]).To(ContainSubstring(fmt.Sprintf(`datacenter = "%s"`, namespace)))
+			Expect(string(cm.Data["server.hcl"])).To(ContainSubstring(fmt.Sprintf(`datacenter = "%s"`, namespace)))
 		})
 	})
 
@@ -821,13 +823,13 @@ var _ = Describe("NomadCluster Controller", func() {
 			}, timeout, interval).Should(Equal(int32(5)))
 
 			By("Verifying ConfigMap has updated bootstrap_expect")
-			cm := &corev1.ConfigMap{}
+			cm := &corev1.Secret{}
 			Eventually(func() bool {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster-config",
 					Namespace: namespace,
 				}, cm)
-				return containsString(cm.Data["server.hcl"], "bootstrap_expect = 5")
+				return containsString(string(cm.Data["server.hcl"]), "bootstrap_expect = 5")
 			}, timeout, interval).Should(BeTrue())
 		})
 	})

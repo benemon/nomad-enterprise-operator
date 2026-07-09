@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ramp-step-{{ .Iteration }}-nodesim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ramp-step-{{ .Iteration }}-nodesim
+  template:
+    metadata:
+      labels:
+        app: ramp-step-{{ .Iteration }}-nodesim
+    spec:
+      containers:
+        - name: nodesim
+          image: "{{ .nodesim_image }}"
+          command: ["/bin/nomad-nodesim"]
+          args:
+            # Fixed long-lived target, unlike the fleet rig's per-iteration
+            # clusters. RPC 4647 lives on the headless Service only.
+            - -server-addr=ramp-headless:4647
+            - -node-num={{ .step_nodes }}
+            # Per-step prefix keeps node names unique across the ramp.
+            - -node-name-prefix=ramp-{{ .Iteration }}-sim
+            - -work-dir=/work
+            - -log-level=info
+          env:
+            # All three set => full RPC mTLS with the operator-issued cert
+            # (EKU covers clientAuth) — same wiring as the fleet rig.
+            - name: NOMAD_CACERT
+              value: /etc/nomad-tls/ca.crt
+            - name: NOMAD_CLIENT_CERT
+              value: /etc/nomad-tls/tls.crt
+            - name: NOMAD_CLIENT_KEY
+              value: /etc/nomad-tls/tls.key
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/nomad-tls
+              readOnly: true
+            - name: work
+              mountPath: /work
+      volumes:
+        - name: tls
+          secret:
+            secretName: ramp-tls
+        - name: work
+          emptyDir: {}

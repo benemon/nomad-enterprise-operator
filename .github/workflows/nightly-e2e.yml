@@ -1,0 +1,96 @@
+name: Nightly E2E (full matrix)
+
+# Nightly lane of the e2e matrix (neo-g1o / design review §2.10): the
+# COMPLETE suite including the slow containers the PR lane skips —
+# Raft scale-down/up, the Nomad N->N+1 version upgrade, and operator
+# leader failover. Also runnable on demand via workflow_dispatch
+# (pre-release gate).
+#
+# OpenShift coverage is envtest-only by design (§2.10.1); the Route/
+# ServiceMonitor object shapes are asserted there, not here.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nightly-e2e:
+    name: Full suite on kind
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Verify kind installation
+        run: kind version
+
+      - name: Write Nomad Enterprise license file
+        env:
+          NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+        run: |
+          mkdir -p test/e2e/testdata
+          echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
+
+      - name: Run the full e2e suite
+        run: |
+          go mod tidy
+          make test-e2e
+
+  upgrade-matrix:
+    name: Upgrade ${{ matrix.upgrade.from }} -> ${{ matrix.upgrade.to }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        upgrade:
+          # Consecutive minors only (Nomad supports one upgrade step at
+          # a time). Major.minor tags serve the latest patch of each
+          # line, so every pair is HashiCorp's recommended
+          # latest-patch-to-latest-patch path and the matrix
+          # self-maintains as patch releases ship. Append a new pair
+          # when a new minor GAs.
+          - { from: "1.10-ent", to: "1.11-ent" }
+          - { from: "1.11-ent", to: "2.0-ent" }
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Write Nomad Enterprise license file
+        env:
+          NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+        run: |
+          mkdir -p test/e2e/testdata
+          echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
+
+      - name: Run the upgrade container for this pair
+        run: |
+          go mod tidy
+          make test-e2e GINKGO_FOCUS='version upgrade' \
+            UPGRADE_FROM='${{ matrix.upgrade.from }}' \
+            UPGRADE_TO='${{ matrix.upgrade.to }}'

@@ -8,6 +8,23 @@ metadata:
           "apiVersion": "nomad.hashicorp.com/v1alpha1",
           "kind": "NomadCluster",
           "metadata": {
+            "name": "nomad"
+          },
+          "spec": {
+            "license": {
+              "secretName": "nomad-license"
+            },
+            "services": {
+              "external": {
+                "type": "NodePort"
+              }
+            }
+          }
+        },
+        {
+          "apiVersion": "nomad.hashicorp.com/v1alpha1",
+          "kind": "NomadCluster",
+          "metadata": {
             "labels": {
               "app.kubernetes.io/managed-by": "kustomize",
               "app.kubernetes.io/name": "nomad-enterprise-operator"
@@ -15,37 +32,16 @@ metadata:
             "name": "nomad-enterprise"
           },
           "spec": {
-            "affinity": {
-              "podAntiAffinity": {
-                "enabled": true,
-                "topologyKey": "kubernetes.io/hostname",
-                "type": "preferred",
-                "weight": 100
-              }
-            },
             "image": {
               "repository": "hashicorp/nomad",
-              "tag": "1.11-ent"
+              "tag": "2.0.3-ent"
             },
             "license": {
-              "secretKey": "license",
               "secretName": "nomad-license"
             },
-            "openshift": {
+            "monitoring": {
               "enabled": true,
-              "monitoring": {
-                "enabled": true,
-                "prometheusRulesEnabled": true,
-                "scrapeInterval": "30s",
-                "scrapeTimeout": "10s"
-              },
-              "route": {
-                "enabled": true,
-                "tls": {
-                  "insecureEdgeTerminationPolicy": "Redirect",
-                  "termination": "edge"
-                }
-              }
+              "prometheusRulesEnabled": true
             },
             "persistence": {
               "size": "10Gi"
@@ -66,19 +62,7 @@ metadata:
                 "enabled": true
               },
               "audit": {
-                "enabled": true,
-                "format": "json",
-                "rotateDuration": "24h",
-                "rotateMaxFiles": 15
-              },
-              "autopilot": {
-                "cleanupDeadServers": true,
-                "lastContactThreshold": "200ms",
-                "maxTrailingLogs": 250,
-                "serverStabilizationTime": "10s"
-              },
-              "tls": {
-                "enabled": false
+                "enabled": true
               }
             },
             "services": {
@@ -130,13 +114,14 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    categories: Integration & Delivery
+    categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-03-20T13:18:57Z"
+    createdAt: "2026-07-08T19:59:24Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
+    olm.skipRange: '>=0.1.0 <0.0.1'
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
-    operators.operatorframework.io/builder: operator-sdk-v1.42.0
+    operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: nomad-enterprise-operator.v0.0.1
   namespace: placeholder
@@ -149,7 +134,12 @@ spec:
       kind: NomadCluster
       name: nomadclusters.nomad.hashicorp.com
       version: v1alpha1
-    - description: NomadSnapshot is the Schema for the nomadsnapshots API.
+    - description: |-
+        NomadSnapshot is the Schema for the nomadsnapshots API.
+
+        The XValidation rule below blocks a mode switch (adding/removing
+        spec.schedule) while a one-shot Job is running; recurring mode is
+        never blocked.
       displayName: Nomad Snapshot
       kind: NomadSnapshot
       name: nomadsnapshots.nomad.hashicorp.com
@@ -178,23 +168,69 @@ spec:
           - ""
           resources:
           - configmaps
-          - persistentvolumeclaims
-          - pods
-          - secrets
-          - serviceaccounts
           - services
+          verbs:
+          - create
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - persistentvolumeclaims
+          - secrets
           verbs:
           - create
           - delete
           - get
           - list
-          - patch
+          - update
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - pods
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - serviceaccounts
+          verbs:
+          - create
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - serviceaccounts/token
+          verbs:
+          - create
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          verbs:
+          - create
+          - delete
+          - get
+          - list
           - update
           - watch
         - apiGroups:
           - apps
           resources:
-          - deployments
           - statefulsets
           verbs:
           - create
@@ -205,16 +241,24 @@ spec:
           - update
           - watch
         - apiGroups:
+          - batch
+          resources:
+          - jobs
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - watch
+        - apiGroups:
           - monitoring.coreos.com
           resources:
           - prometheusrules
           - servicemonitors
           verbs:
           - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -223,11 +267,8 @@ spec:
           - nomadclusters
           - nomadsnapshots
           verbs:
-          - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
         - apiGroups:
@@ -243,20 +284,35 @@ spec:
           - nomadclusters/status
           - nomadsnapshots/status
           verbs:
-          - get
           - patch
-          - update
         - apiGroups:
-          - rbac.authorization.k8s.io
+          - policy
           resources:
-          - rolebindings
-          - roles
+          - poddisruptionbudgets
           verbs:
           - create
           - delete
           - get
           - list
-          - patch
+          - update
+          - watch
+        - apiGroups:
+          - rbac.authorization.k8s.io
+          resources:
+          - rolebindings
+          verbs:
+          - create
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - rbac.authorization.k8s.io
+          resources:
+          - roles
+          verbs:
+          - create
+          - get
+          - list
           - update
           - watch
         - apiGroups:
@@ -265,12 +321,17 @@ spec:
           - routes
           verbs:
           - create
-          - delete
           - get
           - list
-          - patch
           - update
           - watch
+        - apiGroups:
+          - route.openshift.io
+          resources:
+          - routes/custom-host
+          verbs:
+          - create
+          - update
         - apiGroups:
           - authentication.k8s.io
           resources:
@@ -283,6 +344,10 @@ spec:
           - subjectaccessreviews
           verbs:
           - create
+        - nonResourceURLs:
+          - /metrics
+          verbs:
+          - get
         serviceAccountName: nomad-enterprise-operator-controller-manager
       deployments:
       - label:
@@ -312,6 +377,11 @@ spec:
                 - --health-probe-bind-address=:8081
                 command:
                 - /manager
+                env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
                 image: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
                 livenessProbe:
                   httpGet:
@@ -329,10 +399,10 @@ spec:
                 resources:
                   limits:
                     cpu: 500m
-                    memory: 128Mi
+                    memory: 512Mi
                   requests:
                     cpu: 10m
-                    memory: 64Mi
+                    memory: 128Mi
                 securityContext:
                   allowPrivilegeEscalation: false
                   capabilities:
@@ -384,9 +454,9 @@ spec:
     type: OwnNamespace
   - supported: true
     type: SingleNamespace
-  - supported: false
+  - supported: true
     type: MultiNamespace
-  - supported: false
+  - supported: true
     type: AllNamespaces
   keywords:
   - nomad
@@ -398,7 +468,8 @@ spec:
   - name: Nomad Documentation
     url: https://developer.hashicorp.com/nomad
   maintainers:
-  - name: benemon
+  - email: benjamin.holmes@gmail.com
+    name: benemon
   maturity: alpha
   minKubeVersion: 1.28.0
   provider:

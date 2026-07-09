@@ -8,23 +8,69 @@ rules:
   - ""
   resources:
   - configmaps
-  - persistentvolumeclaims
-  - pods
-  - secrets
-  - serviceaccounts
   - services
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - secrets
   verbs:
   - create
   - delete
   - get
   - list
-  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
   - update
   - watch
 - apiGroups:
   - apps
   resources:
-  - deployments
   - statefulsets
   verbs:
   - create
@@ -35,17 +81,14 @@ rules:
   - update
   - watch
 - apiGroups:
-  - k8s.keycloak.org
+  - batch
   resources:
-  - keycloakrealmimports
-  - keycloaks
+  - jobs
   verbs:
   - create
   - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - monitoring.coreos.com
@@ -54,10 +97,8 @@ rules:
   - servicemonitors
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -66,11 +107,8 @@ rules:
   - nomadclusters
   - nomadsnapshots
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -86,20 +124,35 @@ rules:
   - nomadclusters/status
   - nomadsnapshots/status
   verbs:
-  - get
   - patch
-  - update
 - apiGroups:
-  - rbac.authorization.k8s.io
+  - policy
   resources:
-  - rolebindings
-  - roles
+  - poddisruptionbudgets
   verbs:
   - create
   - delete
   - get
   - list
-  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  verbs:
+  - create
+  - get
+  - list
   - update
   - watch
 - apiGroups:
@@ -108,10 +161,8 @@ rules:
   - routes
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -120,5 +171,4 @@ rules:
   - routes/custom-host
   verbs:
   - create
-  - patch
   - update

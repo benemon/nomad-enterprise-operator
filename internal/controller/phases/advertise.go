@@ -43,6 +43,14 @@ func (p *AdvertisePhase) Name() string {
 
 // Execute resolves the advertise address from LoadBalancer or configured IP.
 func (p *AdvertisePhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	// Only a LoadBalancer publishes an ingress address; NodePort has no
+	// single address to pick, and waiting here would block all later
+	// phases forever.
+	if cluster.Spec.Services.External.Type != corev1.ServiceTypeLoadBalancer {
+		p.Log.V(1).Info("Non-LoadBalancer external service; no external advertise address to resolve")
+		return OK()
+	}
+
 	// If user specified a fixed LoadBalancer IP, use it directly
 	if cluster.Spec.Services.External.LoadBalancerIP != "" {
 		p.AdvertiseAddress = cluster.Spec.Services.External.LoadBalancerIP

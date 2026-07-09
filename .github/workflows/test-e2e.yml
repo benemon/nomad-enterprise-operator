@@ -1,5 +1,9 @@
 name: E2E Tests
 
+# PR/push lane of the e2e matrix (neo-g1o / design review §2.10): runs
+# the functional suite but SKIPS the slow containers — scale-down,
+# version upgrade, leader failover — which run in nightly-e2e.yml.
+
 on:
   push:
     branches: ['**']
@@ -38,7 +42,7 @@ jobs:
           mkdir -p test/e2e/testdata
           echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
 
-      - name: Running Test e2e
+      - name: Running Test e2e (PR lane - slow containers skipped)
         run: |
           go mod tidy
-          make test-e2e
+          make test-e2e GINKGO_SKIP='scale-down|version upgrade|leader failover|Keyring lifecycle|Keyring transit auth|Keyring HA pair|Keyring resilience|Multi-namespace fleet|Minimal sample quickstart'

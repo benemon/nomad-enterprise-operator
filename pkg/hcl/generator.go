@@ -26,6 +26,10 @@ import (
 
 // Generator creates Nomad HCL configuration
 type Generator struct {
+	// Keyrings, when non-empty, renders keyring blocks. Empty means
+	// Nomad's implicit aead default.
+	Keyrings []KeyringBlock
+
 	cluster          *nomadv1alpha1.NomadCluster
 	advertiseAddress string
 	gossipKey        string
@@ -58,6 +62,7 @@ func (g *Generator) Generate() (string, error) {
 	}
 
 	data := g.buildTemplateData()
+	data.Keyrings = g.Keyrings
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {
@@ -66,6 +71,20 @@ func (g *Generator) Generate() (string, error) {
 
 	return buf.String(), nil
 }
+
+// KeyringBlock is one rendered keyring stanza. The caller (the
+// operator's keyring phase) owns the set semantics: which blocks
+// exist, which are active, and any transient aead block during
+// migration. Args render in order as key = "value" lines.
+type KeyringBlock struct {
+	Type   string // awskms | azurekeyvault | gcpckms | transit | aead
+	Name   string
+	Active bool
+	Args   []KeyringArg
+}
+
+// KeyringArg is a single keyring parameter.
+type KeyringArg struct{ Key, Value string }
 
 type templateData struct {
 	Region                 string
@@ -88,7 +107,11 @@ type templateData struct {
 	AuditFormat            string
 	AuditRotateDur         string
 	AuditRotateMax         int
+	JobGCThreshold         string
+	BatchEvalGCThreshold   string
+	EvalGCThreshold        string
 	Autopilot              autopilotData
+	Keyrings               []KeyringBlock
 }
 
 type autopilotData struct {
@@ -117,69 +140,45 @@ func (g *Generator) buildTemplateData() templateData {
 		replicas = 3
 	}
 
-	// Autopilot defaults
-	lastContactThreshold := cluster.Spec.Server.Autopilot.LastContactThreshold
-	if lastContactThreshold == "" {
-		lastContactThreshold = "200ms"
-	}
-
-	maxTrailingLogs := cluster.Spec.Server.Autopilot.MaxTrailingLogs
-	if maxTrailingLogs == 0 {
-		maxTrailingLogs = 250
-	}
-
-	serverStabilizationTime := cluster.Spec.Server.Autopilot.ServerStabilizationTime
-	if serverStabilizationTime == "" {
-		serverStabilizationTime = "10s"
-	}
-
-	// Audit defaults
-	auditDeliveryGuarantee := cluster.Spec.Server.Audit.DeliveryGuarantee
-	if auditDeliveryGuarantee == "" {
-		auditDeliveryGuarantee = "enforced"
-	}
-
-	auditFormat := cluster.Spec.Server.Audit.Format
-	if auditFormat == "" {
-		auditFormat = "json"
-	}
-
-	auditRotateDur := cluster.Spec.Server.Audit.RotateDuration
-	if auditRotateDur == "" {
-		auditRotateDur = "24h"
-	}
-
-	auditRotateMax := cluster.Spec.Server.Audit.RotateMaxFiles
-	if auditRotateMax == 0 {
-		auditRotateMax = 15
-	}
-
 	return templateData{
-		Region:                 region,
-		Datacenter:             datacenter,
-		AdvertiseAddress:       g.advertiseAddress,
-		Replicas:               replicas,
-		ClusterName:            cluster.Name,
-		Namespace:              cluster.Namespace,
-		HeadlessService:        cluster.Name + "-headless",
-		GossipKey:              g.gossipKey,
-		ACLEnabled:             cluster.Spec.Server.ACL.Enabled,
-		TLSEnabled:             true,
-		TLSCAFile:              "/nomad/tls/ca.crt",
-		TLSCertFile:            "/nomad/tls/tls.crt",
-		TLSKeyFile:             "/nomad/tls/tls.key",
-		VerifyServerHostname:   true,
-		VerifyHTTPSClient:      false,
-		AuditEnabled:           cluster.Spec.Server.Audit.Enabled,
-		AuditDeliveryGuarantee: auditDeliveryGuarantee,
-		AuditFormat:            auditFormat,
-		AuditRotateDur:         auditRotateDur,
-		AuditRotateMax:         auditRotateMax,
+		Region:               region,
+		Datacenter:           datacenter,
+		AdvertiseAddress:     g.advertiseAddress,
+		Replicas:             replicas,
+		ClusterName:          cluster.Name,
+		Namespace:            cluster.Namespace,
+		HeadlessService:      cluster.Name + "-headless",
+		GossipKey:            g.gossipKey,
+		ACLEnabled:           cluster.Spec.Server.ACL.IsEnabled(),
+		TLSEnabled:           true,
+		TLSCAFile:            "/nomad/tls/ca.crt",
+		TLSCertFile:          "/nomad/tls/tls.crt",
+		TLSKeyFile:           "/nomad/tls/tls.key",
+		VerifyServerHostname: true,
+		VerifyHTTPSClient:    false,
+		AuditEnabled:         cluster.Spec.Server.Audit.IsEnabled(),
+		// Audit shape is operator-owned per ADR 0003 ("Fields dropped
+		// in v1"): enforced delivery (best-effort is a footgun), JSON
+		// only, 24h rotation × 15 files (~15 days). Users needing
+		// different log shipping use a sidecar, not rotation tuning.
+		AuditDeliveryGuarantee: "enforced",
+		AuditFormat:            "json",
+		AuditRotateDur:         "24h",
+		AuditRotateMax:         15,
+		// Terminal-history GC (spec.server.gc). Each unset field emits
+		// nothing, leaving Nomad's own default (job 4h / batch-eval 24h /
+		// eval 1h) — the other GC thresholds stay operator-defaulted.
+		JobGCThreshold:       cluster.Spec.Server.GC.JobHistory,
+		BatchEvalGCThreshold: cluster.Spec.Server.GC.BatchEvalHistory,
+		EvalGCThreshold:      cluster.Spec.Server.GC.EvalHistory,
+		// Autopilot is operator-owned per ADR 0003: cleanup_dead_servers
+		// must stay true for Serf cleanup delegation (AC-2.3.4e); the
+		// thresholds are Nomad's own defaults.
 		Autopilot: autopilotData{
-			CleanupDeadServers:      cluster.Spec.Server.Autopilot.CleanupDeadServers,
-			LastContactThreshold:    lastContactThreshold,
-			MaxTrailingLogs:         maxTrailingLogs,
-			ServerStabilizationTime: serverStabilizationTime,
+			CleanupDeadServers:      true,
+			LastContactThreshold:    "200ms",
+			MaxTrailingLogs:         250,
+			ServerStabilizationTime: "10s",
 		},
 	}
 }
@@ -229,6 +228,20 @@ server {
 
   # Gossip encryption
   encrypt = "{{ .GossipKey }}"
+{{- if or .JobGCThreshold .BatchEvalGCThreshold .EvalGCThreshold }}
+
+  # Terminal-history GC (spec.server.gc); unset thresholds inherit
+  # Nomad defaults (job 4h / batch-eval 24h / eval 1h).
+{{- if .JobGCThreshold }}
+  job_gc_threshold = "{{ .JobGCThreshold }}"
+{{- end }}
+{{- if .BatchEvalGCThreshold }}
+  batch_eval_gc_threshold = "{{ .BatchEvalGCThreshold }}"
+{{- end }}
+{{- if .EvalGCThreshold }}
+  eval_gc_threshold = "{{ .EvalGCThreshold }}"
+{{- end }}
+{{- end }}
 }
 
 {{ if .ACLEnabled -}}
@@ -265,6 +278,23 @@ tls {
 # Audit logging configuration
 audit {
   enabled = true
+
+  # Operator-owned filters (https://developer.hashicorp.com/nomad/docs/configuration/audit):
+  # drop scrape traffic and the received-half of every read so enforced
+  # delivery is not gated on high-volume, low-value events.
+  filter "default" {
+    type       = "HTTPEvent"
+    endpoints  = ["/v1/metrics"]
+    stages     = ["*"]
+    operations = ["*"]
+  }
+  filter "OperationReceived GETs" {
+    type       = "HTTPEvent"
+    endpoints  = ["*"]
+    stages     = ["OperationReceived"]
+    operations = ["GET"]
+  }
+
   sink "file" {
     type               = "file"
     format             = "{{ .AuditFormat }}"
@@ -282,6 +312,18 @@ telemetry {
   publish_node_metrics       = true
   prometheus_metrics         = true
 }
+
+{{- range .Keyrings }}
+keyring "{{ .Type }}" {
+{{- if .Name }}
+  name   = "{{ .Name }}"
+{{- end }}
+  active = {{ .Active }}
+{{- range .Args }}
+  {{ .Key }} = "{{ .Value }}"
+{{- end }}
+}
+{{- end }}
 
 # Leave on interrupt/term
 leave_on_interrupt = true

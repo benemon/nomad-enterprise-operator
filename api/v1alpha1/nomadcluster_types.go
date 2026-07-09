@@ -50,6 +50,12 @@ type NomadClusterSpec struct {
 	// +optional
 	OpenShift OpenShiftSpec `json:"openshift,omitempty"`
 
+	// Monitoring configures ServiceMonitor and PrometheusRule creation.
+	// Resources are created when enabled AND the Prometheus Operator
+	// CRDs are installed; independent of openshift.enabled.
+	// +optional
+	Monitoring MonitoringSpec `json:"monitoring,omitempty"`
+
 	// Server configuration options
 	// +optional
 	Server ServerSpec `json:"server,omitempty"`
@@ -61,10 +67,6 @@ type NomadClusterSpec struct {
 	// Resources defines CPU and memory requests/limits
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// Affinity configuration for pod scheduling
-	// +optional
-	Affinity *AffinitySpec `json:"affinity,omitempty"`
 
 	// TopologySpreadConstraints for distributing pods
 	// +optional
@@ -81,10 +83,6 @@ type NomadClusterSpec struct {
 	// ImagePullSecrets for private registries
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
-
-	// OIDC configures OIDC authentication via Keycloak.
-	// +optional
-	OIDC *OIDCSpec `json:"oidc,omitempty"`
 }
 
 // ImageSpec defines container image configuration
@@ -93,14 +91,24 @@ type ImageSpec struct {
 	// +kubebuilder:default="hashicorp/nomad"
 	Repository string `json:"repository,omitempty"`
 
-	// Tag is the container image tag
-	// +kubebuilder:default="1.11-ent"
+	// Tag is the container image tag, default-pinned to a concrete
+	// patch version: a registry-side retag mid-roll can produce
+	// version-mismatched Raft peers and silent quorum loss.
+	// +kubebuilder:default="2.0.3-ent"
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
 
-	// PullPolicy defines when to pull the image. Defaults to Always because
-	// the default tag (1.11-ent) is a floating tag that resolves to the latest
-	// patch release. Set to IfNotPresent when pinning to a specific version
-	// (e.g. 1.11.3-ent).
+	// Digest optionally pins the image by content digest. When set, the
+	// reference is `repository@digest` and Tag is ignored (defaulting
+	// materialises Tag before validation, so CEL exclusion is
+	// impossible).
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	// +optional
+	Digest string `json:"digest,omitempty"`
+
+	// PullPolicy defaults to Always as a defence against registry-side
+	// retags; digest-pinned or air-gapped workflows can use
+	// IfNotPresent.
 	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
 	// +kubebuilder:default="Always"
 	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
@@ -112,14 +120,10 @@ type ImageSpec struct {
 // +kubebuilder:validation:XValidation:rule="!((has(self.secretName) && size(self.secretName) > 0) && (has(self.value) && size(self.value) > 0))",message="secretName and value are mutually exclusive"
 type LicenseSpec struct {
 	// SecretName is the name of an existing secret containing the license.
-	// Mutually exclusive with Value.
+	// The license must be stored under the key "license" (the key name is
+	// operator-owned). Mutually exclusive with Value.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
-
-	// SecretKey is the key within the secret (default: "license")
-	// Only used when SecretName is specified.
-	// +kubebuilder:default="license"
-	SecretKey string `json:"secretKey,omitempty"`
 
 	// Value is the license content provided directly.
 	// The operator will create and manage a secret from this value.
@@ -141,13 +145,11 @@ type TopologySpec struct {
 
 // GossipSpec defines gossip encryption configuration
 type GossipSpec struct {
-	// SecretName is the name of secret containing gossip key (auto-created if empty)
+	// SecretName is the name of secret containing gossip key (auto-created
+	// if empty). The key must be stored under "gossip-key" (the key name
+	// is operator-owned).
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
-
-	// SecretKey is the key within the secret
-	// +kubebuilder:default="gossip-key"
-	SecretKey string `json:"secretKey,omitempty"`
 }
 
 // ServicesSpec defines Kubernetes Service configuration
@@ -176,17 +178,13 @@ type ExternalServiceSpec struct {
 // OpenShiftSpec defines OpenShift-specific configuration
 type OpenShiftSpec struct {
 	// Enabled determines if OpenShift-specific resources are created.
-	// Set to true to create Routes and ServiceMonitors.
+	// Set to true to create Routes.
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
 	// Route configuration for OpenShift Route
 	// +optional
 	Route RouteSpec `json:"route,omitempty"`
-
-	// Monitoring configuration for ServiceMonitor and PrometheusRule
-	// +optional
-	Monitoring MonitoringSpec `json:"monitoring,omitempty"`
 }
 
 // RouteSpec defines OpenShift Route configuration
@@ -217,7 +215,10 @@ type RouteTLSSpec struct {
 	// +optional
 	CertificateSecretName string `json:"certificateSecretName,omitempty"`
 
-	// SecretKeys allows overriding the key names within the certificate Secret.
+	// SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+	// that does not follow the kubernetes.io/tls convention. The {}
+	// default materialises the nested defaults when omitted.
+	// +kubebuilder:default={}
 	// +optional
 	SecretKeys CertificateSecretKeys `json:"secretKeys,omitempty"`
 }
@@ -233,30 +234,32 @@ type CertificateSecretKeys struct {
 	PrivateKey string `json:"privateKey,omitempty"`
 }
 
-// MonitoringSpec defines Prometheus monitoring configuration
+// MonitoringSpec defines Prometheus monitoring configuration. Scrape
+// interval (30s) and timeout (10s) are operator-owned;
+// advanced scrape tuning belongs in Prometheus, not this CR.
 type MonitoringSpec struct {
 	// Enabled determines if monitoring resources are created
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
-	// ScrapeInterval for metrics collection (simplified from serviceMonitor.interval)
-	// +kubebuilder:default="30s"
-	ScrapeInterval string `json:"scrapeInterval,omitempty"`
-
-	// ScrapeTimeout for metric collection (simplified from serviceMonitor.scrapeTimeout)
-	// +kubebuilder:default="10s"
-	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
-
-	// AdditionalLabels to add to ServiceMonitor
-	// +optional
-	AdditionalLabels map[string]string `json:"additionalLabels,omitempty"`
+	// Pointer + omitempty is load-bearing: a plain bool either drops
+	// explicit false (omitempty: apiserver re-defaults it true on the
+	// operator's next write) or writes false into fields the user
+	// never set (no omitempty: the zero value overwrites the default).
+	// nil means "user said nothing" and reads as the default via
+	// IsEnabled().
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// PrometheusRulesEnabled determines if PrometheusRule is created
 	// +kubebuilder:default=false
 	PrometheusRulesEnabled bool `json:"prometheusRulesEnabled,omitempty"`
 }
 
-// ServerSpec defines Nomad server configuration
+// IsEnabled resolves the tri-state pointer: nil (unset) follows the
+// default (true).
+func (m MonitoringSpec) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
+
+// ServerSpec defines Nomad server configuration. Autopilot tuning is
+// operator-owned (cleanup_dead_servers=true, 200ms last
+// contact, 250 trailing logs, 10s stabilization — Nomad's defaults).
 type ServerSpec struct {
 	// ACL configuration
 	// +optional
@@ -266,29 +269,252 @@ type ServerSpec struct {
 	// +optional
 	TLS TLSSpec `json:"tls,omitempty"`
 
-	// Autopilot configuration
-	// +optional
-	Autopilot AutopilotSpec `json:"autopilot,omitempty"`
-
 	// Audit logging configuration
 	// +optional
 	Audit AuditSpec `json:"audit,omitempty"`
 
-	// ExtraConfig is raw HCL to append to server configuration
+	// GC tunes terminal job/eval/alloc history retention. Unset fields
+	// inherit Nomad's own (asymmetric) defaults.
 	// +optional
-	ExtraConfig string `json:"extraConfig,omitempty"`
+	GC ServerGCSpec `json:"gc,omitempty"`
+
+	// Keyrings configures external KMS protection for Nomad's root
+	// encryption keys (Variables encryption, workload-identity signing).
+	// Every listed keyring is active: new keys are wrapped by all
+	// entries, so any one surviving KMS can unwrap (HA). Omitted = the
+	// default aead keyring, whose KEK rides Raft IN CLEARTEXT — meaning
+	// snapshots (including NomadSnapshot uploads) contain key material.
+	// The operator manages migration between keyring sets, including
+	// enable, disable, and provider changes, with no quorum impact.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Keyrings []KeyringEntry `json:"keyrings,omitempty"`
 }
 
-// ACLSpec defines ACL configuration
+// KeyringEntry names one KMS keyring. Exactly one provider block must
+// be set per entry (CEL-enforced).
+// +kubebuilder:validation:XValidation:rule="(has(self.awskms) ? 1 : 0) + (has(self.azurekeyvault) ? 1 : 0) + (has(self.gcpckms) ? 1 : 0) + (has(self.transit) ? 1 : 0) == 1",message="exactly one of awskms, azurekeyvault, gcpckms, or transit must be set per keyring entry"
+type KeyringEntry struct {
+	// Name identifies this keyring; rendered as the Nomad keyring block
+	// name. Unique within the list.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9_-]*$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// +optional
+	AWSKMS *AWSKMSKeyring `json:"awskms,omitempty"`
+	// +optional
+	AzureKeyVault *AzureKeyVaultKeyring `json:"azurekeyvault,omitempty"`
+	// +optional
+	GCPCKMS *GCPCKMSKeyring `json:"gcpckms,omitempty"`
+	// +kubebuilder:validation:XValidation:rule="(self.auth.method == 'token') == has(self.auth.token) && (self.auth.method == 'kubernetes') == has(self.auth.kubernetes) && (self.auth.method == 'jwt') == has(self.auth.jwt)",message="auth requires exactly the per-method block matching method"
+	// +kubebuilder:validation:XValidation:rule="self.auth.method == 'token' || has(self.auth.mount)",message="auth.mount is required for the kubernetes and jwt methods"
+	// +optional
+	Transit *TransitKeyring `json:"transit,omitempty"`
+}
+
+// AWSKMSKeyring wraps root keys with AWS KMS.
+type AWSKMSKeyring struct {
+	// KMSKeyID is the KMS key: an ID, ARN, or alias/<name>.
+	// +kubebuilder:validation:MinLength=1
+	KMSKeyID string `json:"kmsKeyID"`
+
+	// Region of the KMS key. Omitted = SDK default chain.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Endpoint overrides the KMS endpoint (FIPS or KMS-compatible).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// CredentialsSecretRef names a Secret with AWS_ACCESS_KEY_ID,
+	// AWS_SECRET_ACCESS_KEY, and optionally AWS_SESSION_TOKEN. Omitted =
+	// ambient identity (IRSA / instance profile).
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// AzureKeyVaultKeyring wraps root keys with Azure Key Vault.
+// resource "managedhsm.azure.net" selects a Managed HSM vault.
+type AzureKeyVaultKeyring struct {
+	// +kubebuilder:validation:MinLength=1
+	VaultName string `json:"vaultName"`
+	// +kubebuilder:validation:MinLength=1
+	KeyName string `json:"keyName"`
+	// +kubebuilder:validation:MinLength=1
+	TenantID string `json:"tenantID"`
+
+	// Environment, e.g. AZUREPUBLICCLOUD (the default).
+	// +optional
+	Environment string `json:"environment,omitempty"`
+
+	// Resource is the key vault resource domain; set
+	// "managedhsm.azure.net" for Managed HSM.
+	// +optional
+	Resource string `json:"resource,omitempty"`
+
+	// CredentialsSecretRef names a Secret with AZURE_CLIENT_ID and
+	// AZURE_CLIENT_SECRET. Omitted = MSI / workload identity.
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// GCPCKMSKeyring wraps root keys with GCP Cloud KMS.
+type GCPCKMSKeyring struct {
+	// +kubebuilder:validation:MinLength=1
+	Project string `json:"project"`
+	// +kubebuilder:validation:MinLength=1
+	Region string `json:"region"`
+	// +kubebuilder:validation:MinLength=1
+	KeyRing string `json:"keyRing"`
+	// +kubebuilder:validation:MinLength=1
+	CryptoKey string `json:"cryptoKey"`
+
+	// CredentialsSecretRef names a Secret whose single key holds a
+	// service-account JSON, mounted and exposed as
+	// GOOGLE_APPLICATION_CREDENTIALS. Omitted = workload identity.
+	// +optional
+	CredentialsSecretRef *corev1.LocalObjectReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// TransitKeyring wraps root keys with Vault's transit engine.
+type TransitKeyring struct {
+	// Address is the Vault cluster URL.
+	// +kubebuilder:validation:Pattern=`^https?://`
+	Address string `json:"address"`
+	// +kubebuilder:validation:MinLength=1
+	KeyName string `json:"keyName"`
+	// +kubebuilder:validation:MinLength=1
+	MountPath string `json:"mountPath"`
+
+	// Namespace is the Vault namespace of the transit engine.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// KeyIDPrefix disambiguates wrapped key IDs when multiple transit
+	// keyrings are listed.
+	// +optional
+	KeyIDPrefix string `json:"keyIDPrefix,omitempty"`
+
+	// TLSServerName is the SNI hostname for the Vault connection.
+	// +optional
+	TLSServerName string `json:"tlsServerName,omitempty"`
+
+	// CASecretRef names a Secret whose ca.crt verifies the Vault
+	// connection, for CAs outside the system trust store.
+	// +optional
+	CASecretRef *corev1.LocalObjectReference `json:"caSecretRef,omitempty"`
+
+	// ClientCertSecretRef names a kubernetes.io/tls-shaped Secret
+	// (tls.crt, tls.key) for mTLS to Vault.
+	// +optional
+	ClientCertSecretRef *corev1.LocalObjectReference `json:"clientCertSecretRef,omitempty"`
+
+	// Auth selects one of four credential vectors for the transit
+	// connection, mirroring the Vault Secrets Operator's VaultAuth
+	// structure (method + mount/namespace, per-method blocks).
+	Auth *TransitAuth `json:"auth"`
+}
+
+// TransitAuth is the transit keyring's Vault credential configuration.
+// Exactly one per-method block is set, agreeing with method:
+//
+//	token:      a long-lived user-minted Vault token (no login call;
+//	            user-owned lifecycle). Our extension beyond VSO.
+//	kubernetes: TokenReview-validated login — either a user-minted
+//	            long-lived ServiceAccount token (secretRef) or the
+//	            DEFAULT ephemeral operator-minted TokenRequest token
+//	            (single-use, never stored; the VSO pattern).
+//	jwt:        JWKS/OIDC-validated login with the same two
+//	            ServiceAccount token sources.
+type TransitAuth struct {
+	// Method declares the credential vector explicitly.
+	// +kubebuilder:validation:Enum=token;kubernetes;jwt
+	Method string `json:"method"`
+
+	// Mount is the Vault auth mount path (e.g. "kubernetes", "jwt").
+	// Not used by method=token.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	Mount string `json:"mount,omitempty"`
+
+	// Namespace is the Vault namespace for the login call. Defaults to
+	// the transit entry's namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Token configures method=token.
+	// +optional
+	Token *TransitAuthToken `json:"token,omitempty"`
+
+	// Kubernetes configures method=kubernetes.
+	// +optional
+	Kubernetes *TransitAuthKubernetes `json:"kubernetes,omitempty"`
+
+	// JWT configures method=jwt.
+	// +optional
+	JWT *TransitAuthKubernetes `json:"jwt,omitempty"`
+}
+
+// TransitAuthToken is the long-lived user-minted Vault token vector.
+type TransitAuthToken struct {
+	// SecretRef names a Secret whose VAULT_TOKEN key holds the token.
+	// The operator wires it to the server pods and manages nothing
+	// else: renewal and rotation are user-owned (rotation is delivered
+	// by the Secret watch and rolls pods).
+	SecretRef corev1.LocalObjectReference `json:"secretRef"`
+}
+
+// TransitAuthKubernetes configures a ServiceAccount-JWT login (shared
+// by the kubernetes and jwt methods — their login payloads are
+// identical; only Vault-side validation differs).
+type TransitAuthKubernetes struct {
+	// Role is the Vault role to log in as.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	Role string `json:"role"`
+
+	// ServiceAccountTokenSecretRef names a Secret whose token key
+	// holds a user-managed long-lived ServiceAccount JWT, replacing
+	// the default ephemeral TokenRequest source.
+	// +optional
+	ServiceAccountTokenSecretRef *corev1.LocalObjectReference `json:"serviceAccountTokenSecretRef,omitempty"`
+
+	// Audiences for the ephemeral ServiceAccount token. Ignored when
+	// serviceAccountTokenSecretRef is set.
+	// +kubebuilder:default={"vault"}
+	// +optional
+	Audiences []string `json:"audiences,omitempty"`
+
+	// TokenExpirationSeconds bounds the ephemeral ServiceAccount token
+	// lifetime. It is used once, immediately, and never stored.
+	// Ignored when serviceAccountTokenSecretRef is set.
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=600
+	// +kubebuilder:validation:Maximum=86400
+	// +optional
+	TokenExpirationSeconds int64 `json:"tokenExpirationSeconds,omitempty"`
+}
+
+// ACLSpec defines ACL configuration. The bootstrap token Secret name is
+// operator-owned: always `<cluster>-acl-bootstrap`.
 type ACLSpec struct {
 	// Enabled determines if ACLs are enabled (defaults to true for security)
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
-	// BootstrapSecretName is the secret to store bootstrap token (auto-created)
-	// +optional
-	BootstrapSecretName string `json:"bootstrapSecretName,omitempty"`
+	// Pointer + omitempty is load-bearing: a plain bool either drops
+	// explicit false (omitempty: apiserver re-defaults it true on the
+	// operator's next write) or writes false into fields the user
+	// never set (no omitempty: the zero value overwrites the default).
+	// nil means "user said nothing" and reads as the default via
+	// IsEnabled().
+	Enabled *bool `json:"enabled,omitempty"`
 }
+
+// IsEnabled resolves the tri-state pointer: nil (unset) follows the
+// default (true).
+func (a ACLSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // TLSSpec defines TLS configuration for the Nomad cluster.
 // mTLS is always enabled. The operator generates and manages all certificates
@@ -310,7 +536,10 @@ type CASpec struct {
 	// and private key. Expected keys: tls.crt (certificate), tls.key (private key).
 	SecretName string `json:"secretName"`
 
-	// SecretKeys allows overriding the key names within the CA secret.
+	// SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+	// that does not follow the kubernetes.io/tls convention. The {}
+	// default materialises the nested defaults when omitted.
+	// +kubebuilder:default={}
 	// +optional
 	SecretKeys CASecretKeys `json:"secretKeys,omitempty"`
 }
@@ -326,51 +555,21 @@ type CASecretKeys struct {
 	PrivateKey string `json:"privateKey,omitempty"`
 }
 
-// AutopilotSpec defines Autopilot configuration
-type AutopilotSpec struct {
-	// CleanupDeadServers enables automatic removal of dead servers
-	// +kubebuilder:default=true
-	CleanupDeadServers bool `json:"cleanupDeadServers,omitempty"`
-
-	// LastContactThreshold before marking server unhealthy
-	// +kubebuilder:default="200ms"
-	LastContactThreshold string `json:"lastContactThreshold,omitempty"`
-
-	// MaxTrailingLogs before server is considered unhealthy
-	// +kubebuilder:default=250
-	MaxTrailingLogs int `json:"maxTrailingLogs,omitempty"`
-
-	// ServerStabilizationTime before becoming voter
-	// +kubebuilder:default="10s"
-	ServerStabilizationTime string `json:"serverStabilizationTime,omitempty"`
-}
-
-// AuditSpec defines audit logging configuration
+// AuditSpec defines audit logging configuration. Delivery guarantee
+// (enforced), format (json), and rotation (24h × 15 files) are
+// operator-owned — users needing different log shipping
+// should ship via sidecar, not rotation tuning.
 type AuditSpec struct {
 	// Enabled determines if audit logging is enabled.
 	// When enabled, an audit volume is automatically created.
 	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
-	// DeliveryGuarantee determines behavior when audit logging fails.
-	// "enforced" blocks requests if audit fails (recommended for production).
-	// "best-effort" allows requests even if audit fails (useful for development).
-	// +kubebuilder:validation:Enum=enforced;best-effort
-	// +kubebuilder:default="enforced"
-	DeliveryGuarantee string `json:"deliveryGuarantee,omitempty"`
-
-	// Format of audit logs (json or log)
-	// +kubebuilder:validation:Enum=json;log
-	// +kubebuilder:default="json"
-	Format string `json:"format,omitempty"`
-
-	// RotateDuration for log rotation
-	// +kubebuilder:default="24h"
-	RotateDuration string `json:"rotateDuration,omitempty"`
-
-	// RotateMaxFiles to retain
-	// +kubebuilder:default=15
-	RotateMaxFiles int `json:"rotateMaxFiles,omitempty"`
+	// Pointer + omitempty is load-bearing: a plain bool either drops
+	// explicit false (omitempty: apiserver re-defaults it true on the
+	// operator's next write) or writes false into fields the user
+	// never set (no omitempty: the zero value overwrites the default).
+	// nil means "user said nothing" and reads as the default via
+	// IsEnabled().
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// Size of the audit volume (created automatically when audit is enabled)
 	// +kubebuilder:default="5Gi"
@@ -379,6 +578,42 @@ type AuditSpec struct {
 	// StorageClassName for the audit PVC (uses cluster default if empty)
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
+}
+
+// IsEnabled resolves the tri-state pointer: nil (unset) follows the
+// default (true).
+func (a AuditSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
+
+// ServerGCSpec tunes how long terminal job/eval/alloc history is kept
+// before garbage collection. Each field is optional; an unset field
+// emits no override, so Nomad's own default stands. Those defaults are
+// asymmetric on purpose — batch history (24h) far outlives disposable
+// eval state (1h) — so tuning one leaves the others untouched.
+// High-churn dispatch workloads accumulate dead batch state (the driver
+// of leader working-set growth under load); lowering these reclaims it
+// sooner. Only the three history thresholds are exposed; node, deploy,
+// CSI, and ACL GC keep Nomad's defaults.
+type ServerGCSpec struct {
+	// JobHistory sets the minimum time a dead job is retained before GC
+	// (Nomad job_gc_threshold; default 4h). Nomad duration, e.g. "1h".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	JobHistory string `json:"jobHistory,omitempty"`
+
+	// BatchEvalHistory sets the minimum time a terminal batch-job
+	// evaluation and its allocations are retained before GC (Nomad
+	// batch_eval_gc_threshold; default 24h). Dominant driver of leader
+	// working set under dispatch load. Nomad duration, e.g. "2h".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	BatchEvalHistory string `json:"batchEvalHistory,omitempty"`
+
+	// EvalHistory sets the minimum time a terminal non-batch evaluation
+	// and its allocations are retained before GC (Nomad
+	// eval_gc_threshold; default 1h). Nomad duration, e.g. "30m".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	EvalHistory string `json:"evalHistory,omitempty"`
 }
 
 // PersistenceSpec defines storage configuration
@@ -391,117 +626,25 @@ type PersistenceSpec struct {
 	// Set to empty string to disable persistence (use emptyDir).
 	// +kubebuilder:default="10Gi"
 	Size string `json:"size,omitempty"`
+
+	// ReclaimPolicy controls data-PVC fate on cluster deletion. Delete
+	// (default) removes the data PVCs with the cluster. Retain keeps
+	// them, but re-adoption by a recreated cluster does NOT recover
+	// automatically: Raft stores peer addresses as pod IPs, which
+	// change on recreation, so a fully recreated cluster needs manual
+	// outage recovery. Prefer NomadSnapshot restore for recovery.
+	// Deletion-time value wins.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +kubebuilder:default=Delete
+	// +optional
+	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
 }
 
-// AffinitySpec defines pod affinity configuration
-type AffinitySpec struct {
-	// PodAntiAffinity configuration
-	// +optional
-	PodAntiAffinity PodAntiAffinitySpec `json:"podAntiAffinity,omitempty"`
-}
-
-// PodAntiAffinitySpec defines pod anti-affinity
-type PodAntiAffinitySpec struct {
-	// Enabled determines if pod anti-affinity is configured
-	// +kubebuilder:default=true
-	Enabled bool `json:"enabled,omitempty"`
-
-	// Type: preferred or required
-	// +kubebuilder:validation:Enum=preferred;required
-	// +kubebuilder:default="preferred"
-	Type string `json:"type,omitempty"`
-
-	// Weight for preferred anti-affinity (1-100)
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=100
-	// +kubebuilder:default=100
-	Weight int32 `json:"weight,omitempty"`
-
-	// TopologyKey for anti-affinity
-	// +kubebuilder:default="kubernetes.io/hostname"
-	TopologyKey string `json:"topologyKey,omitempty"`
-}
-
-// OIDCSpec configures OIDC authentication for the Nomad cluster via Keycloak.
-// Requires the Keycloak operator to be installed in the same namespace and a
-// healthy Keycloak CR referenced by KeycloakRef.
-type OIDCSpec struct {
-	// Enabled controls whether OIDC authentication is configured.
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// KeycloakRef references the Keycloak CR that the realm import targets.
-	// Must be in the same namespace as the NomadCluster.
-	KeycloakRef corev1.LocalObjectReference `json:"keycloakRef"`
-
-	// Realm is the name of the Keycloak realm to create. Defaults to the NomadCluster name.
-	// +optional
-	Realm string `json:"realm,omitempty"`
-
-	// DiscoveryCA references a Secret containing the CA certificate used to
-	// verify the Keycloak OIDC discovery endpoint. Required when the Keycloak
-	// hostname is served behind a TLS certificate not in the system trust store
-	// (e.g. OpenShift ingress with a private CA).
-	// +optional
-	DiscoveryCA *OIDCDiscoveryCASpec `json:"discoveryCA,omitempty"`
-
-	// BindingRules defines how Keycloak groups map to Nomad ACL roles.
-	// If empty, a default rule mapping the "nomad-admins" group to a
-	// management-equivalent role is created.
-	// +optional
-	BindingRules []OIDCBindingRule `json:"bindingRules,omitempty"`
-}
-
-// OIDCDiscoveryCASpec references a Secret containing the CA certificate for
-// OIDC discovery endpoint verification.
-type OIDCDiscoveryCASpec struct {
-	// SecretName is the name of the Secret containing the CA certificate.
-	SecretName string `json:"secretName"`
-
-	// SecretKey is the key within the Secret that holds the PEM-encoded CA certificate.
-	// +kubebuilder:default="tls.crt"
-	SecretKey string `json:"secretKey,omitempty"`
-}
-
-// RealmName returns the configured realm name, defaulting to the cluster name.
-func (o *OIDCSpec) RealmName(clusterName string) string {
-	if o.Realm != "" {
-		return o.Realm
-	}
-	return clusterName
-}
-
-// OIDCBindingRule maps a Keycloak group to a Nomad ACL role.
-type OIDCBindingRule struct {
-	// KeycloakGroup is the Keycloak group path, including leading slash (e.g. "/nomad-admins").
-	KeycloakGroup string `json:"keycloakGroup"`
-
-	// NomadRole is the name of the Nomad ACL role to bind to this group.
-	NomadRole string `json:"nomadRole"`
-
-	// PolicyRules is the HCL policy document granted to this role.
-	PolicyRules string `json:"policyRules"`
-}
-
-// OIDCStatus tracks the state of the OIDC integration.
-type OIDCStatus struct {
-	// RealmImportName is the name of the managed KeycloakRealmImport CR.
-	// +optional
-	RealmImportName string `json:"realmImportName,omitempty"`
-
-	// ClientSecretName is the name of the Secret containing the OIDC client secret.
-	// +optional
-	ClientSecretName string `json:"clientSecretName,omitempty"`
-
-	// AuthMethodName is the name of the Nomad ACL auth method created.
-	// +optional
-	AuthMethodName string `json:"authMethodName,omitempty"`
-
-	// Ready indicates that the realm import is complete and Nomad has been
-	// configured with the auth method, policies, roles, and binding rules.
-	// +optional
-	Ready bool `json:"ready,omitempty"`
-}
+// Valid spec.persistence.reclaimPolicy values.
+const (
+	ReclaimPolicyRetain = "Retain"
+	ReclaimPolicyDelete = "Delete"
+)
 
 // ClusterPhase represents the phase of the NomadCluster
 type ClusterPhase string
@@ -513,38 +656,49 @@ const (
 	ClusterPhaseFailed   ClusterPhase = "Failed"
 )
 
-// Condition types for NomadCluster
-const (
-	// ConditionTypeReady indicates the cluster is ready
-	ConditionTypeReady = "Ready"
+// Condition contract: exactly ONE condition, type "Ready"; sub-state
+// lives in dedicated status fields. Unknown probe state does not fail
+// Ready. Ready=False reasons:
+//
+//	WaitingForReplicas        — StatefulSet below desired ready count
+//	LicenseExpired            — Nomad Enterprise license invalid
+//	AutopilotUnhealthy        — Raft autopilot reports unhealthy
+//	LicenseSecretNotFound     — referenced license Secret absent
+//	LicenseSecretInvalid      — license Secret present, key missing
+//	CAExpired                 — CA past expiry (checked before
+//	                            WaitingForReplicas: name the cause,
+//	                            not the symptom)
+//	PhaseFailed               — a reconcile phase returned an error
+//	Reconciling               — generic requeue
+//	ScaleDownBlocked          — scale-down waiting on a Raft leader
+//	DegradedQuorumNotAccepted — scale-down below 3 lacks the opt-in
+//
+// Condition types stay string literals; deliberately no ConditionType
+// constants.
 
-	// ConditionTypeGossipKeyReady indicates gossip key is configured
-	ConditionTypeGossipKeyReady = "GossipKeyReady"
+// KeyringStatus reports keyring reconciliation state.
+type KeyringStatus struct {
+	// Active lists the keyring entries currently wrapping new keys
+	// ("aead" when the default file keyring is in use).
+	// +optional
+	Active []string `json:"active,omitempty"`
 
-	// ConditionTypeServicesReady indicates all services are ready
-	ConditionTypeServicesReady = "ServicesReady"
+	// Retiring lists entries kept only until their wrapped keys are
+	// removed; cleared when migration completes.
+	// +optional
+	Retiring []string `json:"retiring,omitempty"`
 
-	// ConditionTypeAdvertiseResolved indicates LoadBalancer IP is resolved
-	ConditionTypeAdvertiseResolved = "AdvertiseResolved"
+	// TokenExpiry is when the operator-managed Vault token expires;
+	// only set when a transit entry uses auth.
+	// +optional
+	TokenExpiry *metav1.Time `json:"tokenExpiry,omitempty"`
 
-	// ConditionTypeStatefulSetReady indicates StatefulSet is ready
-	ConditionTypeStatefulSetReady = "StatefulSetReady"
-
-	// ConditionTypeACLBootstrapped indicates ACL bootstrap is complete
-	ConditionTypeACLBootstrapped = "ACLBootstrapped"
-
-	// ConditionTypeRouteReady indicates OpenShift Route is ready
-	ConditionTypeRouteReady = "RouteReady"
-
-	// ConditionTypeMonitoringReady indicates monitoring resources are ready
-	ConditionTypeMonitoringReady = "MonitoringReady"
-
-	// ConditionTypeLicenseValid indicates the Nomad Enterprise license status
-	ConditionTypeLicenseValid = "LicenseValid"
-
-	// ConditionTypeAutopilotHealthy indicates Raft autopilot health status
-	ConditionTypeAutopilotHealthy = "AutopilotHealthy"
-)
+	// Phase is Ready, Introducing, Rotating, Retiring, or Degraded
+	// (Ready state machine, but Nomad reports the keyring inoperable).
+	// +kubebuilder:validation:Enum=Ready;Introducing;Rotating;Retiring;Degraded
+	// +optional
+	Phase string `json:"phase,omitempty"`
+}
 
 // LicenseStatus represents the Nomad Enterprise license information
 type LicenseStatus struct {
@@ -598,6 +752,18 @@ type CertificateAuthorityStatus struct {
 	// Subject is the CA certificate's subject distinguished name.
 	// +optional
 	Subject string `json:"subject,omitempty"`
+
+	// RenewalRequiredBy is CA expiry minus the 30-day window. For
+	// operator CAs: when automatic rotation starts. For user CAs: when
+	// a human must renew (CARenewalRequired Events).
+	// +optional
+	RenewalRequiredBy string `json:"renewalRequiredBy,omitempty"`
+
+	// RenewalWarningThreshold records the last emitted warning bucket
+	// ("30d", "14d", or "7d:<date>" daily), debouncing the escalating
+	// user-CA Events across operator restarts.
+	// +optional
+	RenewalWarningThreshold string `json:"renewalWarningThreshold,omitempty"`
 }
 
 // ServerStatus represents the status of a single Nomad server in the cluster
@@ -644,9 +810,10 @@ type NomadClusterStatus struct {
 	// CurrentReplicas is the current number of Nomad server pods
 	CurrentReplicas int32 `json:"currentReplicas,omitempty"`
 
-	// LeaderID is the Raft leader node ID (if known)
+	// LeaderAddress is the leader's RPC host:port (not its Raft server
+	// ID — that lives in status.autopilot.servers).
 	// +optional
-	LeaderID string `json:"leaderID,omitempty"`
+	LeaderAddress string `json:"leaderAddress,omitempty"`
 
 	// AdvertiseAddress is the resolved LoadBalancer address
 	// +optional
@@ -671,6 +838,12 @@ type NomadClusterStatus struct {
 	// +optional
 	OperatorStatusSecretName string `json:"operatorStatusSecretName,omitempty"`
 
+	// OperatorManagementSecretName names the Secret holding the
+	// management-type token for day-2 ACL writes. Cache only — cleanup
+	// uses the deterministic name, not this field.
+	// +optional
+	OperatorManagementSecretName string `json:"operatorManagementSecretName,omitempty"`
+
 	// OperatorStatusPolicyName is the Nomad ACL policy name created for the
 	// operator status token. Stored for cleanup if the cluster is deleted.
 	// +optional
@@ -679,6 +852,11 @@ type NomadClusterStatus struct {
 	// RouteHost is the assigned Route hostname
 	// +optional
 	RouteHost string `json:"routeHost,omitempty"`
+
+	// NomadVersion is the agent version from /v1/agent/self; empty on
+	// probe miss. Non-fatal — never gates other enrichment.
+	// +optional
+	NomadVersion string `json:"nomadVersion,omitempty"`
 
 	// License contains Nomad Enterprise license information
 	// +optional
@@ -692,15 +870,39 @@ type NomadClusterStatus struct {
 	// +optional
 	CertificateAuthority *CertificateAuthorityStatus `json:"certificateAuthority,omitempty"`
 
-	// OIDC contains the observed state of the OIDC integration.
-	// +optional
-	OIDC OIDCStatus `json:"oidc,omitempty"`
-
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// LastReconcileTime is the timestamp of last reconciliation
+	// LastReconcileTime advances on status mutations and on the
+	// heartbeat threshold — NOT every loop, which would amplify etcd
+	// writes and fake GitOps drift. Liveness watchers see updates
+	// roughly every 2m30s when idle.
 	LastReconcileTime *metav1.Time `json:"lastReconcileTime,omitempty"`
+
+	// InitialReconcileEventEmitted debounces the one-shot
+	// InitialReconcileComplete Event across operator restarts.
+	// +optional
+	InitialReconcileEventEmitted bool `json:"initialReconcileEventEmitted,omitempty"`
+
+	// Keyring reports the keyring set the operator has reconciled.
+	// +optional
+	Keyring *KeyringStatus `json:"keyring,omitempty"`
+
+	// ScaleDown tracks an in-flight Raft scale-down; nil when none.
+	// Drives crash-safe resume, the replicas-edit admission freeze,
+	// and the in-progress metric.
+	// +optional
+	ScaleDown *ScaleDownStatus `json:"scaleDown,omitempty"`
+}
+
+// ScaleDownStatus tracks the in-flight Raft scale-down operation; the
+// reconcile loop and the replicas-freeze admission rule both depend on
+// its shape.
+type ScaleDownStatus struct {
+	// RemovedPeers lists Raft server IDs already removed this
+	// operation; never re-removed, even across operator restarts.
+	// +optional
+	RemovedPeers []string `json:"removedPeers,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -709,8 +911,14 @@ type NomadClusterStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas"
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Advertise",type="string",JSONPath=".status.advertiseAddress"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// spec.replicas is frozen while a scale-down is in flight — an edit
+// mid-operation would desynchronise the gap calculation from the
+// removed-peers list. The degraded-quorum opt-in is enforced by
+// ScaleDownPhase instead: CRD CEL cannot read metadata.annotations.
+// +kubebuilder:validation:XValidation:rule="self.spec.replicas == oldSelf.spec.replicas || !has(self.status) || !has(self.status.scaleDown) || !has(self.status.scaleDown.removedPeers) || size(self.status.scaleDown.removedPeers) == 0",message="spec.replicas cannot be modified while a scale-down operation is in progress; wait for status.scaleDown to clear"
 
 // NomadCluster is the Schema for the nomadclusters API.
 type NomadCluster struct {

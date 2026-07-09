@@ -453,3 +453,23 @@ func TestIssueCertificate_PKCS8_CA(t *testing.T) {
 		t.Errorf("Certificate signature verification failed: %v", err)
 	}
 }
+
+// TestGenerateCALifetime covers C5 (neo-jkg) / AC-2.4.8: the
+// operator-generated CA lifetime is capped at 2 years to bound the
+// blast radius of a leaked CA key.
+func TestGenerateCALifetime(t *testing.T) {
+	ca, err := GenerateCA("Lifetime Test CA")
+	if err != nil {
+		t.Fatalf("GenerateCA() error = %v", err)
+	}
+
+	cert, err := ParseCertificate(ca.CACertPEM)
+	if err != nil {
+		t.Fatalf("ParseCertificate() error = %v", err)
+	}
+
+	lifetime := cert.NotAfter.Sub(cert.NotBefore)
+	if lifetime > CALifetime {
+		t.Errorf("CA lifetime = %v, want <= %v (AC-2.4.8)", lifetime, CALifetime)
+	}
+}

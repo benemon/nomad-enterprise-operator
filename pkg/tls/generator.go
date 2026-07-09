@@ -57,7 +57,7 @@ type CertificateRequest struct {
 }
 
 // GenerateCA creates a new self-signed ECDSA P-256 CA certificate and key.
-// The CA is valid for 10 years.
+// The CA is valid for CALifetime (2 years, AC-2.4.8).
 func GenerateCA(commonName string) (*CABundle, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -73,7 +73,7 @@ func GenerateCA(commonName string) (*CABundle, error) {
 		SerialNumber:          serialNumber,
 		Subject:               pkix.Name{CommonName: commonName},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		NotAfter:              time.Now().Add(CALifetime),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,

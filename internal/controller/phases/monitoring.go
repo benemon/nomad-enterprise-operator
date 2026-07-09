@@ -18,16 +18,28 @@ package phases
 
 import (
 	"context"
+	"fmt"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/discovery"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+// serviceMonitorGVK is the GVK whose presence indicates the Prometheus
+// Operator CRDs are installed.
+var serviceMonitorGVK = schema.GroupVersionKind{
+	Group:   "monitoring.coreos.com",
+	Version: "v1",
+	Kind:    "ServiceMonitor",
+}
 
 // MonitoringPhase creates ServiceMonitor and PrometheusRule for Prometheus monitoring.
 type MonitoringPhase struct {
@@ -46,9 +58,17 @@ func (p *MonitoringPhase) Name() string {
 
 // Execute creates or updates Prometheus monitoring resources.
 func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	// Skip if OpenShift or monitoring is disabled
-	if !cluster.Spec.OpenShift.Enabled || !cluster.Spec.OpenShift.Monitoring.Enabled {
-		p.Log.V(1).Info("OpenShift monitoring disabled, skipping")
+	if !cluster.Spec.Monitoring.IsEnabled() {
+		p.Log.V(1).Info("Monitoring disabled, skipping")
+		return OK()
+	}
+
+	// Gate on Prometheus Operator CRD availability, not openshift.enabled
+	// (AC-2.2.4): vanilla clusters running Prometheus Operator get
+	// monitoring; clusters without the CRDs skip cleanly instead of
+	// producing apiserver 404s.
+	if !discovery.HasGVK(p.Client.RESTMapper(), serviceMonitorGVK) {
+		p.Log.V(1).Info("Prometheus Operator CRDs not installed, skipping monitoring resources")
 		return OK()
 	}
 
@@ -58,7 +78,7 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 	}
 
 	// Create PrometheusRule if enabled
-	if cluster.Spec.OpenShift.Monitoring.PrometheusRulesEnabled {
+	if cluster.Spec.Monitoring.PrometheusRulesEnabled {
 		if result := p.ensurePrometheusRule(ctx, cluster); result.Error != nil || result.Requeue {
 			return result
 		}
@@ -68,44 +88,61 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 }
 
 func (p *MonitoringPhase) ensureServiceMonitor(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	monitoring := cluster.Spec.OpenShift.Monitoring
-
-	interval := monitoring.ScrapeInterval
-	if interval == "" {
-		interval = "30s"
-	}
-
-	scrapeTimeout := monitoring.ScrapeTimeout
-	if scrapeTimeout == "" {
-		scrapeTimeout = "10s"
-	}
-
-	labels := GetLabels(cluster)
-	for k, v := range monitoring.AdditionalLabels {
-		labels[k] = v
-	}
-
+	// Nomad serves 4646 as TLS (tls.http is always on); without an
+	// explicit scheme the scrape is plain HTTP and every sample is
+	// lost (neo-q1d). Verification is skipped: targets are pod IPs,
+	// which the server cert carries no SAN for.
+	httpsScheme := monitoringv1.Scheme("https")
 	sm := &monitoringv1.ServiceMonitor{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name,
 			Namespace: cluster.Namespace,
-			Labels:    labels,
+			Labels:    GetLabels(cluster),
 		},
 		Spec: monitoringv1.ServiceMonitorSpec{
+			// Selects the headless service only (see its marker label):
+			// GetSelectorLabels is the POD selector — Services don't
+			// carry app/component, so it matched nothing (neo-q1d).
 			Selector: metav1.LabelSelector{
-				MatchLabels: GetSelectorLabels(cluster),
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/instance":  cluster.Name,
+					"nomad.hashicorp.com/metrics": "true",
+				},
 			},
 			NamespaceSelector: monitoringv1.NamespaceSelector{
 				MatchNames: []string{cluster.Namespace},
 			},
 			Endpoints: []monitoringv1.Endpoint{
 				{
-					Port:          "http",
-					Path:          "/v1/metrics",
-					Interval:      monitoringv1.Duration(interval),
-					ScrapeTimeout: monitoringv1.Duration(scrapeTimeout),
+					Port:   "http",
+					Path:   "/v1/metrics",
+					Scheme: &httpsScheme,
+					// Scrape cadence is operator-owned per ADR 0003;
+					// advanced tuning belongs in Prometheus config.
+					Interval:      monitoringv1.Duration("30s"),
+					ScrapeTimeout: monitoringv1.Duration("10s"),
 					Params: map[string][]string{
 						"format": {"prometheus"},
+					},
+					HTTPConfigWithProxyAndTLSFiles: monitoringv1.HTTPConfigWithProxyAndTLSFiles{
+						HTTPConfigWithTLSFiles: monitoringv1.HTTPConfigWithTLSFiles{
+							TLSConfig: &monitoringv1.TLSConfig{
+								SafeTLSConfig: monitoringv1.SafeTLSConfig{
+									InsecureSkipVerify: ptr.To(true),
+								},
+							},
+						},
+					},
+					// Dispatched jobs emit per-job series
+					// (blocked_evals_job_*, job_summary_*) — thousands
+					// of short-lived series under a dispatch workload
+					// that would flood shared Prometheus/thanos.
+					MetricRelabelConfigs: []monitoringv1.RelabelConfig{
+						{
+							SourceLabels: []monitoringv1.LabelName{"exported_job"},
+							Regex:        ".*dispatch-.*",
+							Action:       "drop",
+						},
 					},
 				},
 			},
@@ -215,6 +252,98 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 							},
 						},
 						{
+							// HVD scale trigger: sustained blocked evaluations mean the
+							// cluster cannot place work — capacity or scheduler saturation.
+							Alert: "NomadEvalsBlocked",
+							Expr:  intstr.FromString(`nomad_nomad_blocked_evals_total_blocked > 0`),
+							For:   ptr.To(monitoringv1.Duration("10m")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad evaluations blocked for 10m",
+								"description": "Cluster {{ $labels.host }} has had blocked evaluations for 10 minutes. Sustained blocked evals signal insufficient client capacity or scheduler saturation: review client capacity first; for control-plane saturation scale servers vertically (spec.resources), then horizontally (replicas 3 to 5).",
+							},
+						},
+						{
+							// HVD scale trigger: the leader's plan queue backing up means
+							// the scheduling pipeline is saturated at the control plane.
+							Alert: "NomadPlanQueueBacklog",
+							Expr:  intstr.FromString(`nomad_nomad_plan_queue_depth > 2`),
+							For:   ptr.To(monitoringv1.Duration("10m")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad plan queue backed up for 10m",
+								"description": "Leader {{ $labels.host }} has a sustained plan-queue backlog. The scheduling pipeline is saturated: scale servers vertically (spec.resources), then horizontally (replicas 3 to 5).",
+							},
+						},
+						{
+							// Storage-slowness SYMPTOM: the operator cannot observe
+							// storageClass IOPS, so it alerts on what slow disks cause.
+							// rate(sum)/rate(count) is the NaN-proof mean (the summary's
+							// quantile gauges read NaN on idle windows); units are ms and
+							// a healthy baseline is low single digits.
+							Alert: "NomadRaftCommitSlow",
+							Expr:  intstr.FromString(`rate(nomad_raft_commitTime_sum[5m]) / rate(nomad_raft_commitTime_count[5m]) > 50`),
+							For:   ptr.To(monitoringv1.Duration("10m")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad Raft commit latency sustained above 50ms",
+								"description": "Server {{ $labels.host }} is committing Raft entries slowly — the classic symptom of under-provisioned storage or CPU. Verify the storageClass meets the production sizing floor (3000+ IOPS, 75+ MB/s) and that requests equal limits (Guaranteed QoS). Distinct from NomadRaftBehind, which tracks log backlog rather than latency.",
+							},
+						},
+						{
+							// for:6h keeps a healthy auto-rotation (minutes at
+							// the 30d mark) from firing this — only stuck
+							// rotations and unrenewed user CAs alert.
+							Alert: "NomadCACertExpiringSoon",
+							Expr: intstr.FromString(fmt.Sprintf(
+								`(nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time()) / 86400 < 30 and (nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time()) > 0`,
+								cluster.Name, cluster.Namespace, cluster.Name, cluster.Namespace)),
+							For: ptr.To(monitoringv1.Duration("6h")),
+							Labels: map[string]string{
+								"severity": "warning",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad cluster CA approaching expiry",
+								"description": "The CA for NomadCluster {{ $labels.cluster }} expires in {{ $value | printf \"%.0f\" }} days. Operator-generated CAs rotate automatically — a persistent alert means rotation is stuck or the CA is user-provided and needs manual renewal.",
+							},
+						},
+						{
+							Alert: "NomadCACertExpired",
+							Expr: intstr.FromString(fmt.Sprintf(
+								`nomad_operator_cert_expiry_timestamp_seconds{cert="ca",cluster=%q,namespace=%q} - time() <= 0`,
+								cluster.Name, cluster.Namespace)),
+							For: ptr.To(monitoringv1.Duration("5m")),
+							Labels: map[string]string{
+								"severity": "critical",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad cluster CA has expired",
+								"description": "The CA for NomadCluster {{ $labels.cluster }} has expired; TLS handshakes fail cluster-wide. The Ready condition reports reason CAExpired.",
+							},
+						},
+						{
+							// Server leaves reissue automatically inside their 30d
+							// window; reaching 7d means the reissue path is broken.
+							Alert: "NomadServerCertExpiringSoon",
+							Expr: intstr.FromString(fmt.Sprintf(
+								`(nomad_operator_cert_expiry_timestamp_seconds{cert="server",cluster=%q,namespace=%q} - time()) / 86400 < 7 and (nomad_operator_cert_expiry_timestamp_seconds{cert="server",cluster=%q,namespace=%q} - time()) > 0`,
+								cluster.Name, cluster.Namespace, cluster.Name, cluster.Namespace)),
+							For: ptr.To(monitoringv1.Duration("1h")),
+							Labels: map[string]string{
+								"severity": "critical",
+							},
+							Annotations: map[string]string{
+								"summary":     "Nomad server certificate not reissuing",
+								"description": "The server certificate for NomadCluster {{ $labels.cluster }} expires in under 7 days; the operator should have reissued it at 30 days — investigate the Certificate phase.",
+							},
+						},
+						{
 							Alert: "NomadLicenseExpiringSoon",
 							Expr:  intstr.FromString(`(nomad_license_expiration_time_epoch - time()) / 86400 < 30 and (nomad_license_expiration_time_epoch - time()) > 0`),
 							For:   ptr.To(monitoringv1.Duration("1h")),
@@ -261,20 +390,23 @@ func (p *MonitoringPhase) ensurePrometheusRule(ctx context.Context, cluster *nom
 		return Error(err, "Failed to get PrometheusRule")
 	}
 
+	// Update on drift — without this, operators upgraded with new alert
+	// rules never deliver them to existing clusters (found during the
+	// neo-6xm.3 RBAC audit; the ru9 cert alerts were the first casualty).
+	if !equality.Semantic.DeepEqual(existing.Spec, rule.Spec) {
+		existing.Spec = rule.Spec
+		p.Log.Info("Updating PrometheusRule", "name", rule.Name)
+		if err := p.Client.Update(ctx, existing); err != nil {
+			return Error(err, "Failed to update PrometheusRule")
+		}
+	}
+
 	return OK()
 }
 
+// serviceMonitorNeedsUpdate compares the full spec, not hand-picked
+// fields: a partial comparison left pre-fix scheme-less ServiceMonitors
+// in place across operator upgrades (neo-q1d).
 func (p *MonitoringPhase) serviceMonitorNeedsUpdate(existing, desired *monitoringv1.ServiceMonitor) bool {
-	if len(existing.Spec.Endpoints) != len(desired.Spec.Endpoints) {
-		return true
-	}
-	if len(existing.Spec.Endpoints) > 0 && len(desired.Spec.Endpoints) > 0 {
-		if existing.Spec.Endpoints[0].Interval != desired.Spec.Endpoints[0].Interval {
-			return true
-		}
-		if existing.Spec.Endpoints[0].ScrapeTimeout != desired.Spec.Endpoints[0].ScrapeTimeout {
-			return true
-		}
-	}
-	return false
+	return !equality.Semantic.DeepEqual(existing.Spec, desired.Spec)
 }

@@ -9,11 +9,17 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "1.11-ent"
+    tag: "2.0.3-ent"
+    # pullPolicy: IfNotPresent  # default Always; override for air-gapped/digest-pinned workflows
+    # For supply-chain pinning, add the manifest digest — it takes
+    # precedence over the tag at deploy time while the tag stays
+    # documentation:
+    # digest: "sha256:<64 hex chars>"
   license:
-    # Option 1: Reference an existing secret
+    # Option 1: Reference an existing secret.
+    # The license must be stored under the key "license" (operator-owned
+    # convention per ADR 0003).
     secretName: nomad-license
-    secretKey: license
     # Option 2: Provide license inline (operator creates/manages secret)
     # value: "<your-license-content>"
   topology:
@@ -23,43 +29,96 @@ spec:
     external:
       type: LoadBalancer
       # loadBalancerIP: "10.0.0.100"  # Optional: request specific IP
-  openshift:
+  # Monitoring works on any cluster running Prometheus Operator —
+  # independent of openshift.enabled. Resources are only created when
+  # the monitoring.coreos.com CRDs are installed. Scrape cadence is
+  # operator-owned (30s interval, 10s timeout — ADR 0003).
+  monitoring:
     enabled: true
-    route:
-      enabled: true
-      # Route always uses reencrypt termination with HTTP→HTTPS redirect.
-      # To use a custom external certificate:
-      # tls:
-      #   certificateSecretName: my-route-cert
-    monitoring:
-      enabled: true
-      scrapeInterval: 30s
-      scrapeTimeout: 10s
-      prometheusRulesEnabled: true
+    prometheusRulesEnabled: true
   server:
     acl:
-      enabled: true  # Auto-bootstrapped by operator
+      enabled: true  # Auto-bootstrapped; token stored in <name>-acl-bootstrap
     # mTLS is always enabled. The operator automatically generates and manages
     # all certificates (CA, server, operator client). No additional config needed.
     # To use your own CA instead of the operator-generated one:
     # tls:
     #   ca:
     #     secretName: my-ca-secret  # Secret with tls.crt and tls.key
-    #     secretKeys:               # Override key names if needed
+    #     secretKeys:               # Override key names for ESO/VSO-shaped Secrets
     #       certificate: tls.crt    # default: tls.crt
     #       privateKey: tls.key     # default: tls.key
-    autopilot:
-      cleanupDeadServers: true
-      lastContactThreshold: "200ms"
-      maxTrailingLogs: 250
-      serverStabilizationTime: "10s"
+    # Autopilot is operator-owned per ADR 0003: cleanup dead servers,
+    # 200ms last-contact, 250 trailing logs, 10s stabilization.
     audit:
       enabled: true
-      format: json
-      rotateDuration: "24h"
-      rotateMaxFiles: 15
+      # Delivery (enforced), format (json), and rotation (24h × 15 files)
+      # are operator-owned per ADR 0003.
+    # GC retention: how long terminal job/eval/alloc history is kept
+    # before garbage collection. Unset fields keep Nomad's own defaults
+    # (job 4h, batch-eval 24h, eval 1h). High-churn dispatch workloads
+    # accumulate dead batch state — lower these to reclaim leader
+    # memory sooner:
+    # gc:
+    #   jobHistory: "1h"
+    #   batchEvalHistory: "2h"
+    #   evalHistory: "30m"
+    # Keyrings: wrap Nomad's root encryption keys with an external KMS.
+    # STRONGLY RECOMMENDED for production — the default (aead) keyring
+    # stores its key-encryption key in cleartext inside Raft, so every
+    # snapshot carries usable key material. With an external KMS,
+    # snapshots stay restorable AND safe at rest.
+    #
+    # HA pair across two independent Vault clusters (any one surviving
+    # Vault keeps keys decryptable). Each entry carries its own auth —
+    # here vector 3 (ephemeral ServiceAccount token, recommended) and a
+    # user-managed Vault token. keyIDPrefix must be distinct per entry.
+    # keyrings:
+    # - name: primary
+    #   transit:
+    #     address: "https://vault-a.example.com:8200"
+    #     keyName: nomad-keyring
+    #     mountPath: transit/
+    #     keyIDPrefix: a-
+    #     auth:
+    #       method: kubernetes
+    #       mount: kubernetes
+    #       kubernetes:
+    #         role: nomad-keyring
+    #         audiences: ["vault"]          # default
+    #         tokenExpirationSeconds: 600   # default
+    # - name: secondary
+    #   transit:
+    #     address: "https://vault-b.example.com:8200"
+    #     keyName: nomad-keyring
+    #     mountPath: transit/
+    #     keyIDPrefix: b-
+    #     auth:
+    #       method: token
+    #       token:
+    #         secretRef:
+    #           name: vault-b-token         # Secret key: VAULT_TOKEN
+    #
+    # Same-type cloud pair (two AWS KMS keys, different regions or
+    # accounts). Omit credentialsSecretRef to use ambient identity
+    # (IRSA / Workload Identity / Managed Identity — recommended);
+    # each entry may carry its own static credentials otherwise.
+    # keyrings:
+    # - name: kms-west
+    #   awskms:
+    #     kmsKeyID: alias/nomad-west
+    #     region: eu-west-2
+    # - name: kms-east
+    #   awskms:
+    #     kmsKeyID: alias/nomad-east
+    #     region: us-east-1
+    #     credentialsSecretRef:
+    #       name: aws-east-creds  # keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
   persistence:
     size: 10Gi
+    # reclaimPolicy: Delete  # default; Retain keeps data PVCs, but a
+    #   recreated cluster cannot re-adopt them automatically — recover
+    #   via NomadSnapshot restore instead
   resources:
     limits:
       cpu: "2"
@@ -67,9 +126,12 @@ spec:
     requests:
       cpu: 500m
       memory: 1Gi
-  affinity:
-    podAntiAffinity:
-      enabled: true
-      type: preferred
-      weight: 100
-      topologyKey: kubernetes.io/hostname
+  # Pod anti-affinity is operator-owned per ADR 0003 (preferred, weight 100,
+  # hostname topology, applied at replicas >= 3). For multi-zone spreading:
+  # topologySpreadConstraints:
+  #   - maxSkew: 1
+  #     topologyKey: topology.kubernetes.io/zone
+  #     whenUnsatisfiable: ScheduleAnyway
+  #     labelSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/instance: nomad-enterprise

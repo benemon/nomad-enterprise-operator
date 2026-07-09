@@ -20,7 +20,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 
@@ -71,14 +73,21 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		return Error(err, "Failed to get StatefulSet")
 	}
 
+	// During scale-down, ScaleDownPhase owns sts.spec.replicas (it
+	// patches only after peer removal) — preserve the existing count
+	// here so the phases don't race.
+	if existing.Spec.Replicas != nil && *existing.Spec.Replicas > cluster.Spec.Replicas {
+		sts.Spec.Replicas = existing.Spec.Replicas
+	}
+
 	// Update StatefulSet if spec changed
-	if p.needsUpdate(existing, sts) {
+	if update, reason := p.needsUpdate(existing, sts); update {
 		// Preserve fields that shouldn't be updated
 		sts.Spec.VolumeClaimTemplates = existing.Spec.VolumeClaimTemplates
 
 		existing.Spec = sts.Spec
 		existing.Annotations = sts.Annotations
-		p.Log.Info("Updating StatefulSet", "name", sts.Name)
+		p.Log.Info("Updating StatefulSet", "name", sts.Name, "reason", reason)
 		if err := p.Client.Update(ctx, existing); err != nil {
 			return Error(err, "Failed to update StatefulSet")
 		}
@@ -94,7 +103,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	}
 
 	// Build container image (defaults set via kubebuilder tags on ImageSpec)
-	imageFull := fmt.Sprintf("%s:%s", cluster.Spec.Image.Repository, cluster.Spec.Image.Tag)
+	imageFull := ImageRef(cluster)
 	pullPolicy := cluster.Spec.Image.PullPolicy
 
 	// Build environment variables
@@ -113,10 +122,9 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	podSpec := corev1.PodSpec{
 		ServiceAccountName: cluster.Name,
 		ImagePullSecrets:   cluster.Spec.ImagePullSecrets,
-		// SecurityContext is intentionally minimal:
-		// On OpenShift, the SCC injects RunAsUser and fsGroup automatically.
-		// On vanilla Kubernetes, the Nomad image runs as root by default.
-		SecurityContext: &corev1.PodSecurityContext{},
+		// PSS restricted (neo-8xu); identity fields conditional on
+		// platform — see PodSecurityContext.
+		SecurityContext: PodSecurityContext(cluster.Spec.OpenShift.Enabled),
 		Containers: []corev1.Container{
 			{
 				Name:            "nomad",
@@ -129,12 +137,15 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 					{Name: "rpc", ContainerPort: 4647, Protocol: corev1.ProtocolTCP},
 					{Name: "serf", ContainerPort: 4648, Protocol: corev1.ProtocolTCP},
 				},
+				// Liveness must be leader-INDEPENDENT (neo-pl4):
+				// /v1/agent/health returns 500 without a cluster leader,
+				// so an HTTP liveness check kills healthy followers
+				// mid-election and turns one OOM into a quorum-loss
+				// cascade. TCP asserts only that the agent is alive.
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path:   "/v1/agent/health",
-							Port:   intstr.FromInt(4646),
-							Scheme: corev1.URISchemeHTTPS,
+						TCPSocket: &corev1.TCPSocketAction{
+							Port: intstr.FromInt(4646),
 						},
 					},
 					InitialDelaySeconds: 30,
@@ -155,8 +166,9 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 					TimeoutSeconds:      3,
 					FailureThreshold:    2,
 				},
-				Resources:    getResourcesWithDefaults(cluster.Spec.Resources),
-				VolumeMounts: volumeMounts,
+				Resources:       getResourcesWithDefaults(cluster.Spec.Resources),
+				VolumeMounts:    volumeMounts,
+				SecurityContext: ContainerSecurityContext(),
 			},
 		},
 		Volumes:      volumes,
@@ -164,9 +176,12 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		Tolerations:  cluster.Spec.Tolerations,
 	}
 
-	// Add affinity if configured
-	if cluster.Spec.Affinity != nil && cluster.Spec.Affinity.PodAntiAffinity.Enabled {
-		podSpec.Affinity = p.buildAffinity(cluster)
+	// Pod anti-affinity is operator-owned per ADR 0003: preferred
+	// (required is a footgun on small clusters), weight 100, hostname
+	// topology, applied at replicas >= 3. Multi-zone spreading uses the
+	// user-facing spec.topologySpreadConstraints instead.
+	if replicas >= 3 {
+		podSpec.Affinity = buildOperatorAffinity(cluster)
 	}
 
 	// Add topology spread constraints
@@ -174,20 +189,21 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		podSpec.TopologySpreadConstraints = cluster.Spec.TopologySpreadConstraints
 	}
 
-	// Get config checksum for pod annotation - include all config-affecting fields
-	// This ensures pods restart when any config changes
+	// Checksum only non-scale-dependent config: the scale-dependent
+	// HCL (bootstrap_expect, retry_join) is startup-only in Nomad, and
+	// including it would roll pods — and break quorum — on every
+	// replica change.
+	keyringsJSON, _ := json.Marshal(p.Keyrings)
 	configChecksum := ConfigChecksum(map[string]string{
-		"advertise":     p.AdvertiseAddress,
-		"gossip":        p.GossipKey,
-		"acl":           strconv.FormatBool(cluster.Spec.Server.ACL.Enabled),
-		"tls":           "true",
-		"audit":         strconv.FormatBool(cluster.Spec.Server.Audit.Enabled),
-		"auditDelivery": cluster.Spec.Server.Audit.DeliveryGuarantee,
-		"replicas":      strconv.Itoa(int(replicas)),
-		"region":        cluster.Spec.Topology.Region,
-		"datacenter":    cluster.Spec.Topology.Datacenter,
+		"advertise":  p.AdvertiseAddress,
+		"gossip":     p.GossipKey,
+		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
+		"tls":        "true",
+		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.IsEnabled()),
+		"region":     cluster.Spec.Topology.Region,
+		"datacenter": cluster.Spec.Topology.Datacenter,
+		"keyrings":   string(keyringsJSON),
 	})
-
 	// Get secrets checksum for pod annotation - hash actual secret contents
 	// This ensures pods restart when referenced secrets change
 	secretsChecksum, err := p.computeSecretsChecksum(ctx, cluster)
@@ -232,10 +248,6 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []corev1.EnvVar {
 	// Get the effective license secret name (handles inline vs external)
 	licenseSecretName := getLicenseSecretName(cluster)
-	licenseKey := cluster.Spec.License.SecretKey
-	if licenseKey == "" {
-		licenseKey = "license"
-	}
 
 	env := []corev1.EnvVar{
 		{
@@ -245,7 +257,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: licenseSecretName,
 					},
-					Key: licenseKey,
+					// Key name is operator-owned per ADR 0003.
+					Key: licenseSecretKey,
 				},
 			},
 		},
@@ -288,8 +301,50 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 	return env
 }
 
+// buildKeyringVolumes returns the volumes and mounts for keyring
+// secret material: the GCP service-account JSON and per-transit TLS
+// files, at the paths the keyring phase renders into the HCL.
+func buildKeyringVolumes(entries []nomadv1alpha1.KeyringEntry) ([]corev1.Volume, []corev1.VolumeMount) {
+	var vols []corev1.Volume
+	var mounts []corev1.VolumeMount
+	for _, e := range entries {
+		if e.GCPCKMS != nil && e.GCPCKMS.CredentialsSecretRef != nil {
+			vols = append(vols, corev1.Volume{
+				Name: "keyring-gcp-" + e.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: e.GCPCKMS.CredentialsSecretRef.Name},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{
+				Name: "keyring-gcp-" + e.Name, MountPath: "/nomad/keyring-gcp/" + e.Name, ReadOnly: true})
+		}
+		if e.Transit != nil && e.Transit.CASecretRef != nil {
+			vols = append(vols, corev1.Volume{
+				Name: "keyring-ca-" + e.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: e.Transit.CASecretRef.Name},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{
+				Name: "keyring-ca-" + e.Name, MountPath: KeyringTLSPath(e.Name), ReadOnly: true})
+		}
+		if e.Transit != nil && e.Transit.ClientCertSecretRef != nil {
+			vols = append(vols, corev1.Volume{
+				Name: "keyring-cc-" + e.Name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: e.Transit.ClientCertSecretRef.Name},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{
+				Name: "keyring-cc-" + e.Name, MountPath: KeyringTLSPath(e.Name) + "-client", ReadOnly: true})
+		}
+	}
+	return vols, mounts
+}
+
 func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster) []corev1.VolumeMount {
-	mounts := []corev1.VolumeMount{
+	_, keyringMounts := buildKeyringVolumes(p.KeyringEntries)
+	mounts := append(keyringMounts, []corev1.VolumeMount{
 		{
 			Name:      "data",
 			MountPath: "/nomad/data",
@@ -299,10 +354,16 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 			MountPath: "/nomad/config",
 			ReadOnly:  true,
 		},
-	}
+		// The root filesystem is read-only (PSS restricted, neo-8xu);
+		// /tmp is the one scratch path Nomad may write outside data_dir.
+		{
+			Name:      "tmp",
+			MountPath: "/tmp",
+		},
+	}...)
 
 	// Add audit volume mount (always needed when audit is enabled)
-	if cluster.Spec.Server.Audit.Enabled {
+	if cluster.Spec.Server.Audit.IsEnabled() {
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      "audit",
 			MountPath: "/nomad/audit",
@@ -324,21 +385,30 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 		{
 			Name: "config",
 			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: cluster.Name + "-config",
-					},
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: cluster.Name + "-config",
 				},
 			},
 		},
 	}
+
+	keyringVols, _ := buildKeyringVolumes(p.KeyringEntries)
+	volumes = append(volumes, keyringVols...)
+
+	// Scratch space to pair with readOnlyRootFilesystem (neo-8xu)
+	volumes = append(volumes, corev1.Volume{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
 
 	// TLS volume from the operator-managed server certificate secret — mTLS is always enabled
 	volumes = append(volumes, corev1.Volume{
 		Name: "tls",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: cluster.Name + "-tls",
+				SecretName: TLSSecretName(cluster.Name),
 			},
 		},
 	})
@@ -365,14 +435,12 @@ func isPersistenceEnabled(cluster *nomadv1alpha1.NomadCluster) bool {
 }
 
 func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.NomadCluster) []corev1.PersistentVolumeClaim {
-	if !isPersistenceEnabled(cluster) {
-		return nil
-	}
+	var templates []corev1.PersistentVolumeClaim
 
-	dataSize := cluster.Spec.Persistence.Size
+	if isPersistenceEnabled(cluster) {
+		dataSize := cluster.Spec.Persistence.Size
 
-	templates := []corev1.PersistentVolumeClaim{
-		{
+		dataPVC := corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "data",
 				Labels: GetLabels(cluster),
@@ -385,16 +453,19 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 					},
 				},
 			},
-		},
+		}
+
+		if cluster.Spec.Persistence.StorageClassName != "" {
+			dataPVC.Spec.StorageClassName = &cluster.Spec.Persistence.StorageClassName
+		}
+
+		templates = append(templates, dataPVC)
 	}
 
-	// Add storage class if specified
-	if cluster.Spec.Persistence.StorageClassName != "" {
-		templates[0].Spec.StorageClassName = &cluster.Spec.Persistence.StorageClassName
-	}
-
-	// Add audit volume when audit is enabled (opinionated: audit always gets persistent storage)
-	if cluster.Spec.Server.Audit.Enabled {
+	// Audit PVC is independent of data persistence (B6 / AC-4.5.1):
+	// audit always gets persistent storage when enabled, even when
+	// spec.persistence is disabled and data runs on emptyDir.
+	if cluster.Spec.Server.Audit.IsEnabled() {
 		auditSize := cluster.Spec.Server.Audit.Size
 		if auditSize == "" {
 			auditSize = "5Gi"
@@ -427,45 +498,19 @@ func (p *StatefulSetPhase) buildVolumeClaimTemplates(cluster *nomadv1alpha1.Noma
 	return templates
 }
 
-func (p *StatefulSetPhase) buildAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity {
-	antiAffinity := cluster.Spec.Affinity.PodAntiAffinity
-
-	topologyKey := antiAffinity.TopologyKey
-	if topologyKey == "" {
-		topologyKey = "kubernetes.io/hostname"
-	}
-
-	labelSelector := &metav1.LabelSelector{
-		MatchLabels: GetSelectorLabels(cluster),
-	}
-
-	if antiAffinity.Type == "required" {
-		return &corev1.Affinity{
-			PodAntiAffinity: &corev1.PodAntiAffinity{
-				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
-					{
-						LabelSelector: labelSelector,
-						TopologyKey:   topologyKey,
-					},
-				},
-			},
-		}
-	}
-
-	// Default to preferred
-	weight := antiAffinity.Weight
-	if weight == 0 {
-		weight = 100
-	}
-
+// buildOperatorAffinity returns preferred (not required) hostname
+// anti-affinity so small clusters co-locate instead of going Pending.
+func buildOperatorAffinity(cluster *nomadv1alpha1.NomadCluster) *corev1.Affinity {
 	return &corev1.Affinity{
 		PodAntiAffinity: &corev1.PodAntiAffinity{
 			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
 				{
-					Weight: weight,
+					Weight: 100,
 					PodAffinityTerm: corev1.PodAffinityTerm{
-						LabelSelector: labelSelector,
-						TopologyKey:   topologyKey,
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: GetSelectorLabels(cluster),
+						},
+						TopologyKey: "kubernetes.io/hostname",
 					},
 				},
 			},
@@ -473,30 +518,54 @@ func (p *StatefulSetPhase) buildAffinity(cluster *nomadv1alpha1.NomadCluster) *c
 	}
 }
 
-func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) bool {
-	// Check replicas
+// needsUpdate reports drift in phase-managed fields; the summary
+// names the drifted field, without which unexpected rolling restarts
+// are nearly undebuggable.
+func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (bool, string) {
 	if *existing.Spec.Replicas != *desired.Spec.Replicas {
-		return true
+		return true, fmt.Sprintf("replicas %d -> %d", *existing.Spec.Replicas, *desired.Spec.Replicas)
 	}
 
-	// Check container image
 	if len(existing.Spec.Template.Spec.Containers) > 0 && len(desired.Spec.Template.Spec.Containers) > 0 {
 		if existing.Spec.Template.Spec.Containers[0].Image != desired.Spec.Template.Spec.Containers[0].Image {
-			return true
+			return true, fmt.Sprintf("image %q -> %q",
+				existing.Spec.Template.Spec.Containers[0].Image,
+				desired.Spec.Template.Spec.Containers[0].Image)
+		}
+		// Handler-only comparison: numeric probe fields get
+		// API-server defaults, so a full DeepEqual would roll forever.
+		existingLiveness := existing.Spec.Template.Spec.Containers[0].LivenessProbe
+		desiredLiveness := desired.Spec.Template.Spec.Containers[0].LivenessProbe
+		if (existingLiveness == nil) != (desiredLiveness == nil) ||
+			(existingLiveness != nil && !reflect.DeepEqual(existingLiveness.ProbeHandler, desiredLiveness.ProbeHandler)) {
+			return true, "liveness probe handler"
+		}
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].SecurityContext,
+			desired.Spec.Template.Spec.Containers[0].SecurityContext) {
+			return true, "container securityContext"
 		}
 	}
 
-	// Check config checksum annotation
+	// Both contexts are operator-rendered with every field set, so a
+	// full comparison cannot loop on API-server defaulting. Without
+	// this, toggling spec.openshift.enabled never reaches a live
+	// StatefulSet and SCC-rejected pods stay rejected (neo-8nc).
+	if !reflect.DeepEqual(existing.Spec.Template.Spec.SecurityContext, desired.Spec.Template.Spec.SecurityContext) {
+		return true, "pod securityContext"
+	}
+
 	existingChecksum := existing.Spec.Template.Annotations["checksum/config"]
 	desiredChecksum := desired.Spec.Template.Annotations["checksum/config"]
 	if existingChecksum != desiredChecksum {
-		return true
+		return true, fmt.Sprintf("checksum/config %s -> %s", existingChecksum, desiredChecksum)
 	}
 
-	// Check secrets checksum annotation (triggers rolling restart when secrets change)
 	existingSecretsChecksum := existing.Spec.Template.Annotations["checksum/secrets"]
 	desiredSecretsChecksum := desired.Spec.Template.Annotations["checksum/secrets"]
-	return existingSecretsChecksum != desiredSecretsChecksum
+	if existingSecretsChecksum != desiredSecretsChecksum {
+		return true, fmt.Sprintf("checksum/secrets %s -> %s", existingSecretsChecksum, desiredSecretsChecksum)
+	}
+	return false, ""
 }
 
 // getResourcesWithDefaults returns resource requirements with sensible defaults applied.
@@ -545,12 +614,15 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 	}
 
 	// Gossip secret
-	if gossipSecret := getGossipSecretName(cluster); gossipSecret != "" {
+	if gossipSecret := GossipSecretName(cluster); gossipSecret != "" {
 		secretNames = append(secretNames, gossipSecret)
 	}
 
 	// TLS secret — mTLS is always enabled
-	secretNames = append(secretNames, cluster.Name+"-tls")
+	secretNames = append(secretNames, TLSSecretName(cluster.Name))
+
+	// Keyring credential/TLS secrets: rotation must roll pods
+	secretNames = append(secretNames, KeyringSecretNamesFromEntries(p.KeyringEntries)...)
 
 	// Sort for deterministic ordering
 	sort.Strings(secretNames)
@@ -591,9 +663,3 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 }
 
 // getGossipSecretName returns the gossip secret name for the cluster.
-func getGossipSecretName(cluster *nomadv1alpha1.NomadCluster) string {
-	if cluster.Spec.Gossip.SecretName != "" {
-		return cluster.Spec.Gossip.SecretName
-	}
-	return cluster.Name + "-gossip"
-}

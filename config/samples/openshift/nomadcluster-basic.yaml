@@ -1,7 +1,7 @@
 # Basic OpenShift NomadCluster - single replica for development/testing
 #
 # Defaults applied automatically:
-#   image: hashicorp/nomad:1.11-ent
+#   image: hashicorp/nomad:2.0.3-ent
 #   region: global
 #   datacenter: <namespace>
 #   gossip key: auto-generated
@@ -12,7 +12,7 @@
 #   autopilot: cleanup dead servers, 200ms threshold, 250 trailing logs
 #   resources: 250m/512Mi requests, 2/2Gi limits
 #   services: LoadBalancer for external access
-#   openshift route: edge TLS termination with HTTP->HTTPS redirect
+#   openshift route: reencrypt TLS termination with HTTP->HTTPS redirect
 #
 apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
@@ -26,5 +26,5 @@ spec:
     enabled: true
     route:
       enabled: true
-    monitoring:
-      enabled: true
+  monitoring:
+    enabled: true

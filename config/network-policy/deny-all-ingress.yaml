@@ -1,0 +1,26 @@
+# Default-deny ingress for the operator pod (neo-6xm.3). Pairs with
+# allow-metrics-traffic.yaml: with both applied, the ONLY inbound
+# traffic the operator accepts is metrics scrapes on 8443 from
+# namespaces labeled metrics=enabled. The operator serves no other
+# inbound API (webhooks were removed in neo-bqb); health probes are
+# kubelet-originated and not subject to NetworkPolicy.
+#
+# Egress is deliberately not restricted here: the operator needs the
+# API server, per-cluster Nomad endpoints (4646), and DNS — a portable
+# egress allowlist cannot be expressed generically. Restrict egress in
+# an environment-specific overlay if your platform requires it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: nomad-enterprise-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: deny-all-ingress
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: nomad-enterprise-operator
+  policyTypes:
+    - Ingress

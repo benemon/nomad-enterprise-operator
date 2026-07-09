@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-{{ .Iteration }}-nodesim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: load-{{ .Iteration }}-nodesim
+  template:
+    metadata:
+      labels:
+        app: load-{{ .Iteration }}-nodesim
+    spec:
+      containers:
+        - name: nodesim
+          image: "{{ .nodesim_image }}"
+          command: ["/bin/nomad-nodesim"]
+          args:
+            # RPC 4647 is exposed on the headless Service only (the
+            # -internal ClusterIP is HTTP 4646 — proven live, i/o timeout).
+            # RPC hostname verification checks server.<region>.nomad, not
+            # the dialed name, so the bare in-namespace name works.
+            - -server-addr=load-{{ .Iteration }}-headless:4647
+            # Ladder mode: cluster i carries (i+1) x the base workload, so
+            # one run reads out as a scale-response row for the profile
+            # under test (which tier does this size sustain?).
+            - -node-num={{ if .load_ladder }}{{ mul .sim_nodes (add .Iteration 1) }}{{ else }}{{ .sim_nodes }}{{ end }}
+            - -node-name-prefix=load-{{ .Iteration }}-sim
+            - -work-dir=/work
+            - -log-level=info
+          env:
+            # All three set => nodesim enables full RPC mTLS
+            # (tlsConfigFromEnv), presenting the operator-issued cert —
+            # its EKU covers clientAuth, so no new cert machinery.
+            - name: NOMAD_CACERT
+              value: /etc/nomad-tls/ca.crt
+            - name: NOMAD_CLIENT_CERT
+              value: /etc/nomad-tls/tls.crt
+            - name: NOMAD_CLIENT_KEY
+              value: /etc/nomad-tls/tls.key
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/nomad-tls
+              readOnly: true
+            - name: work
+              mountPath: /work
+      volumes:
+        # Created by the operator during cluster boot; the kubelet blocks
+        # the pod on the missing Secret until then — free sequencing.
+        - name: tls
+          secret:
+            secretName: load-{{ .Iteration }}-tls
+        # Per-node state dirs; emptyDir is writable by the SCC-assigned UID.
+        - name: work
+          emptyDir: {}

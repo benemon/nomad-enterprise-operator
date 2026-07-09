@@ -27,8 +27,11 @@ type NomadSnapshotSpec struct {
 	// ClusterRef references the NomadCluster to snapshot
 	ClusterRef ClusterReference `json:"clusterRef"`
 
-	// Schedule defines snapshot timing
-	Schedule SnapshotSchedule `json:"schedule"`
+	// Schedule, when set, runs a recurring snapshot-agent Deployment;
+	// when omitted, a one-shot Job. Adding or removing it switches
+	// modes — blocked while a one-shot Job is running (CEL).
+	// +optional
+	Schedule *SnapshotSchedule `json:"schedule,omitempty"`
 
 	// Target defines where to store snapshots
 	Target SnapshotTarget `json:"target"`
@@ -58,8 +61,10 @@ type ClusterReference struct {
 
 // SnapshotSchedule defines when and how often to take snapshots.
 type SnapshotSchedule struct {
-	// Interval between snapshots (e.g., "1h", "24h")
+	// Interval between snapshots (e.g., "1h", "24h"). Must be a Go
+	// duration string — validated at admission.
 	// +kubebuilder:default="1h"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
 	Interval string `json:"interval,omitempty"`
 
 	// Retain is the number of snapshots to keep
@@ -155,10 +160,42 @@ type SnapshotLocalConfig struct {
 	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
+// Valid status.operation values.
+const (
+	SnapshotOperationJob        = "Job"
+	SnapshotOperationDeployment = "Deployment"
+)
+
+// Valid status.phase values for the one-shot Job mode.
+const (
+	SnapshotPhasePending   = "Pending"
+	SnapshotPhaseRunning   = "Running"
+	SnapshotPhaseSucceeded = "Succeeded"
+	SnapshotPhaseFailed    = "Failed"
+)
+
 // NomadSnapshotStatus defines the observed state of NomadSnapshot.
 type NomadSnapshotStatus struct {
 	// Conditions represent the latest observations of the snapshot agent state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Operation names the child workload currently reconciled for this
+	// NomadSnapshot: "Job" (one-shot, spec.schedule omitted) or
+	// "Deployment" (recurring, spec.schedule set). Status reflects the
+	// operation, not the storage artifact.
+	// +kubebuilder:validation:Enum=Job;Deployment
+	// +optional
+	Operation string `json:"operation,omitempty"`
+
+	// Phase tracks the one-shot Job lifecycle; empty in recurring mode.
+	// Running also gates the mode-switch CEL rule.
+	// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// JobName is the name of the one-shot snapshot Job (Job mode only)
+	// +optional
+	JobName string `json:"jobName,omitempty"`
 
 	// TokenAccessorID is the Nomad ACL token accessor ID for cleanup
 	// +optional
@@ -169,6 +206,14 @@ type NomadSnapshotStatus struct {
 	// +optional
 	PolicyName string `json:"policyName,omitempty"`
 
+	// NomadVersion mirrors the referenced cluster's version: the
+	// version snapshots are currently being taken against. Snapshots
+	// restore only to the same Nomad version — check this before a
+	// restore. Follows the cluster across upgrades; for a one-shot
+	// artifact's frozen value see lastSnapshot.nomadVersion.
+	// +optional
+	NomadVersion string `json:"nomadVersion,omitempty"`
+
 	// LastSnapshot contains information about the most recent snapshot
 	// +optional
 	LastSnapshot *SnapshotInfo `json:"lastSnapshot,omitempty"`
@@ -176,10 +221,6 @@ type NomadSnapshotStatus struct {
 	// NextScheduled is when the next snapshot is expected
 	// +optional
 	NextScheduled *metav1.Time `json:"nextScheduled,omitempty"`
-
-	// SnapshotCount is the total number of snapshots stored
-	// +optional
-	SnapshotCount int `json:"snapshotCount,omitempty"`
 
 	// ObservedGeneration is the last observed generation
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -213,29 +254,34 @@ type SnapshotInfo struct {
 	// Status of the snapshot (Success, Failed)
 	Status string `json:"status,omitempty"`
 
-	// Size of the snapshot
-	// +optional
-	Size string `json:"size,omitempty"`
-
-	// Location is the storage path/URL of the snapshot
-	// +optional
-	Location string `json:"location,omitempty"`
-
 	// Error message if snapshot failed
 	// +optional
 	Error string `json:"error,omitempty"`
+
+	// NomadVersion the artifact was taken at. Snapshots restore only
+	// to the same Nomad version; this is the per-artifact record of
+	// it, frozen at Job completion (one-shot mode).
+	// +optional
+	NomadVersion string `json:"nomadVersion,omitempty"`
 }
 
+// NomadSnapshot is the Schema for the nomadsnapshots API.
+//
+// The XValidation rule below blocks a mode switch (adding/removing
+// spec.schedule) while a one-shot Job is running; recurring mode is
+// never blocked.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ns;snapshot
 // +kubebuilder:printcolumn:name="Cluster",type="string",JSONPath=".spec.clusterRef.name"
+// +kubebuilder:printcolumn:name="Operation",type="string",JSONPath=".status.operation"
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Interval",type="string",JSONPath=".spec.schedule.interval"
-// +kubebuilder:printcolumn:name="Retain",type="integer",JSONPath=".spec.schedule.retain"
 // +kubebuilder:printcolumn:name="Last Snapshot",type="date",JSONPath=".status.lastSnapshot.time"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.nomadVersion"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-
-// NomadSnapshot is the Schema for the nomadsnapshots API.
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status) || !has(self.status.phase) || self.status.phase != 'Running'",message="mode switch (adding/removing spec.schedule) is blocked while a one-shot snapshot Job is running; wait for it to complete"
 type NomadSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

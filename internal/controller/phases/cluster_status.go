@@ -21,7 +21,9 @@ import (
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -72,29 +74,10 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 		p.Log.V(1).Info("Got leader address", "leader", leader)
 	}
 
-	// Get server health
-	health, err := nomadClient.CheckHealth()
-	if err != nil {
-		p.Log.V(1).Info("Failed to get cluster health", "error", err)
-	} else {
-		p.ClusterHealthy = health.Server.OK
-		p.Log.V(1).Info("Got cluster health", "healthy", health.Server.OK)
-	}
-
-	// Get peer count
-	peers, err := nomadClient.GetPeers()
-	if err != nil {
-		p.Log.V(1).Info("Failed to get peers", "error", err)
-	} else {
-		p.PeerCount = len(peers)
-		p.Log.V(1).Info("Got peer count", "count", len(peers))
-	}
-
 	// Get license information
 	license, err := nomadClient.GetLicense(ctx, aclToken)
 	if err != nil {
 		p.Log.V(1).Info("Failed to get license info", "error", err)
-		p.LicenseError = err
 	} else {
 		p.License = &nomadv1alpha1.LicenseStatus{
 			Valid:           true, // If we got a response, it's valid
@@ -104,13 +87,38 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 			Features:        license.Features,
 		}
 		p.Log.V(1).Info("Got license info", "licenseId", license.LicenseID, "expiration", license.ExpirationTime)
+
+		// D4d / AC-8.1.4: export the license expiration for alerting.
+		if expiry, perr := time.Parse(time.RFC3339, license.ExpirationTime); perr == nil {
+			metrics.LicenseExpiry.WithLabelValues(cluster.Name, cluster.Namespace).
+				Set(float64(expiry.Unix()))
+		}
+	}
+
+	// Get agent-reported Nomad version (C7 / AC-4.7.1). Non-fatal per
+	// AC-4.7.2 — failure is logged at V(1) and the field stays empty;
+	// downstream consumers (D4d's NomadVersionInfo gauge) treat empty
+	// as "version not yet observed".
+	self, err := nomadClient.AgentSelf(ctx)
+	if err != nil {
+		p.Log.V(1).Info("Failed to get agent self info", "error", err)
+	} else if self.Version != "" {
+		p.NomadVersion = self.Version
+		p.Log.V(1).Info("Got Nomad version", "version", self.Version)
+
+		// D4d / AC-8.1.7: info-style version gauge. Delete the cluster's
+		// previous series first so a version change leaves exactly one
+		// series per cluster (bounded cardinality).
+		metrics.NomadVersionInfo.DeletePartialMatch(prometheus.Labels{
+			"cluster": cluster.Name, "namespace": cluster.Namespace,
+		})
+		metrics.NomadVersionInfo.WithLabelValues(cluster.Name, cluster.Namespace, self.Version).Set(1)
 	}
 
 	// Get autopilot health information
 	autopilot, err := nomadClient.GetAutopilotHealth(ctx, aclToken)
 	if err != nil {
 		p.Log.V(1).Info("Failed to get autopilot health", "error", err)
-		p.AutopilotError = err
 	} else {
 		servers := make([]nomadv1alpha1.ServerStatus, 0, len(autopilot.Servers))
 		for _, s := range autopilot.Servers {
@@ -137,23 +145,23 @@ func (p *ClusterStatusPhase) Execute(ctx context.Context, cluster *nomadv1alpha1
 	return OK()
 }
 
-func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (*nomad.Client, string, error) {
+func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (nomad.NomadAPI, string, error) {
 	// If ACL is enabled and bootstrapped, use the token
 	var aclToken string
-	if cluster.Spec.Server.ACL.Enabled {
+	if cluster.Spec.Server.ACL.IsEnabled() {
 		token, err := p.getOperatorStatusToken(ctx, cluster)
 		if err == nil && token != "" {
 			aclToken = token
 		}
 	}
 
-	cfg := p.BuildClientConfig(cluster, 10*time.Second, aclToken)
+	cfg := p.BuildClientConfig(10*time.Second, aclToken)
 
 	// Try internal service first (operator typically runs in-cluster)
 	internalAddress := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 	cfg.Address = internalAddress
 
-	nomadClient, err := nomad.NewClient(cfg)
+	nomadClient, err := p.NewNomadClient(cfg)
 	if err != nil {
 		return nil, "", err
 	}
@@ -170,7 +178,7 @@ func (p *ClusterStatusPhase) createNomadClient(ctx context.Context, cluster *nom
 		cfg.Address = loadBalancerAddress
 		p.Log.V(1).Info("Internal service not reachable, using LoadBalancer for status",
 			"loadBalancerAddress", loadBalancerAddress)
-		client, err := nomad.NewClient(cfg)
+		client, err := p.NewNomadClient(cfg)
 		return client, aclToken, err
 	}
 
@@ -188,7 +196,7 @@ func (p *ClusterStatusPhase) getOperatorStatusToken(ctx context.Context, cluster
 			Namespace: cluster.Namespace,
 		}, secret)
 		if err == nil {
-			token := string(secret.Data["secret-id"])
+			token := string(secret.Data[SecretKeySecretID])
 			if token != "" {
 				return token, nil
 			}
@@ -199,10 +207,7 @@ func (p *ClusterStatusPhase) getOperatorStatusToken(ctx context.Context, cluster
 	}
 
 	// Fallback: bootstrap token (used only until operator status token is created)
-	secretName := cluster.Name + "-acl-bootstrap"
-	if cluster.Spec.Server.ACL.BootstrapSecretName != "" {
-		secretName = cluster.Spec.Server.ACL.BootstrapSecretName
-	}
+	secretName := BootstrapSecretName(cluster.Name)
 
 	secret := &corev1.Secret{}
 	if err := p.Client.Get(ctx, types.NamespacedName{

@@ -1,0 +1,21 @@
+# Operator-side gates evaluated over the run window.
+# Gate 2: the workqueue must not develop sustained depth — depth at
+# N<=25 means operator starvation, not host limits (pinned from the
+# 2026-07-05 calibrations: depth stayed 0 through every wave).
+- expr: avg_over_time(workqueue_depth{name="nomadcluster"}[5m]) > 5
+  description: sustained nomadcluster workqueue depth — operator saturation
+  severity: error
+# Operand pod-sizing gates (no series on kind => never fire there).
+# Calibrated on the 2026-07-07 OCP sweep: OOMKilled at 32Mi; boot-window
+# throttle 55% at 50m / 42% at 75m vs <=2% at adequate sizes.
+- expr: max_over_time(kube_pod_container_status_last_terminated_reason{namespace="nomad-load", reason="OOMKilled"}[5m]) > 0
+  description: operand server container OOMKilled — below the memory floor
+  severity: error
+# Sustained form: above threshold for 5 continuous minutes. The count
+# guard is load-bearing — min_over_time ignores MISSING evaluations, so
+# without it the gate degenerates to "min over the boot burst" while
+# the series is young (fired at healthy sizes twice before the guard).
+# Needs HOLD >= 10m: coverage reaches 5 samples ~7m into pod life.
+- expr: min_over_time((rate(container_cpu_cfs_throttled_periods_total{namespace="nomad-load", container="nomad"}[2m]) / rate(container_cpu_cfs_periods_total{namespace="nomad-load", container="nomad"}[2m]))[5m:1m]) > 0.25 and count_over_time((rate(container_cpu_cfs_throttled_periods_total{namespace="nomad-load", container="nomad"}[2m]) / rate(container_cpu_cfs_periods_total{namespace="nomad-load", container="nomad"}[2m]))[5m:1m]) >= 5
+  description: operand CFS throttle ratio >25% sustained 5m — below the CPU floor (raft/heartbeat risk)
+  severity: error

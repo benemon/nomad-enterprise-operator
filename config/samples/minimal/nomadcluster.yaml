@@ -5,7 +5,7 @@
 #
 # Defaults applied automatically:
 #   replicas: 3
-#   image: hashicorp/nomad:1.11-ent
+#   image: hashicorp/nomad:2.0.3-ent
 #   region: global
 #   datacenter: <namespace>
 #   gossip key: auto-generated
@@ -16,7 +16,7 @@
 #   autopilot: cleanup dead servers, 200ms threshold, 250 trailing logs
 #   resources: 250m/512Mi requests, 2/2Gi limits
 #   affinity: preferred pod anti-affinity on hostname
-#   services: LoadBalancer for external access
+#   services: LoadBalancer for external access (overridden to NodePort below)
 #
 apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
@@ -26,6 +26,13 @@ spec:
   license:
     secretName: nomad-license  # Only required field - reference existing secret
     # Or use inline: value: "<license-content>"
+  services:
+    external:
+      # NodePort suits laptop/kind quickstarts: the default
+      # (LoadBalancer) waits for an IP that only arrives on clusters
+      # with a load-balancer implementation. Cloud users: see the
+      # production sample.
+      type: NodePort
   # To disable ACLs (not recommended for production):
   # server:
   #   acl:

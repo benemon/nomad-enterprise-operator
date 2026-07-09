@@ -1,5 +1,8 @@
 ## Append samples of your project ##
+# Order matters: the first NomadCluster becomes OperatorHub's primary
+# alm-example. Keep the minimal quickstart first.
 resources:
+- minimal/nomadcluster.yaml
 - nomad_v1alpha1_nomadcluster.yaml
 - nomad_v1alpha1_nomadsnapshot.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

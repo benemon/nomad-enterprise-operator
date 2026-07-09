@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.18.0
+    controller-gen.kubebuilder.io/version: v0.21.0
   creationTimestamp: null
   name: nomadsnapshots.nomad.hashicorp.com
 spec:
@@ -21,22 +21,33 @@ spec:
     - jsonPath: .spec.clusterRef.name
       name: Cluster
       type: string
+    - jsonPath: .status.operation
+      name: Operation
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
     - jsonPath: .spec.schedule.interval
       name: Interval
       type: string
-    - jsonPath: .spec.schedule.retain
-      name: Retain
-      type: integer
     - jsonPath: .status.lastSnapshot.time
       name: Last Snapshot
       type: date
+    - jsonPath: .status.nomadVersion
+      name: Version
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: NomadSnapshot is the Schema for the nomadsnapshots API.
+        description: |-
+          NomadSnapshot is the Schema for the nomadsnapshots API.
+
+          The XValidation rule below blocks a mode switch (adding/removing
+          spec.schedule) while a one-shot Job is running; recurring mode is
+          never blocked.
         properties:
           apiVersion:
             description: |-
@@ -136,11 +147,17 @@ spec:
                     type: object
                 type: object
               schedule:
-                description: Schedule defines snapshot timing
+                description: |-
+                  Schedule, when set, runs a recurring snapshot-agent Deployment;
+                  when omitted, a one-shot Job. Adding or removing it switches
+                  modes — blocked while a one-shot Job is running (CEL).
                 properties:
                   interval:
                     default: 1h
-                    description: Interval between snapshots (e.g., "1h", "24h")
+                    description: |-
+                      Interval between snapshots (e.g., "1h", "24h"). Must be a Go
+                      duration string — validated at admission.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   retain:
                     default: 24
@@ -307,7 +324,6 @@ spec:
                 type: array
             required:
             - clusterRef
-            - schedule
             - target
             type: object
             x-kubernetes-validations:
@@ -388,6 +404,10 @@ spec:
                   replicas
                 format: int32
                 type: integer
+              jobName:
+                description: JobName is the name of the one-shot snapshot Job (Job
+                  mode only)
+                type: string
               lastSnapshot:
                 description: LastSnapshot contains information about the most recent
                   snapshot
@@ -395,11 +415,11 @@ spec:
                   error:
                     description: Error message if snapshot failed
                     type: string
-                  location:
-                    description: Location is the storage path/URL of the snapshot
-                    type: string
-                  size:
-                    description: Size of the snapshot
+                  nomadVersion:
+                    description: |-
+                      NomadVersion the artifact was taken at. Snapshots restore only
+                      to the same Nomad version; this is the per-artifact record of
+                      it, frozen at Job completion (one-shot mode).
                     type: string
                   status:
                     description: Status of the snapshot (Success, Failed)
@@ -417,16 +437,46 @@ spec:
                 description: NomadAddress is the internal Nomad cluster address used
                   by the snapshot agent
                 type: string
+              nomadVersion:
+                description: |-
+                  NomadVersion mirrors the referenced cluster's version: the
+                  version snapshots are currently being taken against. Snapshots
+                  restore only to the same Nomad version — check this before a
+                  restore. Follows the cluster across upgrades; for a one-shot
+                  artifact's frozen value see lastSnapshot.nomadVersion.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              operation:
+                description: |-
+                  Operation names the child workload currently reconciled for this
+                  NomadSnapshot: "Job" (one-shot, spec.schedule omitted) or
+                  "Deployment" (recurring, spec.schedule set). Status reflects the
+                  operation, not the storage artifact.
+                enum:
+                - Job
+                - Deployment
+                type: string
+              phase:
+                description: |-
+                  Phase tracks the one-shot Job lifecycle; empty in recurring mode.
+                  Running also gates the mode-switch CEL rule.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                type: string
+              policyName:
+                description: |-
+                  PolicyName is the Nomad ACL policy created for the snapshot agent.
+                  Stored here so it can be cleaned up when the NomadSnapshot is deleted.
+                type: string
               readyReplicas:
                 description: ReadyReplicas is the number of ready snapshot agent replicas
                 format: int32
-                type: integer
-              snapshotCount:
-                description: SnapshotCount is the total number of snapshots stored
                 type: integer
               tokenAccessorID:
                 description: TokenAccessorID is the Nomad ACL token accessor ID for
@@ -434,6 +484,11 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: mode switch (adding/removing spec.schedule) is blocked while a
+            one-shot snapshot Job is running; wait for it to complete
+          rule: (has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status)
+            || !has(self.status.phase) || self.status.phase != 'Running'
     served: true
     storage: true
     subresources:

@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.18.0
+    controller-gen.kubebuilder.io/version: v0.21.0
   creationTimestamp: null
   name: nomadclusters.nomad.hashicorp.com
 spec:
@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.replicas
       name: Desired
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
     - jsonPath: .status.advertiseAddress
       name: Advertise
       type: string
@@ -57,54 +60,33 @@ spec:
           spec:
             description: NomadClusterSpec defines the desired state of NomadCluster.
             properties:
-              affinity:
-                description: Affinity configuration for pod scheduling
-                properties:
-                  podAntiAffinity:
-                    description: PodAntiAffinity configuration
-                    properties:
-                      enabled:
-                        default: true
-                        description: Enabled determines if pod anti-affinity is configured
-                        type: boolean
-                      topologyKey:
-                        default: kubernetes.io/hostname
-                        description: TopologyKey for anti-affinity
-                        type: string
-                      type:
-                        default: preferred
-                        description: 'Type: preferred or required'
-                        enum:
-                        - preferred
-                        - required
-                        type: string
-                      weight:
-                        default: 100
-                        description: Weight for preferred anti-affinity (1-100)
-                        format: int32
-                        maximum: 100
-                        minimum: 1
-                        type: integer
-                    type: object
-                type: object
               gossip:
                 description: Gossip encryption configuration
                 properties:
-                  secretKey:
-                    default: gossip-key
-                    description: SecretKey is the key within the secret
-                    type: string
                   secretName:
-                    description: SecretName is the name of secret containing gossip
-                      key (auto-created if empty)
+                    description: |-
+                      SecretName is the name of secret containing gossip key (auto-created
+                      if empty). The key must be stored under "gossip-key" (the key name
+                      is operator-owned).
                     type: string
                 type: object
               image:
                 description: Image configuration for the Nomad container
                 properties:
+                  digest:
+                    description: |-
+                      Digest optionally pins the image by content digest. When set, the
+                      reference is `repository@digest` and Tag is ignored (defaulting
+                      materialises Tag before validation, so CEL exclusion is
+                      impossible).
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
                   pullPolicy:
-                    default: IfNotPresent
-                    description: PullPolicy defines when to pull the image
+                    default: Always
+                    description: |-
+                      PullPolicy defaults to Always as a defence against registry-side
+                      retags; digest-pinned or air-gapped workflows can use
+                      IfNotPresent.
                     enum:
                     - Always
                     - IfNotPresent
@@ -115,8 +97,12 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 1.11-ent
-                    description: Tag is the container image tag
+                    default: 2.0.3-ent
+                    description: |-
+                      Tag is the container image tag, default-pinned to a concrete
+                      patch version: a registry-side retag mid-roll can produce
+                      version-mismatched Raft peers and silent quorum loss.
+                    pattern: ^[A-Za-z0-9._-]+$
                     type: string
                 type: object
               imagePullSecrets:
@@ -142,16 +128,11 @@ spec:
                 description: License is a reference to a secret containing the Nomad
                   Enterprise license
                 properties:
-                  secretKey:
-                    default: license
-                    description: |-
-                      SecretKey is the key within the secret (default: "license")
-                      Only used when SecretName is specified.
-                    type: string
                   secretName:
                     description: |-
                       SecretName is the name of an existing secret containing the license.
-                      Mutually exclusive with Value.
+                      The license must be stored under the key "license" (the key name is
+                      operator-owned). Mutually exclusive with Value.
                     type: string
                   value:
                     description: |-
@@ -167,6 +148,29 @@ spec:
                 - message: secretName and value are mutually exclusive
                   rule: '!((has(self.secretName) && size(self.secretName) > 0) &&
                     (has(self.value) && size(self.value) > 0))'
+              monitoring:
+                description: |-
+                  Monitoring configures ServiceMonitor and PrometheusRule creation.
+                  Resources are created when enabled AND the Prometheus Operator
+                  CRDs are installed; independent of openshift.enabled.
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled determines if monitoring resources are created
+                      Pointer + omitempty is load-bearing: a plain bool either drops
+                      explicit false (omitempty: apiserver re-defaults it true on the
+                      operator's next write) or writes false into fields the user
+                      never set (no omitempty: the zero value overwrites the default).
+                      nil means "user said nothing" and reads as the default via
+                      IsEnabled().
+                    type: boolean
+                  prometheusRulesEnabled:
+                    default: false
+                    description: PrometheusRulesEnabled determines if PrometheusRule
+                      is created
+                    type: boolean
+                type: object
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -178,37 +182,8 @@ spec:
                   enabled:
                     description: |-
                       Enabled determines if OpenShift-specific resources are created.
-                      Set to true to create Routes and ServiceMonitors.
+                      Set to true to create Routes.
                     type: boolean
-                  monitoring:
-                    description: Monitoring configuration for ServiceMonitor and PrometheusRule
-                    properties:
-                      additionalLabels:
-                        additionalProperties:
-                          type: string
-                        description: AdditionalLabels to add to ServiceMonitor
-                        type: object
-                      enabled:
-                        default: true
-                        description: Enabled determines if monitoring resources are
-                          created
-                        type: boolean
-                      prometheusRulesEnabled:
-                        default: false
-                        description: PrometheusRulesEnabled determines if PrometheusRule
-                          is created
-                        type: boolean
-                      scrapeInterval:
-                        default: 30s
-                        description: ScrapeInterval for metrics collection (simplified
-                          from serviceMonitor.interval)
-                        type: string
-                      scrapeTimeout:
-                        default: 10s
-                        description: ScrapeTimeout for metric collection (simplified
-                          from serviceMonitor.scrapeTimeout)
-                        type: string
-                    type: object
                   route:
                     description: Route configuration for OpenShift Route
                     properties:
@@ -224,30 +199,50 @@ spec:
                       tls:
                         description: TLS configuration
                         properties:
-                          insecureEdgeTerminationPolicy:
-                            default: Redirect
-                            description: 'InsecureEdgeTerminationPolicy: Redirect,
-                              Allow, or None'
-                            enum:
-                            - Redirect
-                            - Allow
-                            - None
+                          certificateSecretName:
+                            description: |-
+                              CertificateSecretName is the name of a Secret containing a custom
+                              TLS certificate for the external-facing side of the Route.
+                              If omitted, the platform wildcard certificate is used.
                             type: string
-                          termination:
-                            default: edge
-                            description: 'Termination type: edge, passthrough, or
-                              reencrypt'
-                            enum:
-                            - edge
-                            - passthrough
-                            - reencrypt
-                            type: string
+                          secretKeys:
+                            default: {}
+                            description: |-
+                              SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+                              that does not follow the kubernetes.io/tls convention. The {}
+                              default materialises the nested defaults when omitted.
+                            properties:
+                              certificate:
+                                default: tls.crt
+                                description: Certificate is the key name for the TLS
+                                  certificate.
+                                type: string
+                              privateKey:
+                                default: tls.key
+                                description: PrivateKey is the key name for the TLS
+                                  private key.
+                                type: string
+                            type: object
                         type: object
                     type: object
                 type: object
               persistence:
                 description: Persistence configuration for data volumes
                 properties:
+                  reclaimPolicy:
+                    default: Delete
+                    description: |-
+                      ReclaimPolicy controls data-PVC fate on cluster deletion. Delete
+                      (default) removes the data PVCs with the cluster. Retain keeps
+                      them, but re-adoption by a recreated cluster does NOT recover
+                      automatically: Raft stores peer addresses as pod IPs, which
+                      change on recreation, so a fully recreated cluster needs manual
+                      outage recovery. Prefer NomadSnapshot restore for recovery.
+                      Deletion-time value wins.
+                    enum:
+                    - Retain
+                    - Delete
+                    type: string
                   size:
                     default: 10Gi
                     description: |-
@@ -334,50 +329,33 @@ spec:
                   acl:
                     description: ACL configuration
                     properties:
-                      bootstrapSecretName:
-                        description: BootstrapSecretName is the secret to store bootstrap
-                          token (auto-created)
-                        type: string
                       enabled:
                         default: true
-                        description: Enabled determines if ACLs are enabled (defaults
-                          to true for security)
+                        description: |-
+                          Enabled determines if ACLs are enabled (defaults to true for security)
+                          Pointer + omitempty is load-bearing: a plain bool either drops
+                          explicit false (omitempty: apiserver re-defaults it true on the
+                          operator's next write) or writes false into fields the user
+                          never set (no omitempty: the zero value overwrites the default).
+                          nil means "user said nothing" and reads as the default via
+                          IsEnabled().
                         type: boolean
                     type: object
                   audit:
                     description: Audit logging configuration
                     properties:
-                      deliveryGuarantee:
-                        default: enforced
-                        description: |-
-                          DeliveryGuarantee determines behavior when audit logging fails.
-                          "enforced" blocks requests if audit fails (recommended for production).
-                          "best-effort" allows requests even if audit fails (useful for development).
-                        enum:
-                        - enforced
-                        - best-effort
-                        type: string
                       enabled:
                         default: true
                         description: |-
                           Enabled determines if audit logging is enabled.
                           When enabled, an audit volume is automatically created.
+                          Pointer + omitempty is load-bearing: a plain bool either drops
+                          explicit false (omitempty: apiserver re-defaults it true on the
+                          operator's next write) or writes false into fields the user
+                          never set (no omitempty: the zero value overwrites the default).
+                          nil means "user said nothing" and reads as the default via
+                          IsEnabled().
                         type: boolean
-                      format:
-                        default: json
-                        description: Format of audit logs (json or log)
-                        enum:
-                        - json
-                        - log
-                        type: string
-                      rotateDuration:
-                        default: 24h
-                        description: RotateDuration for log rotation
-                        type: string
-                      rotateMaxFiles:
-                        default: 15
-                        description: RotateMaxFiles to retain
-                        type: integer
                       size:
                         default: 5Gi
                         description: Size of the audit volume (created automatically
@@ -388,92 +366,447 @@ spec:
                           default if empty)
                         type: string
                     type: object
-                  autopilot:
-                    description: Autopilot configuration
+                  gc:
+                    description: |-
+                      GC tunes terminal job/eval/alloc history retention. Unset fields
+                      inherit Nomad's own (asymmetric) defaults.
                     properties:
-                      cleanupDeadServers:
-                        default: true
-                        description: CleanupDeadServers enables automatic removal
-                          of dead servers
-                        type: boolean
-                      lastContactThreshold:
-                        default: 200ms
-                        description: LastContactThreshold before marking server unhealthy
+                      batchEvalHistory:
+                        description: |-
+                          BatchEvalHistory sets the minimum time a terminal batch-job
+                          evaluation and its allocations are retained before GC (Nomad
+                          batch_eval_gc_threshold; default 24h). Dominant driver of leader
+                          working set under dispatch load. Nomad duration, e.g. "2h".
+                        pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
                         type: string
-                      maxTrailingLogs:
-                        default: 250
-                        description: MaxTrailingLogs before server is considered unhealthy
-                        type: integer
-                      serverStabilizationTime:
-                        default: 10s
-                        description: ServerStabilizationTime before becoming voter
+                      evalHistory:
+                        description: |-
+                          EvalHistory sets the minimum time a terminal non-batch evaluation
+                          and its allocations are retained before GC (Nomad
+                          eval_gc_threshold; default 1h). Nomad duration, e.g. "30m".
+                        pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
+                        type: string
+                      jobHistory:
+                        description: |-
+                          JobHistory sets the minimum time a dead job is retained before GC
+                          (Nomad job_gc_threshold; default 4h). Nomad duration, e.g. "1h".
+                        pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
                         type: string
                     type: object
-                  extraConfig:
-                    description: ExtraConfig is raw HCL to append to server configuration
-                    type: string
+                  keyrings:
+                    description: |-
+                      Keyrings configures external KMS protection for Nomad's root
+                      encryption keys (Variables encryption, workload-identity signing).
+                      Every listed keyring is active: new keys are wrapped by all
+                      entries, so any one surviving KMS can unwrap (HA). Omitted = the
+                      default aead keyring, whose KEK rides Raft IN CLEARTEXT — meaning
+                      snapshots (including NomadSnapshot uploads) contain key material.
+                      The operator manages migration between keyring sets, including
+                      enable, disable, and provider changes, with no quorum impact.
+                    items:
+                      description: |-
+                        KeyringEntry names one KMS keyring. Exactly one provider block must
+                        be set per entry (CEL-enforced).
+                      properties:
+                        awskms:
+                          description: AWSKMSKeyring wraps root keys with AWS KMS.
+                          properties:
+                            credentialsSecretRef:
+                              description: |-
+                                CredentialsSecretRef names a Secret with AWS_ACCESS_KEY_ID,
+                                AWS_SECRET_ACCESS_KEY, and optionally AWS_SESSION_TOKEN. Omitted =
+                                ambient identity (IRSA / instance profile).
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            endpoint:
+                              description: Endpoint overrides the KMS endpoint (FIPS
+                                or KMS-compatible).
+                              type: string
+                            kmsKeyID:
+                              description: 'KMSKeyID is the KMS key: an ID, ARN, or
+                                alias/<name>.'
+                              minLength: 1
+                              type: string
+                            region:
+                              description: Region of the KMS key. Omitted = SDK default
+                                chain.
+                              type: string
+                          required:
+                          - kmsKeyID
+                          type: object
+                        azurekeyvault:
+                          description: |-
+                            AzureKeyVaultKeyring wraps root keys with Azure Key Vault.
+                            resource "managedhsm.azure.net" selects a Managed HSM vault.
+                          properties:
+                            credentialsSecretRef:
+                              description: |-
+                                CredentialsSecretRef names a Secret with AZURE_CLIENT_ID and
+                                AZURE_CLIENT_SECRET. Omitted = MSI / workload identity.
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            environment:
+                              description: Environment, e.g. AZUREPUBLICCLOUD (the
+                                default).
+                              type: string
+                            keyName:
+                              minLength: 1
+                              type: string
+                            resource:
+                              description: |-
+                                Resource is the key vault resource domain; set
+                                "managedhsm.azure.net" for Managed HSM.
+                              type: string
+                            tenantID:
+                              minLength: 1
+                              type: string
+                            vaultName:
+                              minLength: 1
+                              type: string
+                          required:
+                          - keyName
+                          - tenantID
+                          - vaultName
+                          type: object
+                        gcpckms:
+                          description: GCPCKMSKeyring wraps root keys with GCP Cloud
+                            KMS.
+                          properties:
+                            credentialsSecretRef:
+                              description: |-
+                                CredentialsSecretRef names a Secret whose single key holds a
+                                service-account JSON, mounted and exposed as
+                                GOOGLE_APPLICATION_CREDENTIALS. Omitted = workload identity.
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            cryptoKey:
+                              minLength: 1
+                              type: string
+                            keyRing:
+                              minLength: 1
+                              type: string
+                            project:
+                              minLength: 1
+                              type: string
+                            region:
+                              minLength: 1
+                              type: string
+                          required:
+                          - cryptoKey
+                          - keyRing
+                          - project
+                          - region
+                          type: object
+                        name:
+                          description: |-
+                            Name identifies this keyring; rendered as the Nomad keyring block
+                            name. Unique within the list.
+                          maxLength: 63
+                          pattern: ^[a-zA-Z][a-zA-Z0-9_-]*$
+                          type: string
+                        transit:
+                          description: TransitKeyring wraps root keys with Vault's
+                            transit engine.
+                          properties:
+                            address:
+                              description: Address is the Vault cluster URL.
+                              pattern: ^https?://
+                              type: string
+                            auth:
+                              description: |-
+                                Auth selects one of four credential vectors for the transit
+                                connection, mirroring the Vault Secrets Operator's VaultAuth
+                                structure (method + mount/namespace, per-method blocks).
+                              properties:
+                                jwt:
+                                  description: JWT configures method=jwt.
+                                  properties:
+                                    audiences:
+                                      default:
+                                      - vault
+                                      description: |-
+                                        Audiences for the ephemeral ServiceAccount token. Ignored when
+                                        serviceAccountTokenSecretRef is set.
+                                      items:
+                                        type: string
+                                      type: array
+                                    role:
+                                      description: Role is the Vault role to log in
+                                        as.
+                                      maxLength: 128
+                                      minLength: 1
+                                      type: string
+                                    serviceAccountTokenSecretRef:
+                                      description: |-
+                                        ServiceAccountTokenSecretRef names a Secret whose token key
+                                        holds a user-managed long-lived ServiceAccount JWT, replacing
+                                        the default ephemeral TokenRequest source.
+                                      properties:
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    tokenExpirationSeconds:
+                                      default: 600
+                                      description: |-
+                                        TokenExpirationSeconds bounds the ephemeral ServiceAccount token
+                                        lifetime. It is used once, immediately, and never stored.
+                                        Ignored when serviceAccountTokenSecretRef is set.
+                                      format: int64
+                                      maximum: 86400
+                                      minimum: 600
+                                      type: integer
+                                  required:
+                                  - role
+                                  type: object
+                                kubernetes:
+                                  description: Kubernetes configures method=kubernetes.
+                                  properties:
+                                    audiences:
+                                      default:
+                                      - vault
+                                      description: |-
+                                        Audiences for the ephemeral ServiceAccount token. Ignored when
+                                        serviceAccountTokenSecretRef is set.
+                                      items:
+                                        type: string
+                                      type: array
+                                    role:
+                                      description: Role is the Vault role to log in
+                                        as.
+                                      maxLength: 128
+                                      minLength: 1
+                                      type: string
+                                    serviceAccountTokenSecretRef:
+                                      description: |-
+                                        ServiceAccountTokenSecretRef names a Secret whose token key
+                                        holds a user-managed long-lived ServiceAccount JWT, replacing
+                                        the default ephemeral TokenRequest source.
+                                      properties:
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                    tokenExpirationSeconds:
+                                      default: 600
+                                      description: |-
+                                        TokenExpirationSeconds bounds the ephemeral ServiceAccount token
+                                        lifetime. It is used once, immediately, and never stored.
+                                        Ignored when serviceAccountTokenSecretRef is set.
+                                      format: int64
+                                      maximum: 86400
+                                      minimum: 600
+                                      type: integer
+                                  required:
+                                  - role
+                                  type: object
+                                method:
+                                  description: Method declares the credential vector
+                                    explicitly.
+                                  enum:
+                                  - token
+                                  - kubernetes
+                                  - jwt
+                                  type: string
+                                mount:
+                                  description: |-
+                                    Mount is the Vault auth mount path (e.g. "kubernetes", "jwt").
+                                    Not used by method=token.
+                                  maxLength: 128
+                                  type: string
+                                namespace:
+                                  description: |-
+                                    Namespace is the Vault namespace for the login call. Defaults to
+                                    the transit entry's namespace.
+                                  type: string
+                                token:
+                                  description: Token configures method=token.
+                                  properties:
+                                    secretRef:
+                                      description: |-
+                                        SecretRef names a Secret whose VAULT_TOKEN key holds the token.
+                                        The operator wires it to the server pods and manages nothing
+                                        else: renewal and rotation are user-owned (rotation is delivered
+                                        by the Secret watch and rolls pods).
+                                      properties:
+                                        name:
+                                          default: ""
+                                          description: |-
+                                            Name of the referent.
+                                            This field is effectively required, but due to backwards compatibility is
+                                            allowed to be empty. Instances of this type with an empty value here are
+                                            almost certainly wrong.
+                                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                          type: string
+                                      type: object
+                                      x-kubernetes-map-type: atomic
+                                  required:
+                                  - secretRef
+                                  type: object
+                              required:
+                              - method
+                              type: object
+                            caSecretRef:
+                              description: |-
+                                CASecretRef names a Secret whose ca.crt verifies the Vault
+                                connection, for CAs outside the system trust store.
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            clientCertSecretRef:
+                              description: |-
+                                ClientCertSecretRef names a kubernetes.io/tls-shaped Secret
+                                (tls.crt, tls.key) for mTLS to Vault.
+                              properties:
+                                name:
+                                  default: ""
+                                  description: |-
+                                    Name of the referent.
+                                    This field is effectively required, but due to backwards compatibility is
+                                    allowed to be empty. Instances of this type with an empty value here are
+                                    almost certainly wrong.
+                                    More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                  type: string
+                              type: object
+                              x-kubernetes-map-type: atomic
+                            keyIDPrefix:
+                              description: |-
+                                KeyIDPrefix disambiguates wrapped key IDs when multiple transit
+                                keyrings are listed.
+                              type: string
+                            keyName:
+                              minLength: 1
+                              type: string
+                            mountPath:
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: Namespace is the Vault namespace of the
+                                transit engine.
+                              type: string
+                            tlsServerName:
+                              description: TLSServerName is the SNI hostname for the
+                                Vault connection.
+                              type: string
+                          required:
+                          - address
+                          - auth
+                          - keyName
+                          - mountPath
+                          type: object
+                          x-kubernetes-validations:
+                          - message: auth requires exactly the per-method block matching
+                              method
+                            rule: (self.auth.method == 'token') == has(self.auth.token)
+                              && (self.auth.method == 'kubernetes') == has(self.auth.kubernetes)
+                              && (self.auth.method == 'jwt') == has(self.auth.jwt)
+                          - message: auth.mount is required for the kubernetes and
+                              jwt methods
+                            rule: self.auth.method == 'token' || has(self.auth.mount)
+                      required:
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of awskms, azurekeyvault, gcpckms, or
+                          transit must be set per keyring entry
+                        rule: '(has(self.awskms) ? 1 : 0) + (has(self.azurekeyvault)
+                          ? 1 : 0) + (has(self.gcpckms) ? 1 : 0) + (has(self.transit)
+                          ? 1 : 0) == 1'
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   tls:
                     description: TLS configuration
                     properties:
-                      caCert:
+                      ca:
                         description: |-
-                          CACert is the CA certificate in PEM format.
-                          The operator will create and manage a secret from inline certificates.
-                          Must be provided together with ServerCert and ServerKey.
-                        type: string
-                      enabled:
-                        default: false
-                        description: Enabled determines if TLS is enabled
-                        type: boolean
-                      secretKeys:
-                        description: |-
-                          SecretKeys allows overriding the expected key names within the TLS secret.
-                          Useful when the secret is produced by cert-manager or another provider
-                          that uses different key names (e.g., tls.crt instead of server.crt).
-                          Only used when SecretName is specified.
+                          CA optionally specifies a user-provided Certificate Authority for
+                          certificate issuance. If not specified, the operator generates and
+                          manages a self-signed CA. Providing a CA allows certificates to chain
+                          to your organisation's trusted root.
                         properties:
-                          caCert:
-                            default: ca.crt
-                            description: CACert is the key name for the CA certificate
-                              in the TLS secret.
+                          secretKeys:
+                            default: {}
+                            description: |-
+                              SecretKeys overrides the Secret key names for tooling (ESO, VSO)
+                              that does not follow the kubernetes.io/tls convention. The {}
+                              default materialises the nested defaults when omitted.
+                            properties:
+                              certificate:
+                                default: tls.crt
+                                description: Certificate is the key name for the CA
+                                  certificate.
+                                type: string
+                              privateKey:
+                                default: tls.key
+                                description: PrivateKey is the key name for the CA
+                                  private key.
+                                type: string
+                            type: object
+                          secretName:
+                            description: |-
+                              SecretName is the name of the Secret containing the CA certificate
+                              and private key. Expected keys: tls.crt (certificate), tls.key (private key).
                             type: string
-                          serverCert:
-                            default: server.crt
-                            description: ServerCert is the key name for the server
-                              certificate in the TLS secret.
-                            type: string
-                          serverKey:
-                            default: server.key
-                            description: ServerKey is the key name for the server
-                              private key in the TLS secret.
-                            type: string
+                        required:
+                        - secretName
                         type: object
-                      secretName:
-                        description: |-
-                          SecretName containing TLS certificates.
-                          Mutually exclusive with inline certificates.
-                        type: string
-                      serverCert:
-                        description: |-
-                          ServerCert is the server certificate in PEM format.
-                          Must be provided together with CACert and ServerKey.
-                        type: string
-                      serverKey:
-                        description: |-
-                          ServerKey is the server private key in PEM format.
-                          Must be provided together with CACert and ServerCert.
-                        type: string
                     type: object
-                    x-kubernetes-validations:
-                    - message: when TLS is enabled, either secretName or all inline
-                        certificates (caCert, serverCert, serverKey) must be specified
-                      rule: '!self.enabled || (has(self.secretName) && size(self.secretName)
-                        > 0) || (has(self.caCert) && size(self.caCert) > 0 && has(self.serverCert)
-                        && size(self.serverCert) > 0 && has(self.serverKey) && size(self.serverKey)
-                        > 0)'
-                    - message: secretName and inline certificates are mutually exclusive
-                      rule: '!((has(self.secretName) && size(self.secretName) > 0)
-                        && (has(self.caCert) && size(self.caCert) > 0))'
                 type: object
               services:
                 description: Services configuration for Nomad endpoints
@@ -801,6 +1134,37 @@ spec:
                 - healthy
                 - voters
                 type: object
+              certificateAuthority:
+                description: CertificateAuthority contains information about the CA
+                  in use.
+                properties:
+                  expiryTime:
+                    description: ExpiryTime is when the CA certificate expires.
+                    type: string
+                  renewalRequiredBy:
+                    description: |-
+                      RenewalRequiredBy is CA expiry minus the 30-day window. For
+                      operator CAs: when automatic rotation starts. For user CAs: when
+                      a human must renew (CARenewalRequired Events).
+                    type: string
+                  renewalWarningThreshold:
+                    description: |-
+                      RenewalWarningThreshold records the last emitted warning bucket
+                      ("30d", "14d", or "7d:<date>" daily), debouncing the escalating
+                      user-CA Events across operator restarts.
+                    type: string
+                  source:
+                    description: |-
+                      Source indicates how the CA was provisioned.
+                      Valid values: "operator-generated", "user-provided"
+                    type: string
+                  subject:
+                    description: Subject is the CA certificate's subject distinguished
+                      name.
+                    type: string
+                required:
+                - source
+                type: object
               conditions:
                 description: Conditions represent the latest observations of the cluster
                   state
@@ -868,12 +1232,58 @@ spec:
                 description: GossipKeySecretName is the name of secret containing
                   gossip key
                 type: string
+              initialReconcileEventEmitted:
+                description: |-
+                  InitialReconcileEventEmitted debounces the one-shot
+                  InitialReconcileComplete Event across operator restarts.
+                type: boolean
+              keyring:
+                description: Keyring reports the keyring set the operator has reconciled.
+                properties:
+                  active:
+                    description: |-
+                      Active lists the keyring entries currently wrapping new keys
+                      ("aead" when the default file keyring is in use).
+                    items:
+                      type: string
+                    type: array
+                  phase:
+                    description: |-
+                      Phase is Ready, Introducing, Rotating, Retiring, or Degraded
+                      (Ready state machine, but Nomad reports the keyring inoperable).
+                    enum:
+                    - Ready
+                    - Introducing
+                    - Rotating
+                    - Retiring
+                    - Degraded
+                    type: string
+                  retiring:
+                    description: |-
+                      Retiring lists entries kept only until their wrapped keys are
+                      removed; cleared when migration completes.
+                    items:
+                      type: string
+                    type: array
+                  tokenExpiry:
+                    description: |-
+                      TokenExpiry is when the operator-managed Vault token expires;
+                      only set when a transit entry uses auth.
+                    format: date-time
+                    type: string
+                type: object
               lastReconcileTime:
-                description: LastReconcileTime is the timestamp of last reconciliation
+                description: |-
+                  LastReconcileTime advances on status mutations and on the
+                  heartbeat threshold — NOT every loop, which would amplify etcd
+                  writes and fake GitOps drift. Liveness watchers see updates
+                  roughly every 2m30s when idle.
                 format: date-time
                 type: string
-              leaderID:
-                description: LeaderID is the Raft leader node ID (if known)
+              leaderAddress:
+                description: |-
+                  LeaderAddress is the leader's RPC host:port (not its Raft server
+                  ID — that lives in status.autopilot.servers).
                 type: string
               license:
                 description: License contains Nomad Enterprise license information
@@ -899,10 +1309,33 @@ spec:
                 required:
                 - valid
                 type: object
+              nomadVersion:
+                description: |-
+                  NomadVersion is the agent version from /v1/agent/self; empty on
+                  probe miss. Non-fatal — never gates other enrichment.
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the last observed generation
                 format: int64
                 type: integer
+              operatorManagementSecretName:
+                description: |-
+                  OperatorManagementSecretName names the Secret holding the
+                  management-type token for day-2 ACL writes. Cache only — cleanup
+                  uses the deterministic name, not this field.
+                type: string
+              operatorStatusPolicyName:
+                description: |-
+                  OperatorStatusPolicyName is the Nomad ACL policy name created for the
+                  operator status token. Stored for cleanup if the cluster is deleted.
+                type: string
+              operatorStatusSecretName:
+                description: |-
+                  OperatorStatusSecretName is the name of the Secret containing the
+                  narrow-scope ACL token used by the operator for day-2 status API calls.
+                  This token has operator:read only. The bootstrap token is not used after
+                  initial ACL bootstrap completes.
+                type: string
               phase:
                 description: Phase represents the current phase of the cluster
                 enum:
@@ -918,8 +1351,28 @@ spec:
               routeHost:
                 description: RouteHost is the assigned Route hostname
                 type: string
+              scaleDown:
+                description: |-
+                  ScaleDown tracks an in-flight Raft scale-down; nil when none.
+                  Drives crash-safe resume, the replicas-edit admission freeze,
+                  and the in-progress metric.
+                properties:
+                  removedPeers:
+                    description: |-
+                      RemovedPeers lists Raft server IDs already removed this
+                      operation; never re-removed, even across operator restarts.
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec.replicas cannot be modified while a scale-down operation is
+            in progress; wait for status.scaleDown to clear
+          rule: self.spec.replicas == oldSelf.spec.replicas || !has(self.status) ||
+            !has(self.status.scaleDown) || !has(self.status.scaleDown.removedPeers)
+            || size(self.status.scaleDown.removedPeers) == 0
     served: true
     storage: true
     subresources:

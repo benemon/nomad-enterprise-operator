@@ -22,4 +22,8 @@ jobs:
       - name: Run linter
         uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          # Pinned to the Makefile's GOLANGCI_LINT_VERSION — 'latest' drifts
+          # and fails CI on checks the local toolchain cannot reproduce. The
+          # pinned release must be built with a Go >= go.mod's version or the
+          # prebuilt binary refuses to load the config (v2.1.0 was go1.24).
+          version: v2.12.2

@@ -8,6 +8,7 @@ metadata:
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
+    olm.skipRange: '>=0.1.0 <SKIP_RANGE_UPPER_BOUND'
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
@@ -22,7 +23,12 @@ spec:
       kind: NomadCluster
       name: nomadclusters.nomad.hashicorp.com
       version: v1alpha1
-    - description: NomadSnapshot is the Schema for the nomadsnapshots API.
+    - description: |-
+        NomadSnapshot is the Schema for the nomadsnapshots API.
+
+        The XValidation rule below blocks a mode switch (adding/removing
+        spec.schedule) while a one-shot Job is running; recurring mode is
+        never blocked.
       displayName: Nomad Snapshot
       kind: NomadSnapshot
       name: nomadsnapshots.nomad.hashicorp.com
@@ -60,7 +66,7 @@ spec:
     type: OwnNamespace
   - supported: true
     type: SingleNamespace
-  - supported: false
+  - supported: true
     type: MultiNamespace
   - supported: true
     type: AllNamespaces
@@ -74,7 +80,8 @@ spec:
   - name: Nomad Documentation
     url: https://developer.hashicorp.com/nomad
   maintainers:
-  - name: benemon
+  - email: benjamin.holmes@gmail.com
+    name: benemon
   maturity: alpha
   minKubeVersion: 1.28.0
   provider:

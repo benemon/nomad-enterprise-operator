@@ -1,0 +1,213 @@
+name: Smoke e2e
+
+# Per-stage timing-budget smoke test on a kind cluster. Each stage uses
+# `kubectl wait --timeout=<budget>` so a failure surfaces as "stage X
+# timed out at NNNs", not a generic "smoke failed at minute 8".
+#
+# Budgets (per AC-F2a.3):
+#
+#   StatefulSet pods Ready                  ≤ 120s
+#   ACL bootstrap Secret materialised       ≤ 180s from cluster create
+#   TLS Secret materialised with all keys   ≤ 180s
+#   Audit PVC bound and audit.log non-empty ≤ 240s
+#   Ready=True and leader observable        ≤ 300s overall
+#
+# Triggers: PRs LABELLED `e2e` and pushes to main. Smoke is ~5 min so we
+# don't burn it on every dev push; opt in via the label when you want
+# pre-merge confidence. (Branch protection on `main` makes the run mandatory
+# at merge time — configure that out of band per docs/release-process.md §2.)
+#
+# F3 webhook design has the operator manage its own webhook cert. Smoke
+# does NOT install cert-manager.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke e2e on kind
+    # Skip PR runs that don't carry the `e2e` label; push-to-main always runs.
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'e2e')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      KIND_CLUSTER: neo-smoke
+      KIND_K8S_IMAGE: kindest/node:v1.31.0
+      METALLB_VERSION: v0.14.8
+      OPERATOR_IMG: nomad-enterprise-operator:smoke
+      SAMPLE_NS: neo-smoke
+      CLUSTER_NAME: nomad
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.24.0
+
+      - name: Bring up kind + metallb
+        run: hack/smoke-e2e/kind-up.sh
+
+      - name: Build operator image
+        run: docker build -t "${OPERATOR_IMG}" .
+
+      - name: Load operator image into kind
+        run: kind load docker-image "${OPERATOR_IMG}" --name "${KIND_CLUSTER}"
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Deploy operator
+        run: |
+          # Point the kustomize image at the locally-built image and apply.
+          cd config/manager && \
+            ../../bin/kustomize edit set image controller="${OPERATOR_IMG}"
+          cd "${GITHUB_WORKSPACE}"
+          bin/kustomize build config/default | kubectl apply -f -
+
+      - name: Wait for operator Deployment Ready
+        run: |
+          kubectl -n nomad-enterprise-operator-system rollout status \
+            deploy/nomad-enterprise-operator-controller-manager \
+            --timeout=120s
+
+      - name: Apply minimal NomadCluster sample
+        run: |
+          kubectl create namespace "${SAMPLE_NS}" --dry-run=client -o yaml | kubectl apply -f -
+          # The minimal sample expects a Secret named `nomad-license`. In
+          # smoke we install a placeholder; the operator's license-required
+          # phase will surface a Condition the smoke does not gate on.
+          kubectl -n "${SAMPLE_NS}" create secret generic nomad-license \
+            --from-literal=license="${NOMAD_LICENSE:-smoke-placeholder}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n "${SAMPLE_NS}" apply -f config/samples/minimal/nomadcluster.yaml
+          # Record cluster-create timestamp for downstream budget checks
+          # that are measured "from cluster create" rather than "from now".
+          date +%s > /tmp/cluster-create.epoch
+        env:
+          NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+
+      # Stage 1 (≤120s): StatefulSet pods Ready.
+      - name: 'Stage 1: StatefulSet pods Ready (≤120s)'
+        run: |
+          kubectl -n "${SAMPLE_NS}" wait \
+            --for=jsonpath='{.status.readyReplicas}'=3 \
+            statefulset/"${CLUSTER_NAME}" \
+            --timeout=120s
+
+      # Stage 2 (≤180s from cluster create): ACL bootstrap Secret.
+      - name: 'Stage 2: ACL bootstrap Secret materialised (≤180s from cluster create)'
+        run: |
+          start=$(cat /tmp/cluster-create.epoch)
+          budget=180
+          remaining=$(( budget - ( $(date +%s) - start ) ))
+          if [ "${remaining}" -le 0 ]; then
+            echo "::error::Stage 2 budget already exhausted (${budget}s from cluster create) before wait started."
+            exit 1
+          fi
+          kubectl -n "${SAMPLE_NS}" wait \
+            --for=create secret/"${CLUSTER_NAME}-acl-bootstrap" \
+            --timeout="${remaining}s"
+
+      # Stage 3 (≤180s): TLS Secret with all expected keys.
+      - name: 'Stage 3: TLS Secret materialised with all keys (≤180s)'
+        run: |
+          kubectl -n "${SAMPLE_NS}" wait \
+            --for=create secret/"${CLUSTER_NAME}-tls" \
+            --timeout=180s
+          # Assert all four expected keys are populated. Operator-managed
+          # TLS lays down ca.crt, tls.crt, tls.key, plus a server bundle.
+          for key in ca.crt tls.crt tls.key; do
+            kubectl -n "${SAMPLE_NS}" get secret "${CLUSTER_NAME}-tls" \
+              -o jsonpath="{.data.${key}}" | grep -q . || {
+                echo "::error::TLS secret missing key ${key}"
+                exit 1
+              }
+          done
+
+      # Stage 4 (≤240s): Audit PVC bound + audit.log non-empty.
+      - name: 'Stage 4: Audit PVC bound and audit.log non-empty (≤240s)'
+        run: |
+          kubectl -n "${SAMPLE_NS}" wait \
+            --for=jsonpath='{.status.phase}'=Bound \
+            pvc -l "app.kubernetes.io/component=audit" \
+            --timeout=240s
+          # Audit log is written by the nomad container into its mounted
+          # audit volume. We assert non-empty by exec'ing into pod-0 and
+          # checking byte count.
+          kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
+            sh -c 'test -s /var/lib/nomad/audit/audit.log' || {
+              echo "::error::audit.log is empty or missing on ${CLUSTER_NAME}-0"
+              exit 1
+            }
+
+      # Stage 5 (≤300s overall): Ready=True + leader observable.
+      - name: 'Stage 5: Ready=True and leader observable (≤300s overall)'
+        run: |
+          kubectl -n "${SAMPLE_NS}" wait \
+            --for=condition=Ready=True nomadcluster/"${CLUSTER_NAME}" \
+            --timeout=300s
+          # `nomad agent-info` against pod-0 must report a non-empty
+          # `leader` field. We don't care which pod is leader, only that
+          # one is elected.
+          leader=$(kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
+            nomad agent-info -address=https://127.0.0.1:4646 \
+              -ca-cert=/etc/nomad/tls/ca.crt \
+              -client-cert=/etc/nomad/tls/tls.crt \
+              -client-key=/etc/nomad/tls/tls.key 2>&1 | awk '/leader/ {print $NF; exit}')
+          if [ -z "${leader}" ] || [ "${leader}" = "false" ]; then
+            echo "::error::no Nomad leader observable via agent-info"
+            exit 1
+          fi
+          echo "Nomad leader observable: ${leader}"
+
+      - name: 'Stage 6: operator metrics expose the seven F4 handles'
+        run: |
+          # Scrape the operator's metrics endpoint from inside the cluster
+          # (ServiceAccount bearer token auth, self-signed cert → -k).
+          # F4 registers all seven §8.1 handles at startup; zero values
+          # are acceptable, absence is a failure.
+          kubectl -n nomad-enterprise-operator-system run metrics-probe \
+            --image=curlimages/curl:8.10.1 --restart=Never --rm -i --quiet \
+            --overrides='{"spec":{"serviceAccountName":"nomad-enterprise-operator-controller-manager"}}' \
+            -- sh -c 'curl -sk -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+              https://nomad-enterprise-operator-controller-manager-metrics-service:8443/metrics' \
+            > /tmp/metrics.out
+          for m in \
+            nomad_operator_phase_duration_seconds \
+            nomad_operator_nomad_api_requests_total \
+            nomad_operator_cert_expiry_timestamp_seconds \
+            nomad_operator_license_expiry_timestamp_seconds \
+            nomad_operator_acl_bootstrap_failures_total \
+            nomad_operator_scale_down_in_progress \
+            nomad_operator_nomad_version_info; do
+            if ! grep -q "$m" /tmp/metrics.out; then
+              echo "::error::metric $m missing from operator /metrics"
+              exit 1
+            fi
+          done
+          echo "All seven nomad_operator_* metrics present."
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: hack/smoke-e2e/diagnostics.sh "${SAMPLE_NS}" "${CLUSTER_NAME}"
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER}" || true

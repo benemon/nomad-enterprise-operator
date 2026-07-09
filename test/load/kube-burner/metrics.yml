@@ -1,0 +1,44 @@
+# Operator-side series collected at job boundaries; deltas tell the
+# story (counters are cumulative across the operator's lifetime).
+- query: workqueue_depth{name="nomadcluster"}
+  metricName: operatorQueueDepth
+- query: rate(workqueue_queue_duration_seconds_sum{name="nomadcluster"}[2m]) / rate(workqueue_queue_duration_seconds_count{name="nomadcluster"}[2m])
+  metricName: operatorQueueLatencyAvg
+- query: controller_runtime_reconcile_total{controller="nomadcluster"}
+  metricName: operatorReconcileTotal
+# RSS/CPU are namespace-scoped: on OCP, thanos-querier also sees the
+# platform's kube-/openshift-controller-manager, which match the job
+# regex. The namespace label comes from ServiceMonitor discovery on
+# both lanes.
+- query: process_resident_memory_bytes{job=~".*controller-manager.*", namespace="nomad-enterprise-operator-system"}
+  metricName: operatorRSS
+- query: rate(process_cpu_seconds_total{job=~".*controller-manager.*", namespace="nomad-enterprise-operator-system"}[2m])
+  metricName: operatorCPURate
+- query: nomad_operator_nomad_api_requests_total
+  metricName: operatorNomadAPIRequests
+# Operand-side series for the pod-sizing sweep (cadvisor/kube-state).
+# OCP-only in practice: kind's bundled Prometheus scrapes neither
+# kubelet nor KSM, so these return empty there — harmless.
+- query: container_memory_working_set_bytes{namespace="nomad-load", container="nomad"}
+  metricName: operandWorkingSet
+- query: rate(container_cpu_cfs_throttled_periods_total{namespace="nomad-load", container="nomad"}[2m]) / rate(container_cpu_cfs_periods_total{namespace="nomad-load", container="nomad"}[2m])
+  metricName: operandCPUThrottleRatio
+- query: kube_pod_container_status_last_terminated_reason{namespace="nomad-load", reason="OOMKilled"}
+  metricName: operandOOMKills
+- query: kube_pod_container_status_restarts_total{namespace="nomad-load"}
+  metricName: operandRestarts
+# Nomad's own telemetry — the GC-tuning evidence. Needs /v1/metrics
+# scraped into the queried Prometheus; the operator ServiceMonitor does
+# not scrape TLS clusters, so a corrected PodMonitor supplies these.
+# Empty when absent (baseline runs, kind) — harmless. nomadHeapAllocBytes
+# is the direct signal: flat = GC reclaiming, climbing = accumulating.
+- query: nomad_runtime_alloc_bytes{namespace="nomad-load"}
+  metricName: nomadHeapAllocBytes
+- query: nomad_runtime_sys_bytes{namespace="nomad-load"}
+  metricName: nomadHeapSysBytes
+- query: nomad_nomad_blocked_evals_total_blocked{namespace="nomad-load"}
+  metricName: nomadBlockedEvals
+- query: nomad_nomad_plan_queue_depth{namespace="nomad-load"}
+  metricName: nomadPlanQueueDepth
+- query: nomad_nomad_job_dispatch_count{namespace="nomad-load"}
+  metricName: nomadDispatchCount
