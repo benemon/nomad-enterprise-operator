@@ -178,14 +178,18 @@ jobs:
             --for=condition=Ready=True nomadcluster/"${CLUSTER_NAME}" \
             --timeout=300s
           # `nomad agent-info` against pod-0 must report a non-empty
-          # `leader` field. We don't care which pod is leader, only that
-          # one is elected.
+          # `leader_addr`. The `leader` field is a per-agent flag (false
+          # on followers), and the endpoint needs a token once ACLs are
+          # bootstrapped.
+          token=$(kubectl -n "${SAMPLE_NS}" get secret "${CLUSTER_NAME}-acl-bootstrap" \
+            -o jsonpath="{.data['secret-id']}" | base64 -d)
           leader=$(kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
+            env NOMAD_TOKEN="${token}" \
             nomad agent-info -address=https://127.0.0.1:4646 \
               -ca-cert=/nomad/tls/ca.crt \
               -client-cert=/nomad/tls/tls.crt \
-              -client-key=/nomad/tls/tls.key 2>&1 | awk '/leader/ {print $NF; exit}')
-          if [ -z "${leader}" ] || [ "${leader}" = "false" ]; then
+              -client-key=/nomad/tls/tls.key 2>&1 | awk '/leader_addr/ {print $NF; exit}')
+          if [ -z "${leader}" ]; then
             echo "::error::no Nomad leader observable via agent-info"
             exit 1
           fi
