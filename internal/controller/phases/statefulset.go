@@ -118,6 +118,16 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// Build volume claim templates
 	volumeClaimTemplates := p.buildVolumeClaimTemplates(cluster)
 
+	// Each pod must drop its own FQDN from retry_join before starting:
+	// Nomad's retry loop counts a self-join as success and never
+	// re-attempts, so a parallel pod start loses the peer-DNS race and
+	// quorum never forms (GH #11). The config Secret is shared across
+	// pods, so the exclusion happens here; the filtered copy lands on a
+	// memory-backed emptyDir to keep the gossip key off node disk.
+	startCommand := fmt.Sprintf(
+		`grep -vF "\"${POD_NAME}.%s-headless.%s.svc.cluster.local\"" /nomad/config/server.hcl > /nomad/config-runtime/server.hcl && exec nomad agent -config=/nomad/config-runtime/server.hcl`,
+		cluster.Name, cluster.Namespace)
+
 	// Build pod spec
 	podSpec := corev1.PodSpec{
 		ServiceAccountName: cluster.Name,
@@ -130,7 +140,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 				Name:            "nomad",
 				Image:           imageFull,
 				ImagePullPolicy: pullPolicy,
-				Command:         []string{"nomad", "agent", "-config=/nomad/config"},
+				Command:         []string{"/bin/sh", "-ec", startCommand},
 				Env:             env,
 				Ports: []corev1.ContainerPort{
 					{Name: "http", ContainerPort: 4646, Protocol: corev1.ProtocolTCP},
@@ -354,6 +364,11 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 			MountPath: "/nomad/config",
 			ReadOnly:  true,
 		},
+		// Writable target for the self-filtered server.hcl copy
+		{
+			Name:      "config-runtime",
+			MountPath: "/nomad/config-runtime",
+		},
 		// The root filesystem is read-only (PSS restricted, neo-8xu);
 		// /tmp is the one scratch path Nomad may write outside data_dir.
 		{
@@ -394,6 +409,19 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 
 	keyringVols, _ := buildKeyringVolumes(p.KeyringEntries)
 	volumes = append(volumes, keyringVols...)
+
+	// Memory-backed so the filtered server.hcl (gossip key, keyring
+	// tokens) never touches node disk.
+	configRuntimeLimit := resource.MustParse("1Mi")
+	volumes = append(volumes, corev1.Volume{
+		Name: "config-runtime",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &configRuntimeLimit,
+			},
+		},
+	})
 
 	// Scratch space to pair with readOnlyRootFilesystem (neo-8xu)
 	volumes = append(volumes, corev1.Volume{
@@ -531,6 +559,12 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 			return true, fmt.Sprintf("image %q -> %q",
 				existing.Spec.Template.Spec.Containers[0].Image,
 				desired.Spec.Template.Spec.Containers[0].Image)
+		}
+		// Without this, a changed startup command (e.g. the GH #11
+		// retry_join self-filter) never reaches a live StatefulSet.
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Command,
+			desired.Spec.Template.Spec.Containers[0].Command) {
+			return true, "container command"
 		}
 		// Handler-only comparison: numeric probe fields get
 		// API-server defaults, so a full DeepEqual would roll forever.

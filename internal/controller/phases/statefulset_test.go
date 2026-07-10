@@ -18,9 +18,12 @@ package phases
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	hclparse "github.com/hashicorp/hcl"
+	hclgen "github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	"k8s.io/utils/ptr"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -364,5 +367,115 @@ func TestImageRef(t *testing.T) {
 	sts := phase.buildStatefulSet(context.Background(), cluster)
 	if got := sts.Spec.Template.Spec.Containers[0].Image; got != "hashicorp/nomad@sha256:"+strings.Repeat("cd", 32) {
 		t.Errorf("StatefulSet image = %q, want digest reference", got)
+	}
+}
+
+// GH #11: the startup command must strip the pod's own FQDN from
+// retry_join — Nomad counts a self-join as success and stops retrying,
+// so a parallel pod start loses the peer-DNS race and quorum never
+// forms. Also asserts the filtered copy targets a writable,
+// memory-backed mount (the rendered config carries the gossip key).
+func TestServerCommand_FiltersSelfFromRetryJoin(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: newTestPhaseContext()}
+	cluster := newTestCluster("neo-smoke", "nomad")
+
+	sts := phase.buildStatefulSet(context.Background(), cluster)
+	cmd := sts.Spec.Template.Spec.Containers[0].Command
+	if len(cmd) != 3 || cmd[0] != "/bin/sh" || cmd[1] != "-ec" {
+		t.Fatalf("command = %v, want [/bin/sh -ec <script>]", cmd)
+	}
+	script := cmd[2]
+	wantFilter := `grep -vF "\"${POD_NAME}.nomad-headless.neo-smoke.svc.cluster.local\""`
+	if !strings.Contains(script, wantFilter) {
+		t.Errorf("script missing self-FQDN filter %q:\n%s", wantFilter, script)
+	}
+	if !strings.Contains(script, "exec nomad agent -config=/nomad/config-runtime/server.hcl") {
+		t.Errorf("script must exec nomad against the filtered copy:\n%s", script)
+	}
+
+	var vol *corev1.Volume
+	for i := range sts.Spec.Template.Spec.Volumes {
+		if sts.Spec.Template.Spec.Volumes[i].Name == "config-runtime" {
+			vol = &sts.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if vol == nil || vol.EmptyDir == nil ||
+		vol.EmptyDir.Medium != corev1.StorageMediumMemory {
+		t.Fatalf("config-runtime volume missing or not memory-backed: %+v", vol)
+	}
+	mounted := false
+	for _, m := range sts.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == "config-runtime" && m.MountPath == "/nomad/config-runtime" && !m.ReadOnly {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Error("config-runtime not mounted writable at /nomad/config-runtime")
+	}
+}
+
+// Pins the contract between the rendered HCL and the startup filter:
+// every retry_join entry sits alone on its own line, so dropping the
+// line containing the pod's quoted FQDN removes exactly that entry,
+// keeps the peers, and leaves the file valid HCL — including the
+// empty-list result at replicas=1.
+func TestRetryJoinSelfFilter_RenderedConfigContract(t *testing.T) {
+	for _, replicas := range []int32{1, 3} {
+		cluster := newTestCluster("neo-smoke", "nomad")
+		cluster.Spec.Replicas = replicas
+		rendered, err := hclgen.NewGenerator(cluster, "10.0.0.5", "gossip-key==").Generate()
+		if err != nil {
+			t.Fatalf("replicas=%d: Generate() error: %v", replicas, err)
+		}
+		for i := int32(0); i < replicas; i++ {
+			pod := fmt.Sprintf("nomad-%d", i)
+			// grep -vF pattern after the shell expands ${POD_NAME}
+			needle := fmt.Sprintf("%q", pod+".nomad-headless.neo-smoke.svc.cluster.local")
+			var kept []string
+			removed := 0
+			for _, line := range strings.Split(rendered, "\n") {
+				if strings.Contains(line, needle) {
+					removed++
+					continue
+				}
+				kept = append(kept, line)
+			}
+			if removed != 1 {
+				t.Fatalf("pod %s (replicas=%d): filter removed %d lines, want exactly 1", pod, replicas, removed)
+			}
+			filtered := strings.Join(kept, "\n")
+			for j := int32(0); j < replicas; j++ {
+				peer := fmt.Sprintf("nomad-%d.nomad-headless.neo-smoke.svc.cluster.local", j)
+				has := strings.Contains(filtered, peer)
+				if j == i && has {
+					t.Errorf("pod %s: own FQDN still present after filter", pod)
+				}
+				if j != i && !has {
+					t.Errorf("pod %s: peer %s missing after filter", pod, peer)
+				}
+			}
+			if _, err := hclparse.Parse(filtered); err != nil {
+				t.Errorf("pod %s (replicas=%d): filtered config is not valid HCL: %v", pod, replicas, err)
+			}
+		}
+	}
+}
+
+// The GH #11 fix ships as a command change, which needsUpdate ignored
+// before — without this check it never reaches a live StatefulSet.
+func TestNeedsUpdate_CommandDrift(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: newTestPhaseContext()}
+	cluster := newTestCluster("ns", "nomad")
+	desired := phase.buildStatefulSet(context.Background(), cluster)
+	existing := desired.DeepCopy()
+
+	if update, reason := phase.needsUpdate(existing, desired); update {
+		t.Fatalf("identical specs reported drift: %q", reason)
+	}
+
+	existing.Spec.Template.Spec.Containers[0].Command = []string{"nomad", "agent", "-config=/nomad/config"}
+	update, reason := phase.needsUpdate(existing, desired)
+	if !update || reason != "container command" {
+		t.Errorf("update=%v reason=%q, want update=true reason=%q", update, reason, "container command")
 	}
 }

@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/go-logr/logr v1.4.3
+	github.com/hashicorp/hcl v1.0.1-vault-7
 	github.com/hashicorp/nomad/api v0.0.0-20260609230345-e9d7b7cc000c
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/onsi/ginkgo/v2 v2.29.0
@@ -69,7 +70,6 @@ require (
 	github.com/hashicorp/go-secure-stdlib/parseutil v0.2.0 // indirect
 	github.com/hashicorp/go-secure-stdlib/strutil v0.1.2 // indirect
 	github.com/hashicorp/go-sockaddr v1.0.7 // indirect
-	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
