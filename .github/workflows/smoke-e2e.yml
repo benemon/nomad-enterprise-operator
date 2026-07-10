@@ -141,8 +141,10 @@ jobs:
           # Assert all four expected keys are populated. Operator-managed
           # TLS lays down ca.crt, tls.crt, tls.key, plus a server bundle.
           for key in ca.crt tls.crt tls.key; do
+            # Dots in Secret keys must be escaped or jsonpath walks them
+            # as nested fields and silently returns empty.
             kubectl -n "${SAMPLE_NS}" get secret "${CLUSTER_NAME}-tls" \
-              -o jsonpath="{.data.${key}}" | grep -q . || {
+              -o jsonpath="{.data.${key//./\\.}}" | grep -q . || {
                 echo "::error::TLS secret missing key ${key}"
                 exit 1
               }
@@ -151,15 +153,20 @@ jobs:
       # Stage 4 (≤240s): Audit PVC bound + audit.log non-empty.
       - name: 'Stage 4: Audit PVC bound and audit.log non-empty (≤240s)'
         run: |
-          kubectl -n "${SAMPLE_NS}" wait \
-            --for=jsonpath='{.status.phase}'=Bound \
-            pvc -l "app.kubernetes.io/component=audit" \
-            --timeout=240s
+          # Audit PVCs carry the shared server labels (no audit-specific
+          # component label), so select them by their deterministic
+          # volumeClaimTemplate names instead.
+          for i in 0 1 2; do
+            kubectl -n "${SAMPLE_NS}" wait \
+              --for=jsonpath='{.status.phase}'=Bound \
+              "pvc/audit-${CLUSTER_NAME}-${i}" \
+              --timeout=240s
+          done
           # Audit log is written by the nomad container into its mounted
           # audit volume. We assert non-empty by exec'ing into pod-0 and
           # checking byte count.
           kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
-            sh -c 'test -s /var/lib/nomad/audit/audit.log' || {
+            sh -c 'test -s /nomad/audit/audit.log' || {
               echo "::error::audit.log is empty or missing on ${CLUSTER_NAME}-0"
               exit 1
             }
@@ -175,9 +182,9 @@ jobs:
           # one is elected.
           leader=$(kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
             nomad agent-info -address=https://127.0.0.1:4646 \
-              -ca-cert=/etc/nomad/tls/ca.crt \
-              -client-cert=/etc/nomad/tls/tls.crt \
-              -client-key=/etc/nomad/tls/tls.key 2>&1 | awk '/leader/ {print $NF; exit}')
+              -ca-cert=/nomad/tls/ca.crt \
+              -client-cert=/nomad/tls/tls.crt \
+              -client-key=/nomad/tls/tls.key 2>&1 | awk '/leader/ {print $NF; exit}')
           if [ -z "${leader}" ] || [ "${leader}" = "false" ]; then
             echo "::error::no Nomad leader observable via agent-info"
             exit 1
