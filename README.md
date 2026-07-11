@@ -354,13 +354,20 @@ keyring wraps new keys; any one reachable keyring unwraps):
 | `server.keyrings[].gcpckms` | `object` | | GCP Cloud KMS: `project`, `region`, `keyRing`, `cryptoKey` (all required), `credentialsSecretRef` |
 | `server.keyrings[].transit` | `object` | | Vault transit: `address`, `keyName`, `mountPath` (required), `namespace`, `keyIDPrefix`, `tlsServerName`, `caSecretRef`, `clientCertSecretRef`, `auth` (required) |
 
-Cloud providers authenticate with ambient identity (IRSA, Workload
-Identity, Managed Identity) when `credentialsSecretRef` is omitted, or
-with static credentials from the referenced Secret. Rotating that
-Secret rolls the server pods automatically. Same-type HA pairs — two
-AWS KMS keys in different regions or accounts, two Azure vaults, two
-GCP keys — carry their credentials per entry, so each member of the
-pair may use a different identity.
+When `credentialsSecretRef` is set, the keyring uses static
+credentials from the referenced Secret, and rotating that Secret rolls
+the server pods automatically. When it is omitted, the cloud SDKs fall
+back to ambient identity — but only **node-level** identities (EC2
+instance roles, GKE node service accounts, Azure VM managed identity)
+work without extra wiring. Pod-level identity needs platform metadata
+the CRD does not yet expose: IRSA and GKE Workload Identity require
+annotating the operator-created ServiceAccount out-of-band and then
+rolling the server pods (the credential-injection webhooks act at pod
+admission), and Azure Workload Identity is not currently usable — it
+requires a pod label the operator does not render. Same-type HA pairs
+— two AWS KMS keys in different regions or accounts, two Azure vaults,
+two GCP keys — carry their credentials per entry, so each member of
+the pair may use a different identity.
 
 **Changing the keyring set is a live migration.** Enable, disable,
 provider change, and HA expand/contract all follow the same
@@ -946,14 +953,14 @@ Exactly one target must be specified.
 | `region` | `string` | | AWS region |
 | `endpoint` | `string` | | Endpoint URL for S3-compatible storage |
 | `forcePathStyle` | `bool` | `false` | Force path-style URLs |
-| `credentialsSecretRef.name` | `string` | | Secret with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Uses IAM/IRSA if omitted |
+| `credentialsSecretRef.name` | `string` | | Secret with `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Falls back to ambient AWS identity if omitted |
 
 **GCS** (`spec.target.gcs`):
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `bucket` | `string` | | GCS bucket name |
-| `credentialsSecretRef.name` | `string` | | Secret with `GOOGLE_APPLICATION_CREDENTIALS`. Uses workload identity if omitted |
+| `credentialsSecretRef.name` | `string` | | Secret with `GOOGLE_APPLICATION_CREDENTIALS`. Falls back to ambient GCP identity if omitted |
 
 **Azure Blob** (`spec.target.azure`):
 
@@ -962,6 +969,11 @@ Exactly one target must be specified.
 | `container` | `string` | | Azure container name |
 | `accountName` | `string` | | Storage account name |
 | `credentialsSecretRef.name` | `string` | | Secret with `AZURE_BLOB_ACCOUNT_KEY` |
+
+Ambient identity for S3 and GCS targets carries the same pod-identity
+caveat as [server keyrings](#keyrings-specserverkeyrings): node-level
+identities work without extra wiring, while IRSA and GKE Workload
+Identity require out-of-band annotation of the ServiceAccount.
 
 ### Snapshot ACL Token
 
