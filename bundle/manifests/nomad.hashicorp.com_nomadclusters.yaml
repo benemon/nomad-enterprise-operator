@@ -97,7 +97,7 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 2.0.3-ent
+                    default: 2.0.4-ent
                     description: |-
                       Tag is the container image tag, default-pinned to a concrete
                       patch version: a registry-side retag mid-roll can produce

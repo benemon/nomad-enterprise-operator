@@ -9,7 +9,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
     # pullPolicy: IfNotPresent  # default Always; override for air-gapped/digest-pinned workflows
     # For supply-chain pinning, add the manifest digest — it takes
     # precedence over the tag at deploy time while the tag stays

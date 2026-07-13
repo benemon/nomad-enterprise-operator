@@ -89,7 +89,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   monitoring:
@@ -564,7 +564,7 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			checks := []check{
 				{"{.spec.replicas}", "1", "replica count"},
-				{"{.spec.template.spec.containers[0].image}", "hashicorp/nomad:2.0.3-ent", "container image"},
+				{"{.spec.template.spec.containers[0].image}", "hashicorp/nomad:2.0.4-ent", "container image"},
 				{"{.spec.template.spec.serviceAccountName}", testClusterName, "service account"},
 				{"{.spec.serviceName}", testClusterName + "-headless", "headless service name"},
 				{"{.spec.podManagementPolicy}", "Parallel", "pod management policy"},
@@ -1041,7 +1041,7 @@ var _ = Describe("Manager", Ordered, func() {
 				"-o", `jsonpath={.spec.template.spec.containers[0].image}`)
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("hashicorp/nomad:2.0.3-ent"), "snapshot agent should use same image as cluster")
+			Expect(output).To(Equal("hashicorp/nomad:2.0.4-ent"), "snapshot agent should use same image as cluster")
 
 			By("verifying container command runs snapshot agent")
 			cmd = exec.Command("kubectl", "get", "deployment",
@@ -1558,7 +1558,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   services:
@@ -1713,7 +1713,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   services:
@@ -1854,7 +1854,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   services:
@@ -1939,7 +1939,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   services:
@@ -1996,7 +1996,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   services:
@@ -2079,7 +2079,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   services:

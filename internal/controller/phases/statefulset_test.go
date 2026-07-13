@@ -340,14 +340,14 @@ func TestImageRef(t *testing.T) {
 		digest string
 		want   string
 	}{
-		{"tag only", "", "hashicorp/nomad:2.0.3-ent"},
+		{"tag only", "", "hashicorp/nomad:2.0.4-ent"},
 		{"digest pinned wins over tag", "sha256:" + strings.Repeat("ab", 32), "hashicorp/nomad@sha256:" + strings.Repeat("ab", 32)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cluster := newTestCluster("ns", "img")
 			cluster.Spec.Image.Repository = "hashicorp/nomad"
-			cluster.Spec.Image.Tag = "2.0.3-ent"
+			cluster.Spec.Image.Tag = "2.0.4-ent"
 			cluster.Spec.Image.Digest = tc.digest
 			if got := ImageRef(cluster); got != tc.want {
 				t.Errorf("ImageRef() = %q, want %q", got, tc.want)

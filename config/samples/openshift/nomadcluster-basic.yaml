@@ -1,7 +1,7 @@
 # Basic OpenShift NomadCluster - single replica for development/testing
 #
 # Defaults applied automatically:
-#   image: hashicorp/nomad:2.0.3-ent
+#   image: hashicorp/nomad:2.0.4-ent
 #   region: global
 #   datacenter: <namespace>
 #   gossip key: auto-generated
