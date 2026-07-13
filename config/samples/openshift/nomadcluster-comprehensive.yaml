@@ -17,7 +17,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   topology:

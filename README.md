@@ -232,7 +232,7 @@ make undeploy
 |-------|------|---------|-------------|
 | `replicas` | `int` | `3` | Number of Nomad server replicas. Must be 1, 3, or 5 |
 | `image.repository` | `string` | `hashicorp/nomad` | Container image repository |
-| `image.tag` | `string` | `2.0.3-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
+| `image.tag` | `string` | `2.0.4-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) — see [Image version pinning](#image-version-pinning) |
 | `image.digest` | `string` | — | Optional content digest (`sha256:…`). When set, the image reference is `repository@digest` and `tag` is ignored — see [Image version pinning](#image-version-pinning) |
 | `image.pullPolicy` | `string` | `Always` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
 | `license.secretName` | `string` | | Name of secret containing the Nomad license, stored under the key `license` (operator-owned). Mutually exclusive with `value` |
@@ -645,7 +645,7 @@ validate — it is operator-owned (see
 
 ## Image version pinning
 
-The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.3-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
+The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.4-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
 
 Upgrading a cluster to a new Nomad version is a user-driven
 `spec.image.tag` change. **Snapshot before you upgrade** — the operator
@@ -663,7 +663,7 @@ behind the PodDisruptionBudget.
 ```yaml
 spec:
   image:
-    tag: "2.0.4-ent"   # or any other tag your environment requires
+    tag: "2.0.5-ent"   # or any other tag your environment requires
 ```
 
 **Digest pinning (air-gapped/CISO environments).** For environments
@@ -694,7 +694,7 @@ one required field). Compatibility is stated in three tiers, and the
 
 | Tier | Versions | Evidence |
 |------|----------|----------|
-| Tested | `2.0.x-ent` (current default `2.0.3-ent`) | full e2e suite, nightly |
+| Tested | `2.0.x-ent` (current default `2.0.4-ent`) | full e2e suite, nightly |
 | Tested upgrade paths | `1.10-ent → 1.11-ent`, `1.11-ent → 2.0-ent` | nightly upgrade matrix: rolling upgrade with the Raft quorum floor asserted at every poll |
 | Expected to work | `1.10.x-ent` and `1.11.x-ent` as running versions | upgrade-matrix clusters boot and serve on these lines, but the full suite does not run against them |
 | Unsupported | anything below `1.10-ent`; Nomad CE | untested; CE lacks the licensed features the operator manages (audit, snapshot agent) |
@@ -1010,7 +1010,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.3-ent"
+    tag: "2.0.4-ent"
   license:
     secretName: nomad-license
   server:

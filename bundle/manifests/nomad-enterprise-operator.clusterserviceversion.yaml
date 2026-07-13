@@ -34,7 +34,7 @@ metadata:
           "spec": {
             "image": {
               "repository": "hashicorp/nomad",
-              "tag": "2.0.3-ent"
+              "tag": "2.0.4-ent"
             },
             "license": {
               "secretName": "nomad-license"
@@ -116,7 +116,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-08T19:59:24Z"
+    createdAt: "2026-07-13T14:57:37Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     olm.skipRange: '>=0.1.0 <0.0.1'

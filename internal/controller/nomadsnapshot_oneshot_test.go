@@ -124,7 +124,7 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 	t.Run("succeeded", func(t *testing.T) {
 		snap := newOneShotSnapshot("done")
 		cluster := newTestCluster("snap-ns", "test-cluster")
-		cluster.Status.NomadVersion = "2.0.3-ent"
+		cluster.Status.NomadVersion = "2.0.4-ent"
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{Name: "done-snapshot", Namespace: "snap-ns"},
 			Status:     batchv1.JobStatus{Succeeded: 1, CompletionTime: &now},
@@ -142,11 +142,11 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 		}
 		// Same-version restore rule: the artifact record freezes the
 		// version; the top-level mirror tracks the cluster.
-		if snap.Status.LastSnapshot.NomadVersion != "2.0.3-ent" {
-			t.Errorf("lastSnapshot.nomadVersion = %q, want 2.0.3-ent", snap.Status.LastSnapshot.NomadVersion)
+		if snap.Status.LastSnapshot.NomadVersion != "2.0.4-ent" {
+			t.Errorf("lastSnapshot.nomadVersion = %q, want 2.0.4-ent", snap.Status.LastSnapshot.NomadVersion)
 		}
-		if snap.Status.NomadVersion != "2.0.3-ent" {
-			t.Errorf("status.nomadVersion = %q, want 2.0.3-ent", snap.Status.NomadVersion)
+		if snap.Status.NomadVersion != "2.0.4-ent" {
+			t.Errorf("status.nomadVersion = %q, want 2.0.4-ent", snap.Status.NomadVersion)
 		}
 		if len(recorder.Events) != 0 {
 			t.Error("unexpected event on success")
@@ -617,13 +617,13 @@ func TestRecurringVersionMirror(t *testing.T) {
 	snap := newOneShotSnapshot("vmirror")
 	snap.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "1h", Retain: 24}
 	cluster := newTestCluster("snap-ns", "test-cluster")
-	cluster.Status.NomadVersion = "2.0.3-ent"
+	cluster.Status.NomadVersion = "2.0.4-ent"
 	r, _ := newSnapshotReconciler(snap, cluster)
 
 	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
 		t.Fatalf("reconcileRecurring() error = %v", err)
 	}
-	if snap.Status.NomadVersion != "2.0.3-ent" {
+	if snap.Status.NomadVersion != "2.0.4-ent" {
 		t.Errorf("status.nomadVersion = %q, want mirror of cluster", snap.Status.NomadVersion)
 	}
 
