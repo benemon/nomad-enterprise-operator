@@ -7,7 +7,7 @@ require (
 	github.com/hashicorp/hcl v1.0.1-vault-7
 	github.com/hashicorp/nomad/api v0.0.0-20260609230345-e9d7b7cc000c
 	github.com/hashicorp/vault/api v1.23.0
-	github.com/onsi/ginkgo/v2 v2.29.0
+	github.com/onsi/ginkgo/v2 v2.32.0
 	github.com/onsi/gomega v1.41.0
 	github.com/openshift/api v0.0.0-20260610173709-6dc0643171ce
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.92.1
