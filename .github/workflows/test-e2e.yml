@@ -60,6 +60,7 @@ jobs:
           name: E2E Test Results (PR lane)
           path: e2e-pr.xml
           reporter: java-junit
+          use-actions-summary: false
 
       - name: Upload test report artifact
         uses: actions/upload-artifact@v7

@@ -59,6 +59,7 @@ jobs:
           name: E2E Test Results (nightly full suite)
           path: e2e-nightly.xml
           reporter: java-junit
+          use-actions-summary: false
 
       - name: Upload test report artifact
         uses: actions/upload-artifact@v7
@@ -119,6 +120,7 @@ jobs:
           name: E2E Test Results (upgrade ${{ matrix.upgrade.from }} to ${{ matrix.upgrade.to }})
           path: e2e-upgrade.xml
           reporter: java-junit
+          use-actions-summary: false
 
       - name: Upload test report artifact
         uses: actions/upload-artifact@v7

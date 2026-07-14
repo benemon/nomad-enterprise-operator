@@ -37,6 +37,7 @@ jobs:
           name: Unit Test Results
           path: unit.xml
           reporter: java-junit
+          use-actions-summary: false
 
       - name: Upload test report artifact
         uses: actions/upload-artifact@v7
