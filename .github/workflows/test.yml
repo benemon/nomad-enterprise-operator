@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_call:
 
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   test:
     name: Run on Ubuntu
@@ -22,4 +26,22 @@ jobs:
       - name: Running Tests
         run: |
           go mod tidy
-          make test
+          make test JUNIT_REPORT=unit.xml
+
+      # Dependabot-triggered runs get a read-only token that cannot
+      # create check runs, so the report step is skipped for them.
+      - name: Publish test report
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+        if: ${{ always() && github.actor != 'dependabot[bot]' }}
+        with:
+          name: Unit Test Results
+          path: unit.xml
+          reporter: java-junit
+          use-actions-summary: false
+
+      - name: Upload test report artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: unit-junit
+          path: unit.xml

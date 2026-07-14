@@ -116,8 +116,9 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+# JUNIT_REPORT=<file> additionally writes a JUnit XML report (via gotestsum).
+test: manifests generate fmt vet setup-envtest $(if $(JUNIT_REPORT),gotestsum) ## Run tests.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" $(if $(JUNIT_REPORT),$(GOTESTSUM) --junitfile $(abspath $(JUNIT_REPORT)) --format standard-verbose --,go test) $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -151,8 +152,10 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	# GINKGO_FOCUS runs a single container (matrix lanes focus the
 	# upgrade container per version pair); UPGRADE_FROM/UPGRADE_TO
 	# select the pair. Empty values are no-ops.
+	# JUNIT_REPORT=<file> additionally writes a JUnit XML report
+	# (abspath: ginkgo resolves relative paths against the suite dir).
 	KIND_CLUSTER=$(KIND_CLUSTER) UPGRADE_FROM=$(UPGRADE_FROM) UPGRADE_TO=$(UPGRADE_TO) \
-		go test ./test/e2e/ -v -ginkgo.v -ginkgo.skip="$(GINKGO_SKIP)" -ginkgo.focus="$(GINKGO_FOCUS)" -timeout=75m
+		go test ./test/e2e/ -v -ginkgo.v -ginkgo.skip="$(GINKGO_SKIP)" -ginkgo.focus="$(GINKGO_FOCUS)" $(if $(JUNIT_REPORT),-ginkgo.junit-report=$(abspath $(JUNIT_REPORT))) -timeout=75m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -273,6 +276,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 MOCKERY ?= $(LOCALBIN)/mockery
+GOTESTSUM ?= $(LOCALBIN)/gotestsum
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -283,11 +287,17 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.12.2
 MOCKERY_VERSION ?= v3.5.1
+GOTESTSUM_VERSION ?= v1.13.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
 	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
+
+.PHONY: gotestsum
+gotestsum: $(GOTESTSUM) ## Download gotestsum locally if necessary.
+$(GOTESTSUM): $(LOCALBIN)
+	$(call go-install-tool,$(GOTESTSUM),gotest.tools/gotestsum,$(GOTESTSUM_VERSION))
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.

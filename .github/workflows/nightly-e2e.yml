@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   nightly-e2e:
@@ -49,7 +50,23 @@ jobs:
       - name: Run the full e2e suite
         run: |
           go mod tidy
-          make test-e2e
+          make test-e2e JUNIT_REPORT=e2e-nightly.xml
+
+      - name: Publish test report
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+        if: always()
+        with:
+          name: E2E Test Results (nightly full suite)
+          path: e2e-nightly.xml
+          reporter: java-junit
+          use-actions-summary: false
+
+      - name: Upload test report artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-nightly-junit
+          path: e2e-nightly.xml
 
   upgrade-matrix:
     name: Upgrade ${{ matrix.upgrade.from }} -> ${{ matrix.upgrade.to }}
@@ -92,5 +109,22 @@ jobs:
         run: |
           go mod tidy
           make test-e2e GINKGO_FOCUS='version upgrade' \
+            JUNIT_REPORT=e2e-upgrade.xml \
             UPGRADE_FROM='${{ matrix.upgrade.from }}' \
             UPGRADE_TO='${{ matrix.upgrade.to }}'
+
+      - name: Publish test report
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+        if: always()
+        with:
+          name: E2E Test Results (upgrade ${{ matrix.upgrade.from }} to ${{ matrix.upgrade.to }})
+          path: e2e-upgrade.xml
+          reporter: java-junit
+          use-actions-summary: false
+
+      - name: Upload test report artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-upgrade-${{ matrix.upgrade.from }}-to-${{ matrix.upgrade.to }}-junit
+          path: e2e-upgrade.xml
