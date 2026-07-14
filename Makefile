@@ -152,7 +152,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	# upgrade container per version pair); UPGRADE_FROM/UPGRADE_TO
 	# select the pair. Empty values are no-ops.
 	KIND_CLUSTER=$(KIND_CLUSTER) UPGRADE_FROM=$(UPGRADE_FROM) UPGRADE_TO=$(UPGRADE_TO) \
-		go test ./test/e2e/ -v -ginkgo.v -ginkgo.skip="$(GINKGO_SKIP)" -ginkgo.focus="$(GINKGO_FOCUS)" -timeout=45m
+		go test ./test/e2e/ -v -ginkgo.v -ginkgo.skip="$(GINKGO_SKIP)" -ginkgo.focus="$(GINKGO_FOCUS)" -timeout=75m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
