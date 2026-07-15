@@ -51,14 +51,14 @@ func TestBuildAutoscalerPolicyRules(t *testing.T) {
 		{
 			name:       "single namespace, no HA, no DAS",
 			want:       []string{`namespace "default"`, `policy = "scale"`, `node {`},
-			wantAbsent: []string{"variables", "submit-recommendation"},
+			wantAbsent: []string{"variables", "submit-recommendation", "operator"},
 		},
 		{
-			name: "DAS adds the recommendations capability",
+			name: "DAS adds the recommendations capability and operator read for the license check",
 			mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
 				a.Spec.DynamicApplicationSizing.Enabled = true
 			},
-			want: []string{`capabilities = ["submit-recommendation"]`},
+			want: []string{`capabilities = ["submit-recommendation"]`, "operator {"},
 		},
 		{
 			name: "HA with default namespace granted merges the lock into that block",
