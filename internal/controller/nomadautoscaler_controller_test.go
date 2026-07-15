@@ -302,6 +302,7 @@ var _ = Describe("NomadAutoscaler Controller", func() {
 			autoscaler = newTestAutoscaler(namespace, "ha", "nomad")
 			autoscaler.Spec.Replicas = 2
 			autoscaler.Spec.DynamicApplicationSizing.Enabled = true
+			autoscaler.Spec.DynamicApplicationSizing.PrometheusURL = "http://das-prometheus:9090"
 			autoscaler.Spec.Namespaces = []string{"payments"}
 			Expect(k8sClient.Create(ctx, autoscaler)).To(Succeed())
 			nsName := types.NamespacedName{Name: autoscaler.Name, Namespace: namespace}

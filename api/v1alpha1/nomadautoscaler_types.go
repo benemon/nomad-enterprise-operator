@@ -118,10 +118,21 @@ type AutoscalerImageSpec struct {
 // Sizing (Nomad Enterprise). Sizing policies live in job
 // specifications, not here; enabling this extends the minted ACL
 // policy with the recommendations capability.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.prometheusURL) && size(self.prometheusURL) > 0)",message="prometheusURL is required when dynamic application sizing is enabled"
 type DynamicApplicationSizingSpec struct {
 	// Enabled turns on Dynamic Application Sizing support
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
+
+	// PrometheusURL is the Prometheus endpoint the agent loads
+	// historical usage from. Sizing is computed from usage history,
+	// which Nomad itself does not retain, so this is required when
+	// enabled. The Prometheus must scrape the client agents'
+	// /v1/metrics endpoints, and clients must set
+	// telemetry.publish_allocation_metrics.
+	// +kubebuilder:validation:Pattern=`^https?://.+$`
+	// +optional
+	PrometheusURL string `json:"prometheusURL,omitempty"`
 }
 
 // AutoscalerMonitoringSpec gates creation of monitoring resources for

@@ -496,6 +496,28 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 				wantErr: "should match",
 			},
+			{
+				name: "DAS without prometheusURL rejected by CEL",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.DynamicApplicationSizing.Enabled = true
+				},
+				wantErr: "prometheusURL is required",
+			},
+			{
+				name: "DAS with prometheusURL accepted",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.DynamicApplicationSizing.Enabled = true
+					a.Spec.DynamicApplicationSizing.PrometheusURL = "http://das-prometheus:9090"
+				},
+			},
+			{
+				name: "non-http prometheusURL rejected by pattern",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.DynamicApplicationSizing.Enabled = true
+					a.Spec.DynamicApplicationSizing.PrometheusURL = "das-prometheus:9090"
+				},
+				wantErr: "should match",
+			},
 		}
 
 		for i, c := range cases {

@@ -144,6 +144,18 @@ func TestGenerateAutoscalerConfig(t *testing.T) {
 			},
 			want: []string{"enable_debug = true", `log_level    = "DEBUG"`},
 		},
+		{
+			name: "DAS renders the prometheus APM block",
+			mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+				a.Spec.DynamicApplicationSizing.Enabled = true
+				a.Spec.DynamicApplicationSizing.PrometheusURL = "http://das-prometheus:9090"
+			},
+			want: []string{`apm "prometheus"`, `address = "http://das-prometheus:9090"`},
+		},
+		{
+			name:       "no prometheus APM block without DAS",
+			wantAbsent: []string{`apm "prometheus"`},
+		},
 	}
 
 	for _, tc := range cases {

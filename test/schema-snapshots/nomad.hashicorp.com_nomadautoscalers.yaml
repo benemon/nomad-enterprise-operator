@@ -85,7 +85,22 @@ spec:
                     default: false
                     description: Enabled turns on Dynamic Application Sizing support
                     type: boolean
+                  prometheusURL:
+                    description: |-
+                      PrometheusURL is the Prometheus endpoint the agent loads
+                      historical usage from. Sizing is computed from usage history,
+                      which Nomad itself does not retain, so this is required when
+                      enabled. The Prometheus must scrape the client agents'
+                      /v1/metrics endpoints, and clients must set
+                      telemetry.publish_allocation_metrics.
+                    pattern: ^https?://.+$
+                    type: string
                 type: object
+                x-kubernetes-validations:
+                - message: prometheusURL is required when dynamic application sizing
+                    is enabled
+                  rule: '!self.enabled || (has(self.prometheusURL) && size(self.prometheusURL)
+                    > 0)'
               enableDebug:
                 default: false
                 description: EnableDebug exposes the agent's pprof endpoints

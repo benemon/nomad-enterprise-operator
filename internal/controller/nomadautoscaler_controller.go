@@ -619,6 +619,19 @@ high_availability {
 `, autoscalerLockNamespace, autoscalerLockPath(a))
 	}
 
+	// DAS loads historical usage from Prometheus; without this APM the
+	// agent's vertical policy handlers fail to start.
+	if a.Spec.DynamicApplicationSizing.Enabled {
+		config += fmt.Sprintf(`
+apm "prometheus" {
+  driver = "prometheus"
+  config = {
+    address = "%s"
+  }
+}
+`, a.Spec.DynamicApplicationSizing.PrometheusURL)
+	}
+
 	return config
 }
 

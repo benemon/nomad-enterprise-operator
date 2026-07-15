@@ -21,9 +21,11 @@ spec:
 
   # Dynamic Application Sizing (Nomad Enterprise): sizing policies live
   # in job specifications; enabling this wires the required ACL
-  # capability
+  # capability. Requires a Prometheus that scrapes the client agents'
+  # metrics (clients must set telemetry.publish_allocation_metrics).
   dynamicApplicationSizing:
     enabled: true
+    prometheusURL: http://das-prometheus:9090
 
   monitoring:
     enabled: true
