@@ -23,6 +23,12 @@ jobs:
   test:
     needs: lint
     uses: ./.github/workflows/test.yml
+    # test.yml requests checks:write for the JUnit reporter; a caller
+    # must grant what the called workflow requests or the run dies at
+    # startup ("requesting 'checks: write', but is only allowed none").
+    permissions:
+      contents: read
+      checks: write
 
   rc-build:
     needs: test

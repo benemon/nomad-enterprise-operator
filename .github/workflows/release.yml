@@ -15,10 +15,18 @@ jobs:
   test:
     needs: lint
     uses: ./.github/workflows/test.yml
+    # Called workflows request checks:write for the JUnit reporters; the
+    # caller must grant it or the run fails at startup.
+    permissions:
+      contents: read
+      checks: write
 
   test-e2e:
     needs: test
     uses: ./.github/workflows/test-e2e.yml
+    permissions:
+      contents: read
+      checks: write
     secrets:
       NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
 
