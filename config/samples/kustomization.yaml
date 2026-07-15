@@ -5,4 +5,5 @@ resources:
 - minimal/nomadcluster.yaml
 - nomad_v1alpha1_nomadcluster.yaml
 - nomad_v1alpha1_nomadsnapshot.yaml
+- nomad_v1alpha1_nomadautoscaler.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

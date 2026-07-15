@@ -417,4 +417,107 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 			})
 		}
 	})
+
+	Describe("NomadAutoscaler", func() {
+		base := func(name string) *nomadv1alpha1.NomadAutoscaler {
+			return &nomadv1alpha1.NomadAutoscaler{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: nomadv1alpha1.NomadAutoscalerSpec{
+					ClusterRef: nomadv1alpha1.ClusterReference{Name: "some-cluster"},
+				},
+			}
+		}
+
+		type tc struct {
+			name    string
+			mutate  func(*nomadv1alpha1.NomadAutoscaler)
+			wantErr string
+			verify  func(*nomadv1alpha1.NomadAutoscaler)
+		}
+
+		cases := []tc{
+			{
+				name:   "baseline minimal autoscaler accepted (positive control)",
+				mutate: func(*nomadv1alpha1.NomadAutoscaler) {},
+				verify: func(a *nomadv1alpha1.NomadAutoscaler) {
+					Expect(a.Spec.Replicas).To(Equal(int32(1)), "replicas must default to 1")
+					Expect(a.Spec.Namespaces).To(Equal([]string{"default"}), "namespaces must default to [default]")
+					Expect(a.Spec.Image.Repository).To(Equal("hashicorp/nomad-autoscaler-enterprise"), "image must default to the enterprise repository")
+					Expect(a.Spec.LogLevel).To(Equal("INFO"))
+				},
+			},
+			{
+				// 0 is the Go zero value and never serializes; -1 exercises
+				// the same Minimum rule.
+				name: "negative replicas rejected by minimum",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Replicas = -1
+				},
+				wantErr: "should be greater than or equal to 1",
+			},
+			{
+				name: "replicas above maximum rejected",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Replicas = 4
+				},
+				wantErr: "should be less than or equal to 3",
+			},
+			{
+				name: "wildcard alongside other namespaces rejected by CEL",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Namespaces = []string{"*", "default"}
+				},
+				wantErr: "must be the only entry",
+			},
+			{
+				name: "wildcard alone accepted",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Namespaces = []string{"*"}
+				},
+			},
+			{
+				name: "invalid namespace name rejected by item pattern",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Namespaces = []string{"not a namespace"}
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "invalid log level rejected by enum",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.LogLevel = "TRACE"
+				},
+				wantErr: "supported values",
+			},
+			{
+				name: "malformed image digest rejected by pattern",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Image.Digest = "sha256:short"
+				},
+				wantErr: "should match",
+			},
+		}
+
+		for i, c := range cases {
+			name := fmt.Sprintf("adm-autoscaler-%d", i)
+			It(c.name, func() {
+				a := base(name)
+				c.mutate(a)
+
+				err := k8sClient.Create(ctx, a)
+				if c.wantErr == "" {
+					Expect(err).NotTo(HaveOccurred())
+					if c.verify != nil {
+						fetched := &nomadv1alpha1.NomadAutoscaler{}
+						Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, fetched)).To(Succeed())
+						c.verify(fetched)
+					}
+					Expect(k8sClient.Delete(ctx, a)).To(Succeed())
+					return
+				}
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(c.wantErr))
+			})
+		}
+	})
 })

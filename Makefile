@@ -217,6 +217,10 @@ docker-push: ## Push docker image with the manager.
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
 # Supported release architectures (neo-14p): amd64 + arm64 only.
 PLATFORMS ?= linux/amd64,linux/arm64
+# Extra flags for the buildx invocation. The RC workflow injects
+# '--label quay.expires-after=…' here so Quay garbage-collects
+# feature-branch builds.
+DOCKER_BUILD_EXTRA_ARGS ?=
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
@@ -227,7 +231,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	# leading '-' let a failed multi-arch build pass silently, releasing
 	# nothing while the workflow reported success. Cleanup steps below
 	# stay tolerant so a build failure still removes the builder.
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross . || \
+	$(CONTAINER_TOOL) buildx build --push $(DOCKER_BUILD_EXTRA_ARGS) --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross . || \
 		{ $(CONTAINER_TOOL) buildx rm nomad-enterprise-operator-builder; rm Dockerfile.cross; exit 1; }
 	- $(CONTAINER_TOOL) buildx rm nomad-enterprise-operator-builder
 	rm Dockerfile.cross

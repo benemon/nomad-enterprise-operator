@@ -208,6 +208,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&controller.NomadAutoscalerReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		//nolint:staticcheck // controllers consume record.EventRecorder
+		Recorder: mgr.GetEventRecorderFor("nomadautoscaler-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "NomadAutoscaler")
+		os.Exit(1)
+	}
+
 	// Ensure the operator's own metrics ServiceMonitor once the cache is
 	// ready (AC-F4.4). No-op on clusters without Prometheus Operator CRDs.
 	operatorNamespace := namespaceFromEnv()
