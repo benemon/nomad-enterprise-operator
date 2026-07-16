@@ -45,3 +45,15 @@ func TestEventRecorderInjectedOnNomadSnapshotReconciler(t *testing.T) {
 		t.Fatal("NomadSnapshotReconciler.Recorder is nil after injection")
 	}
 }
+
+// TestEventRecorderInjectedOnNomadAutoscalerReconciler verifies that
+// constructing a NomadAutoscalerReconciler with a Recorder leaves the
+// field non-nil.
+func TestEventRecorderInjectedOnNomadAutoscalerReconciler(t *testing.T) {
+	recorder := record.NewFakeRecorder(10)
+	r := &NomadAutoscalerReconciler{Recorder: recorder}
+
+	if r.Recorder == nil {
+		t.Fatal("NomadAutoscalerReconciler.Recorder is nil after injection")
+	}
+}

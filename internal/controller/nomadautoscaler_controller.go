@@ -52,6 +52,12 @@ const (
 	autoscalerFinalizer      = "nomad.hashicorp.com/autoscaler-cleanup"
 	autoscalerRequeueDefault = 30 * time.Second
 
+	// autoscalerDegradedGrace is how long the agent Deployment may sit
+	// below its desired replica count before Degraded=True: long enough
+	// for an image pull and start, short enough to page before a whole
+	// HA window is lost.
+	autoscalerDegradedGrace = 2 * time.Minute
+
 	// autoscalerLockNamespace is the Nomad namespace holding the HA
 	// lock variable. Constant so every replica of an instance lands in
 	// the same election group.
@@ -213,12 +219,20 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err != nil {
 		log.Error(err, "Failed to ensure autoscaler agent token")
 		patchBase := autoscaler.DeepCopy()
+		// Warning Event once per transition into the failed state, not
+		// per retry — the 30s requeue would flood the Event stream.
+		prevReady := meta.FindStatusCondition(autoscaler.Status.Conditions, "Ready")
+		alreadyFailed := prevReady != nil && prevReady.Reason == "TokenCreationFailed"
 		r.setCondition(autoscaler, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
 			Reason:  "TokenCreationFailed",
 			Message: fmt.Sprintf("Failed to create autoscaler agent token: %v", err),
 		})
+		if !alreadyFailed && r.Recorder != nil {
+			r.Recorder.Event(autoscaler, corev1.EventTypeWarning, "TokenCreationFailed",
+				fmt.Sprintf("Failed to create autoscaler agent token: %v", err))
+		}
 		if err := r.Status().Patch(ctx, autoscaler, client.MergeFrom(patchBase)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -253,6 +267,15 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
+	return r.updateAgentStatus(ctx, autoscaler, internalAddr)
+}
+
+// updateAgentStatus observes the agent Deployment and writes the
+// status block: resource names, replica counts, the Ready condition,
+// and the Degraded condition with its once-per-transition Warning.
+func (r *NomadAutoscalerReconciler) updateAgentStatus(
+	ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler, internalAddr string,
+) (ctrl.Result, error) {
 	deploymentName := autoscalerAgentName(autoscaler)
 
 	patchBase := autoscaler.DeepCopy()
@@ -262,7 +285,8 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	autoscaler.Status.NomadAddress = internalAddr
 
 	deploy := &appsv1.Deployment{}
-	if err := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: autoscaler.Namespace}, deploy); err == nil {
+	deployFound := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: autoscaler.Namespace}, deploy) == nil
+	if deployFound {
 		autoscaler.Status.DesiredReplicas = ptr.Deref(deploy.Spec.Replicas, 1)
 		autoscaler.Status.ReadyReplicas = deploy.Status.ReadyReplicas
 	}
@@ -283,11 +307,86 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		})
 	}
 
+	// Degraded tracks agent health beyond the Ready snapshot: replica
+	// loss that outlasts the grace window, or a rollout the Deployment
+	// controller has given up on (surge keeps the old ReplicaSet — and
+	// Ready=True — while the new template never becomes available).
+	// Warning Event once per transition, same as the snapshot controller.
+	requeueAfter := 5 * time.Minute
+	wasDegraded := meta.IsStatusConditionTrue(autoscaler.Status.Conditions, "Degraded")
+	degradedReason, degradedMessage := "", ""
+	switch {
+	case deployFound && autoscaler.Status.ReadyReplicas < autoscaler.Status.DesiredReplicas:
+		if since, ok := deploymentUnavailableSince(deploy); ok {
+			if elapsed := time.Since(since.Time); elapsed >= autoscalerDegradedGrace {
+				degradedReason = "AgentUnavailable"
+				degradedMessage = fmt.Sprintf("%d/%d agent replicas ready for over %s",
+					autoscaler.Status.ReadyReplicas, autoscaler.Status.DesiredReplicas, autoscalerDegradedGrace)
+			} else if remaining := autoscalerDegradedGrace - elapsed + time.Second; remaining < requeueAfter {
+				// A stalled Deployment emits no watch events; requeue
+				// to fire the transition when the grace window lapses.
+				requeueAfter = remaining
+			}
+		}
+	case deployFound && deploymentRolloutStuck(deploy):
+		degradedReason = "RolloutStuck"
+		degradedMessage = "Agent Deployment rollout exceeded its progress deadline; new pods are not becoming ready"
+	}
+	if degradedReason != "" {
+		r.setDegraded(autoscaler, true, degradedReason, degradedMessage)
+		if !wasDegraded && r.Recorder != nil {
+			r.Recorder.Event(autoscaler, corev1.EventTypeWarning, "AutoscalerDegraded", degradedMessage)
+		}
+	} else {
+		r.setDegraded(autoscaler, false, "AgentHealthy", "")
+	}
+
 	if err := r.Status().Patch(ctx, autoscaler, client.MergeFrom(patchBase)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// deploymentUnavailableSince returns when the Deployment lost minimum
+// availability. With maxUnavailable=0 that is exactly "readyReplicas
+// dropped below desired", so it anchors the Degraded grace window.
+func deploymentUnavailableSince(deploy *appsv1.Deployment) (metav1.Time, bool) {
+	for _, c := range deploy.Status.Conditions {
+		if c.Type == appsv1.DeploymentAvailable && c.Status == corev1.ConditionFalse {
+			return c.LastTransitionTime, true
+		}
+	}
+	return metav1.Time{}, false
+}
+
+// deploymentRolloutStuck reports whether the Deployment controller has
+// declared the current rollout failed (progress deadline exceeded).
+func deploymentRolloutStuck(deploy *appsv1.Deployment) bool {
+	for _, c := range deploy.Status.Conditions {
+		if c.Type == appsv1.DeploymentProgressing && c.Status == corev1.ConditionFalse {
+			return true
+		}
+	}
+	return false
+}
+
+// setDegraded maintains the Degraded condition, mirroring the snapshot
+// controller's pattern.
+func (r *NomadAutoscalerReconciler) setDegraded(autoscaler *nomadv1alpha1.NomadAutoscaler, degraded bool, reason, message string) {
+	status := metav1.ConditionFalse
+	if degraded {
+		status = metav1.ConditionTrue
+	}
+	if message == "" {
+		message = "Autoscaler agent is healthy"
+	}
+	r.setCondition(autoscaler, metav1.Condition{
+		Type:    "Degraded",
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
 }
 
 func (r *NomadAutoscalerReconciler) handleDeletion(ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler) (ctrl.Result, error) {
