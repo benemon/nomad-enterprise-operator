@@ -382,6 +382,15 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				wantErr: "one of target",
 			},
 			{
+				// The agent pod mounts the cluster's TLS Secret, which
+				// pods cannot do across namespaces (neo-6rw).
+				name: "cross-namespace clusterRef rejected by CEL",
+				mutate: func(s *nomadv1alpha1.NomadSnapshot) {
+					s.Spec.ClusterRef.Namespace = "elsewhere"
+				},
+				wantErr: "clusterRef.namespace is not supported",
+			},
+			{
 				name: "negative retain rejected by minimum",
 				mutate: func(s *nomadv1alpha1.NomadSnapshot) {
 					s.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "1h", Retain: -1}

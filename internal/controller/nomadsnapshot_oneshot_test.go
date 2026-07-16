@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -32,8 +34,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
@@ -86,7 +91,7 @@ func TestSnapshotOneShotCreatesJob(t *testing.T) {
 	cluster := newTestCluster("snap-ns", "test-cluster")
 	r, _ := newSnapshotReconciler(snap, cluster)
 
-	if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "cafe1234"); err != nil {
+	if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "cafe1234", "s"); err != nil {
 		t.Fatalf("reconcileOneShot() error = %v", err)
 	}
 
@@ -131,7 +136,7 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 		}
 		r, recorder := newSnapshotReconciler(snap, cluster, job)
 
-		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileOneShot() error = %v", err)
 		}
 		if snap.Status.Phase != nomadv1alpha1.SnapshotPhaseSucceeded {
@@ -161,7 +166,7 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 			Status:     batchv1.JobStatus{Succeeded: 1, CompletionTime: &now},
 		}
 		r, _ := newSnapshotReconciler(snap, cluster, job)
-		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileOneShot() error = %v", err)
 		}
 		if snap.Status.NomadVersion != "" || snap.Status.LastSnapshot.NomadVersion != "" {
@@ -182,7 +187,7 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 		r, recorder := newSnapshotReconciler(snap, cluster, job)
 
 		for i := 0; i < 2; i++ { // second pass must not re-emit
-			if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+			if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 				t.Fatalf("reconcileOneShot() pass %d error = %v", i, err)
 			}
 		}
@@ -219,7 +224,7 @@ func TestSnapshotModeSwitch(t *testing.T) {
 		}
 		r, _ := newSnapshotReconciler(snap, cluster, staleDeploy)
 
-		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileOneShot() error = %v", err)
 		}
 
@@ -243,7 +248,7 @@ func TestSnapshotModeSwitch(t *testing.T) {
 		}
 		r, _ := newSnapshotReconciler(snap, cluster, staleJob)
 
-		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileRecurring() error = %v", err)
 		}
 
@@ -364,7 +369,7 @@ func TestEnsureSnapshotTokenWithMock(t *testing.T) {
 		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
 		Return(&nomad.ACLTokenResult{AccessorID: "snap-acc", SecretID: "snap-secret"}, nil).Once()
 
-	token, err := r.ensureSnapshotToken(context.Background(), snap, cluster, "snap-ns", "mgmt-token")
+	token, err := r.ensureSnapshotToken(context.Background(), snap, cluster, "mgmt-token")
 	if err != nil {
 		t.Fatalf("ensureSnapshotToken() error = %v", err)
 	}
@@ -480,7 +485,7 @@ func TestSnapshotTargetPodWiring(t *testing.T) {
 			cluster := newTestCluster("snap-ns", "test-cluster")
 			r, _ := newSnapshotReconciler(snap, cluster)
 
-			template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c")
+			template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c", "s")
 
 			env := envNames(template.Spec)
 			for _, want := range tc.wantEnv {
@@ -552,58 +557,237 @@ func TestSnapshotPVCReconcile(t *testing.T) {
 	}
 }
 
-// neo-tih: cross-namespace clusterRef — a NomadSnapshot in one
-// namespace referencing a NomadCluster in another must resolve the
-// cluster AND perform its secret lookups (management token) in the
-// CLUSTER's namespace, not the snapshot's.
-var _ = Describe("NomadSnapshot cross-namespace clusterRef (neo-tih)", func() {
-	ctx := context.Background()
+// neo-6rw: cross-namespace clusterRef is rejected at admission (the
+// agent pod cannot mount the cluster's TLS Secret across namespaces),
+// so the controller assumes same-namespace; the CEL rejection itself
+// is covered in admission_invariants_test.go. The former neo-tih
+// cross-namespace lookup spec was removed with the contract.
 
-	It("resolves the cluster and its secrets in the referenced namespace", func() {
-		createTestNamespace(ctx, "xns-snap")
-		createTestNamespace(ctx, "xns-cluster")
+// neo-87a: a token re-mint rewrites the Secret in place, so only the
+// pod-template secrets checksum carries the change into the recurring
+// Deployment and rolls the agent onto the new token.
+func TestSnapshotTokenRemintRollsDeployment(t *testing.T) {
+	snap := newOneShotSnapshot("remint")
+	snap.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "1h", Retain: 24}
+	snap.Finalizers = []string{snapshotFinalizer}
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	cluster.Status.ACLBootstrapped = true
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-tls", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"ca.crt": []byte("dummy-ca")},
+	}
+	mgmt := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-operator-management", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"secret-id": []byte("mgmt-token")},
+	}
+	r, _ := newSnapshotReconciler(snap, cluster, tlsSecret, mgmt)
 
-		cluster := newTestCluster("xns-cluster", "target")
-		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-		fetched := &nomadv1alpha1.NomadCluster{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "target", Namespace: "xns-cluster"}, fetched)).To(Succeed())
-		fetched.Status.ACLBootstrapped = true
-		Expect(k8sClient.Status().Update(ctx, fetched)).To(Succeed())
+	mockNomad := mocks.NewMockNomadAPI(t)
+	r.NomadClientFactory = func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+		return mockNomad, nil
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "remint", Namespace: "snap-ns"}}
+	policyName := "snapshot-agent-snap-ns-remint"
 
-		snap := newOneShotSnapshot("xns")
-		snap.Namespace = "xns-snap"
-		snap.Spec.ClusterRef = nomadv1alpha1.ClusterReference{Name: "target", Namespace: "xns-cluster"}
-		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
+	mockNomad.EXPECT().
+		CreateACLPolicy("mgmt-token", policyName, "Snapshot agent policy for remint", snapshotAgentPolicyRules).
+		Return(nil).Twice() // initial mint + re-mint below
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
+		Return(&nomad.ACLTokenResult{AccessorID: "acc-1", SecretID: "secret-1"}, nil).Once()
 
-		// Parking at WaitingForManagementToken proves the cluster and
-		// its Secrets resolved in the REFERENCED namespace; any other
-		// reason means the lookup used the wrong one.
-		for i := 0; i < 2; i++ {
-			_, err := reconcileSnapshot(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"})
-			Expect(err).NotTo(HaveOccurred())
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	deploy := &appsv1.Deployment{}
+	deployKey := types.NamespacedName{Name: "remint-snapshot-agent", Namespace: "snap-ns"}
+	if err := r.Get(context.Background(), deployKey, deploy); err != nil {
+		t.Fatal(err)
+	}
+	first := deploy.Spec.Template.Annotations["checksum/secrets"]
+	if first == "" {
+		t.Fatal("pod template missing checksum/secrets annotation")
+	}
+
+	// Steady pass: recorded token still resolves — no roll.
+	mockNomad.EXPECT().
+		GetACLToken("mgmt-token", "acc-1").
+		Return(&nomad.ACLTokenResult{AccessorID: "acc-1", SecretID: "secret-1"}, nil).Once()
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() steady pass error = %v", err)
+	}
+	if err := r.Get(context.Background(), deployKey, deploy); err != nil {
+		t.Fatal(err)
+	}
+	if got := deploy.Spec.Template.Annotations["checksum/secrets"]; got != first {
+		t.Errorf("secrets checksum moved without a token change: %q -> %q", first, got)
+	}
+
+	// Re-mint: recorded token gone from Nomad — the template must move.
+	mockNomad.EXPECT().GetACLToken("mgmt-token", "acc-1").Return(nil, nil).Once()
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
+		Return(&nomad.ACLTokenResult{AccessorID: "acc-2", SecretID: "secret-2"}, nil).Once()
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() re-mint pass error = %v", err)
+	}
+	if err := r.Get(context.Background(), deployKey, deploy); err != nil {
+		t.Fatal(err)
+	}
+	if got := deploy.Spec.Template.Annotations["checksum/secrets"]; got == first {
+		t.Error("token re-mint did not perturb the pod template — running agents keep the revoked token")
+	}
+	tokenSecret := &corev1.Secret{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "remint-snapshot-token", Namespace: "snap-ns"}, tokenSecret); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(tokenSecret.Data["secret-id"]); got != "secret-2" {
+		t.Errorf("token secret = %q, want rotated secret-2", got)
+	}
+}
+
+// neo-87a: the mint is not idempotent — a network error after a
+// possibly-committed create must NOT reach the in-helper LB retry and
+// mint a second, orphaned token. Mockery's .Once() fails the test on
+// any second mint attempt.
+func TestSnapshotMintSingleAttemptOnNetworkError(t *testing.T) {
+	snap := newOneShotSnapshot("mintonce")
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	// An LB address makes the old retry leg reachable: this proves the
+	// mint no longer takes it.
+	cluster.Status.AdvertiseAddress = "10.0.0.100"
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-tls", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"ca.crt": []byte("dummy-ca")},
+	}
+	r, _ := newSnapshotReconciler(snap, cluster, tlsSecret)
+
+	mockNomad := mocks.NewMockNomadAPI(t)
+	r.NomadClientFactory = func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+		return mockNomad, nil
+	}
+	policyName := "snapshot-agent-snap-ns-mintonce"
+	mockNomad.EXPECT().
+		CreateACLPolicy("mgmt-token", policyName, "Snapshot agent policy for mintonce", snapshotAgentPolicyRules).
+		Return(nil).Once()
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
+		Return(nil, &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")}).Once()
+
+	if _, err := r.ensureSnapshotToken(context.Background(), snap, cluster, "mgmt-token"); err == nil {
+		t.Fatal("ensureSnapshotToken() must surface the mint network error")
+	}
+}
+
+// neo-87a: the status patch is the only durable record of a minted
+// accessor — on patch failure the mint must be unwound or every retry
+// leaks a fresh orphan.
+func TestSnapshotMintUnwoundOnStatusPatchFailure(t *testing.T) {
+	snap := newOneShotSnapshot("unwind")
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-tls", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"ca.crt": []byte("dummy-ca")},
+	}
+	_ = nomadv1alpha1.AddToScheme(scheme.Scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithObjects(snap, cluster, tlsSecret).
+		WithStatusSubresource(snap).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+				return fmt.Errorf("simulated status patch failure")
+			},
+		}).Build()
+	r := &NomadSnapshotReconciler{Client: fakeClient, Scheme: scheme.Scheme}
+
+	mockNomad := mocks.NewMockNomadAPI(t)
+	r.NomadClientFactory = func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+		return mockNomad, nil
+	}
+	policyName := "snapshot-agent-snap-ns-unwind"
+	mockNomad.EXPECT().
+		CreateACLPolicy("mgmt-token", policyName, "Snapshot agent policy for unwind", snapshotAgentPolicyRules).
+		Return(nil).Once()
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
+		Return(&nomad.ACLTokenResult{AccessorID: "acc-1", SecretID: "secret-1"}, nil).Once()
+	mockNomad.EXPECT().DeleteACLToken("mgmt-token", "acc-1").Return(nil).Once()
+
+	_, err := r.ensureSnapshotToken(context.Background(), snap, cluster, "mgmt-token")
+	if err == nil || !strings.Contains(err.Error(), "failed to patch status") {
+		t.Fatalf("ensureSnapshotToken() error = %v, want status patch failure", err)
+	}
+}
+
+// neo-87a: a cluster with ACLs disabled is a terminal misconfiguration
+// — distinct Ready reason plus one Warning, not an infinite
+// WaitingForACLBootstrap.
+func TestSnapshotACLsDisabledTerminal(t *testing.T) {
+	snap := newOneShotSnapshot("acloff")
+	snap.Finalizers = []string{snapshotFinalizer}
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	cluster.Spec.Server.ACL.Enabled = ptr.To(false)
+	r, recorder := newSnapshotReconciler(snap, cluster)
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "acloff", Namespace: "snap-ns"}}
+
+	// Two passes: the Warning must not repeat per retry.
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("Reconcile() pass %d error = %v", i, err)
 		}
-		got := &nomadv1alpha1.NomadSnapshot{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"}, got)).To(Succeed())
-		var reason string
-		for _, c := range got.Status.Conditions {
-			if c.Type == "Ready" {
-				reason = c.Reason
+	}
+
+	got := &nomadv1alpha1.NomadSnapshot{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "acloff", Namespace: "snap-ns"}, got); err != nil {
+		t.Fatal(err)
+	}
+	var ready *metav1.Condition
+	for i := range got.Status.Conditions {
+		if got.Status.Conditions[i].Type == "Ready" {
+			ready = &got.Status.Conditions[i]
+		}
+	}
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "ACLsDisabled" {
+		t.Fatalf("Ready condition = %+v, want False/ACLsDisabled", ready)
+	}
+	events := drainEvents(recorder)
+	if len(events) != 1 || !strings.Contains(events[0], "ACLsDisabled") {
+		t.Errorf("events = %v, want exactly one ACLsDisabled Warning", events)
+	}
+}
+
+// neo-87a parity with neo-2um.18: an empty management secret-id is the
+// only wait branch that previously patched no condition.
+func TestSnapshotEmptyManagementSecretID(t *testing.T) {
+	snap := newOneShotSnapshot("emptymgmt")
+	snap.Finalizers = []string{snapshotFinalizer}
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	cluster.Status.ACLBootstrapped = true
+	mgmt := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-operator-management", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"secret-id": nil},
+	}
+	r, _ := newSnapshotReconciler(snap, cluster, mgmt)
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "emptymgmt", Namespace: "snap-ns"}}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	got := &nomadv1alpha1.NomadSnapshot{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "emptymgmt", Namespace: "snap-ns"}, got); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range got.Status.Conditions {
+		if c.Type == "Ready" {
+			if c.Status != metav1.ConditionFalse || c.Reason != "WaitingForManagementToken" || !strings.Contains(c.Message, "empty secret-id") {
+				t.Fatalf("Ready condition = %+v, want False/WaitingForManagementToken (empty secret-id)", c)
 			}
+			return
 		}
-		Expect(reason).To(Equal("WaitingForManagementToken"))
-
-		// And with the management Secret created IN THE CLUSTER'S
-		// namespace, the wait clears (next stop: Nomad token mint).
-		createBootstrapSecret(ctx, "xns-cluster", "target-operator-management")
-		_, _ = reconcileSnapshot(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"})
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns", Namespace: "xns-snap"}, got)).To(Succeed())
-		for _, c := range got.Status.Conditions {
-			if c.Type == "Ready" {
-				Expect(c.Reason).NotTo(Equal("WaitingForManagementToken"))
-			}
-		}
-	})
-})
+	}
+	t.Fatal("Ready condition not set on the empty secret-id branch")
+}
 
 // TestNextScheduledProjection covers neo-c2f / AC-2.7.9: recurring mode
 // projects status.nextScheduled forward one interval when unset or
@@ -620,7 +804,7 @@ func TestRecurringVersionMirror(t *testing.T) {
 	cluster.Status.NomadVersion = "2.0.4-ent"
 	r, _ := newSnapshotReconciler(snap, cluster)
 
-	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 		t.Fatalf("reconcileRecurring() error = %v", err)
 	}
 	if snap.Status.NomadVersion != "2.0.4-ent" {
@@ -629,7 +813,7 @@ func TestRecurringVersionMirror(t *testing.T) {
 
 	// Upgrade: the mirror follows the cluster.
 	cluster.Status.NomadVersion = "2.1.0-ent"
-	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+	if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 		t.Fatalf("reconcileRecurring() second pass error = %v", err)
 	}
 	if snap.Status.NomadVersion != "2.1.0-ent" {
@@ -653,7 +837,7 @@ func TestNextScheduledProjection(t *testing.T) {
 
 	t.Run("set on first ready reconcile, not advanced while in the future", func(t *testing.T) {
 		r, snap, cluster := newRecurring("proj", "1h")
-		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileRecurring() error = %v", err)
 		}
 		if snap.Status.NextScheduled == nil {
@@ -665,7 +849,7 @@ func TestNextScheduledProjection(t *testing.T) {
 		}
 
 		// Second reconcile within the interval: unchanged (churn bound).
-		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("second reconcileRecurring() error = %v", err)
 		}
 		if !snap.Status.NextScheduled.Time.Equal(first) {
@@ -677,7 +861,7 @@ func TestNextScheduledProjection(t *testing.T) {
 		r, snap, cluster := newRecurring("lapsed", "1h")
 		past := metav1.NewTime(time.Now().Add(-time.Minute))
 		snap.Status.NextScheduled = &past
-		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileRecurring() error = %v", err)
 		}
 		if !snap.Status.NextScheduled.After(time.Now()) {
@@ -689,7 +873,7 @@ func TestNextScheduledProjection(t *testing.T) {
 		// Admission now rejects bad intervals (neo-f7j), but the
 		// controller must stay robust to pre-validation objects.
 		r, snap, cluster := newRecurring("badint", "not-a-duration")
-		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileRecurring(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileRecurring() error = %v", err)
 		}
 		if snap.Status.NextScheduled != nil {
@@ -703,7 +887,7 @@ func TestNextScheduledProjection(t *testing.T) {
 		snap.Status.NextScheduled = &future
 		cluster := newTestCluster("snap-ns", "test-cluster")
 		r, _ := newSnapshotReconciler(snap, cluster)
-		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c"); err != nil {
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 			t.Fatalf("reconcileOneShot() error = %v", err)
 		}
 		if snap.Status.NextScheduled != nil {
@@ -720,7 +904,7 @@ func TestSnapshotAgentSecurityContext(t *testing.T) {
 	cluster := newTestCluster("snap-ns", "test-cluster")
 	r, _ := newSnapshotReconciler(snap, cluster)
 
-	template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c")
+	template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c", "s")
 
 	sc := template.Spec.SecurityContext
 	if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot ||
