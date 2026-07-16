@@ -186,7 +186,7 @@ var _ = Describe("NomadAutoscaler Events and Degraded condition (neo-2um.4)", fu
 			setDeploymentStatus(0, appsv1.DeploymentCondition{
 				Type:               appsv1.DeploymentAvailable,
 				Status:             corev1.ConditionFalse,
-				LastTransitionTime: metav1.Now(),
+				LastTransitionTime: metav1.NewTime(time.Now()),
 			})
 
 			result := reconcileOnce()
@@ -272,7 +272,7 @@ var _ = Describe("NomadAutoscaler Events and Degraded condition (neo-2um.4)", fu
 			setDeploymentStatus(0, stuck, appsv1.DeploymentCondition{
 				Type:               appsv1.DeploymentAvailable,
 				Status:             corev1.ConditionFalse,
-				LastTransitionTime: metav1.Now(),
+				LastTransitionTime: metav1.NewTime(time.Now()),
 			})
 			reconcileOnce()
 
