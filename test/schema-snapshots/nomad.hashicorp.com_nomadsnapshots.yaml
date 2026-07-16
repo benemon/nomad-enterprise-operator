@@ -70,7 +70,10 @@ spec:
             description: NomadSnapshotSpec defines the desired state of NomadSnapshot.
             properties:
               clusterRef:
-                description: ClusterRef references the NomadCluster to snapshot
+                description: |-
+                  ClusterRef references the NomadCluster to snapshot.
+                  Same-namespace only: the agent pod mounts the cluster's TLS
+                  Secret, and pods cannot mount Secrets across namespaces.
                 properties:
                   name:
                     description: Name of the NomadCluster
@@ -82,6 +85,10 @@ spec:
                 required:
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: 'clusterRef.namespace is not supported: the NomadCluster
+                    must be in the NomadSnapshot''s own namespace'
+                  rule: '!has(self.__namespace__)'
               nodeSelector:
                 additionalProperties:
                   type: string

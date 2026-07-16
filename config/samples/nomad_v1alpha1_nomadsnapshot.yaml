@@ -6,10 +6,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: hourly-backup
 spec:
-  # Reference to the NomadCluster to snapshot
+  # Reference to the NomadCluster to snapshot. Must live in the same
+  # namespace as this NomadSnapshot (admission-enforced).
   clusterRef:
     name: nomad
-    # namespace: default  # Optional, defaults to same namespace
 
   # Snapshot schedule
   schedule:

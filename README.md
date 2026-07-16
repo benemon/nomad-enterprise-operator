@@ -924,7 +924,7 @@ full restore procedure is in the
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `clusterRef.name` | `string` | | Name of the target NomadCluster |
-| `clusterRef.namespace` | `string` | | Namespace of the target NomadCluster. Defaults to the NomadSnapshot's namespace |
+| `clusterRef.namespace` | `string` | | Not supported (admission-rejected): the NomadCluster must be in the NomadSnapshot's own namespace, because the agent pod mounts the cluster's TLS Secret and pods cannot mount Secrets across namespaces |
 | `schedule` | `object` | | Optional. Present = recurring agent Deployment; omitted = one-shot Job |
 | `schedule.interval` | `string` | `1h` | Interval between snapshots. Must be a Go duration string (e.g. `1h`, `90m`, `1h30m`) — pattern-validated at admission |
 | `schedule.retain` | `int` | `24` | Number of snapshots to retain (minimum 1) |
@@ -977,7 +977,20 @@ Identity require out-of-band annotation of the ServiceAccount.
 
 ### Snapshot ACL Token
 
-When ACLs are enabled on the referenced NomadCluster, the operator creates a dedicated ACL policy with `snapshot-save` and `license-read` capabilities and a token bound to that policy. The token is stored in the `<snapshot>-snapshot-token` Secret. The policy name is tracked in `status.policyName`. Both the token and policy are cleaned up from Nomad when the NomadSnapshot is deleted.
+Snapshots **require ACLs** on the referenced NomadCluster
+(`spec.server.acl.enabled: true`, the default): the agent authenticates
+with a dedicated token the operator mints. A cluster with ACLs disabled
+is reported as a terminal misconfiguration — `Ready=False` with reason
+`ACLsDisabled` and a Warning Event — not as a transient wait.
+
+The operator creates a dedicated ACL policy with `snapshot-save` and
+`license-read` capabilities and a token bound to that policy. The token
+is stored in the `<snapshot>-snapshot-token` Secret; if the operator
+re-mints it (for example after an out-of-band deletion in Nomad), a
+`checksum/secrets` annotation rolls the recurring agent onto the new
+token. The policy name is tracked in `status.policyName`. Both the
+token and policy are cleaned up from Nomad when the NomadSnapshot is
+deleted.
 
 ### Example
 

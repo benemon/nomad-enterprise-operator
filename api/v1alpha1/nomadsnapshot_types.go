@@ -24,7 +24,10 @@ import (
 // NomadSnapshotSpec defines the desired state of NomadSnapshot.
 // +kubebuilder:validation:XValidation:rule="has(self.target.s3) || has(self.target.gcs) || has(self.target.azure) || has(self.target.local)",message="one of target.s3, target.gcs, target.azure, or target.local must be specified"
 type NomadSnapshotSpec struct {
-	// ClusterRef references the NomadCluster to snapshot
+	// ClusterRef references the NomadCluster to snapshot.
+	// Same-namespace only: the agent pod mounts the cluster's TLS
+	// Secret, and pods cannot mount Secrets across namespaces.
+	// +kubebuilder:validation:XValidation:rule="!has(self.__namespace__)",message="clusterRef.namespace is not supported: the NomadCluster must be in the NomadSnapshot's own namespace"
 	ClusterRef ClusterReference `json:"clusterRef"`
 
 	// Schedule, when set, runs a recurring snapshot-agent Deployment;
