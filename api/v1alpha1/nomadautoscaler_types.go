@@ -200,6 +200,11 @@ type NomadAutoscalerStatus struct {
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".status.desiredReplicas"
 // +kubebuilder:printcolumn:name="DAS",type="boolean",JSONPath=".spec.dynamicApplicationSizing.enabled"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// spec.clusterRef is immutable: retargeting would orphan the old
+// cluster's ACL policy and token (status.tokenAccessorID is only
+// checked against the new cluster). Delete and recreate to retarget —
+// the finalizer then cleans up the old credentials.
+// +kubebuilder:validation:XValidation:rule="self.spec.clusterRef == oldSelf.spec.clusterRef",message="spec.clusterRef is immutable; delete and recreate the NomadAutoscaler to retarget it at a different cluster"
 
 // NomadAutoscaler is the Schema for the nomadautoscalers API.
 type NomadAutoscaler struct {

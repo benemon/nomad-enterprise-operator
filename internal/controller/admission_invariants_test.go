@@ -34,7 +34,9 @@ import (
 
 // Every README spec-invariant gets a rejection and an acceptance case
 // against the real apiserver, so a marker regression cannot silently
-// drop a rule. Transition CELs are covered in their own suites.
+// drop a rule. Transition CELs are covered in their own suites,
+// except NomadAutoscaler clusterRef immutability, which is small
+// enough to live alongside its create-time invariants below.
 var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 	const namespace = "admission-invariants-test"
 	ctx := context.Background()
@@ -519,6 +521,36 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				wantErr: "should match",
 			},
 		}
+
+		// clusterRef transition rule (neo-2um.3): retargeting orphans
+		// the previous cluster's ACL policy+token, so the reference is
+		// frozen after create; replace-by-recreate is the supported path.
+		It("rejects any spec.clusterRef change on update, accepts other field edits", func() {
+			a := base("adm-autoscaler-clusterref")
+			Expect(k8sClient.Create(ctx, a)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, a)).To(Succeed()) }()
+
+			key := types.NamespacedName{Name: a.Name, Namespace: namespace}
+
+			fetched := &nomadv1alpha1.NomadAutoscaler{}
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.LogLevel = "DEBUG"
+			Expect(k8sClient.Update(ctx, fetched)).To(Succeed(),
+				"non-clusterRef spec edits must remain allowed")
+
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.ClusterRef.Name = "other-cluster"
+			err := k8sClient.Update(ctx, fetched)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.clusterRef is immutable"))
+
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.ClusterRef.Namespace = "other-namespace"
+			err = k8sClient.Update(ctx, fetched)
+			Expect(err).To(HaveOccurred(),
+				"a namespace change is also a retarget and must be rejected")
+			Expect(err.Error()).To(ContainSubstring("spec.clusterRef is immutable"))
+		})
 
 		for i, c := range cases {
 			name := fmt.Sprintf("adm-autoscaler-%d", i)
