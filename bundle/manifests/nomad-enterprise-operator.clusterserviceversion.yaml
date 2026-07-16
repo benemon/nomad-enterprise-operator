@@ -6,6 +6,43 @@ metadata:
       [
         {
           "apiVersion": "nomad.hashicorp.com/v1alpha1",
+          "kind": "NomadAutoscaler",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "nomad-enterprise-operator"
+            },
+            "name": "autoscaler"
+          },
+          "spec": {
+            "clusterRef": {
+              "name": "nomad"
+            },
+            "dynamicApplicationSizing": {
+              "enabled": true,
+              "prometheusURL": "http://das-prometheus:9090"
+            },
+            "monitoring": {
+              "enabled": true
+            },
+            "namespaces": [
+              "default"
+            ],
+            "replicas": 2,
+            "resources": {
+              "limits": {
+                "cpu": "500m",
+                "memory": "256Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            }
+          }
+        },
+        {
+          "apiVersion": "nomad.hashicorp.com/v1alpha1",
           "kind": "NomadCluster",
           "metadata": {
             "name": "nomad"
@@ -116,7 +153,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-13T14:57:37Z"
+    createdAt: "2026-07-16T16:23:51Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     olm.skipRange: '>=0.1.0 <0.0.1'
@@ -129,6 +166,11 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: NomadAutoscaler is the Schema for the nomadautoscalers API.
+      displayName: Nomad Autoscaler
+      kind: NomadAutoscaler
+      name: nomadautoscalers.nomad.hashicorp.com
+      version: v1alpha1
     - description: NomadCluster is the Schema for the nomadclusters API.
       displayName: Nomad Cluster
       kind: NomadCluster
@@ -155,7 +197,8 @@ spec:
 
     Features include TLS certificate management, ACL bootstrap, gossip
     encryption, Prometheus monitoring, OpenShift Routes, persistent storage,
-    and automated snapshots.
+    automated snapshots, and managed Nomad Autoscaler agents (horizontal
+    application scaling and Dynamic Application Sizing).
   displayName: Nomad Enterprise Operator
   icon:
   - base64data: PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz48c3ZnIGlkPSJMb2dvcyIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB3aWR0aD0iNTAiIGhlaWdodD0iNzIiIHZpZXdCb3g9IjAgMCA1MCA3MiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMGNhOGU7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHBhdGggY2xhc3M9ImNscy0xIiBkPSJNMjUsNy4yTDAsMjEuNnYyOC44bDI1LDE0LjQsMjUtMTQuNHYtMjguOUwyNSw3LjJaTTM2LjEsMzguOGwtNi43LDMuOC04LTQuNHY5LjJsLTcuNiw0Ljh2LTE5LjJsNi0zLjcsOC4zLDQuNHYtOS4zbDgtNC44djE5LjJaIi8+PC9zdmc+
@@ -264,6 +307,7 @@ spec:
         - apiGroups:
           - nomad.hashicorp.com
           resources:
+          - nomadautoscalers
           - nomadclusters
           - nomadsnapshots
           verbs:
@@ -274,6 +318,7 @@ spec:
         - apiGroups:
           - nomad.hashicorp.com
           resources:
+          - nomadautoscalers/finalizers
           - nomadclusters/finalizers
           - nomadsnapshots/finalizers
           verbs:
@@ -281,6 +326,7 @@ spec:
         - apiGroups:
           - nomad.hashicorp.com
           resources:
+          - nomadautoscalers/status
           - nomadclusters/status
           - nomadsnapshots/status
           verbs:
