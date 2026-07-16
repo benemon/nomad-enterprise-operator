@@ -153,7 +153,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-16T16:27:31Z"
+    createdAt: "2026-07-16T17:47:18Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     olm.skipRange: '>=0.1.0 <0.0.1'
@@ -305,6 +305,7 @@ spec:
           - servicemonitors
           verbs:
           - create
+          - delete
           - get
           - list
           - update

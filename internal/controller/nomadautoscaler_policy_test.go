@@ -25,9 +25,9 @@ import (
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
-func testAutoscaler(name string, mutate func(*nomadv1alpha1.NomadAutoscaler)) *nomadv1alpha1.NomadAutoscaler {
+func testAutoscaler(mutate func(*nomadv1alpha1.NomadAutoscaler)) *nomadv1alpha1.NomadAutoscaler {
 	a := &nomadv1alpha1.NomadAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns1"},
+		ObjectMeta: metav1.ObjectMeta{Name: "as", Namespace: "ns1"},
 		// Mirrors an apiserver-defaulted object: the controller no longer
 		// re-defaults replicas, namespaces, or logLevel in Go.
 		Spec: nomadv1alpha1.NomadAutoscalerSpec{
@@ -109,7 +109,7 @@ func TestBuildAutoscalerPolicyRules(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rules := buildAutoscalerPolicyRules(testAutoscaler("as", tc.mutate))
+			rules := buildAutoscalerPolicyRules(testAutoscaler(tc.mutate))
 			for _, want := range tc.want {
 				if !strings.Contains(rules, want) {
 					t.Errorf("rules missing %q:\n%s", want, rules)
@@ -181,7 +181,7 @@ func TestGenerateAutoscalerConfig(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			config := generateAutoscalerConfig(testAutoscaler("as", tc.mutate), addr)
+			config := generateAutoscalerConfig(testAutoscaler(tc.mutate), addr)
 			for _, want := range tc.want {
 				if !strings.Contains(config, want) {
 					t.Errorf("config missing %q:\n%s", want, config)

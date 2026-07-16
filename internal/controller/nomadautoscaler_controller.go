@@ -100,7 +100,8 @@ func autoscalerTokenName(a *nomadv1alpha1.NomadAutoscaler) string {
 func autoscalerServiceName(a *nomadv1alpha1.NomadAutoscaler) string {
 	return a.Name + "-autoscaler-metrics"
 }
-func autoscalerPDBName(a *nomadv1alpha1.NomadAutoscaler) string { return a.Name + "-autoscaler" }
+func autoscalerPDBName(a *nomadv1alpha1.NomadAutoscaler) string  { return a.Name + "-autoscaler" }
+func autoscalerRuleName(a *nomadv1alpha1.NomadAutoscaler) string { return a.Name + "-autoscaler-rules" }
 
 // autoscalerLockPath is the per-instance Nomad Variables path for HA
 // leader election. Unique per CR so two instances against the same
@@ -1142,7 +1143,92 @@ func (r *NomadAutoscalerReconciler) reconcileMonitoring(ctx context.Context, aut
 		}
 		return controllerutil.SetControllerReference(autoscaler, sm, r.Scheme)
 	})
+	if err != nil {
+		return err
+	}
+
+	// PrometheusRule is opt-in (default false), the same surface as the
+	// cluster's monitoring.prometheusRulesEnabled. Unlike the
+	// ServiceMonitor it is deleted on toggle-off: the field exists to
+	// be flipped.
+	rule := &monitoringv1.PrometheusRule{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      autoscalerRuleName(autoscaler),
+			Namespace: autoscaler.Namespace,
+		},
+	}
+	if !autoscaler.Spec.Monitoring.PrometheusRulesEnabled {
+		if err := r.Delete(ctx, rule); err != nil && !k8serrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, rule, func() error {
+		rule.Labels = autoscalerAgentLabels(autoscaler)
+		rule.Spec = autoscalerPrometheusRuleSpec(autoscaler)
+		return controllerutil.SetControllerReference(autoscaler, rule, r.Scheme)
+	})
 	return err
+}
+
+// autoscalerPrometheusRuleSpec renders the alert rules for one
+// NomadAutoscaler, scoped to its metrics Service via the job label.
+// The policy-count gauges embed the agent pod hostname in the metric
+// NAME (go-metrics default), hence the __name__ regex; the counters
+// and summaries are hostname-free.
+func autoscalerPrometheusRuleSpec(a *nomadv1alpha1.NomadAutoscaler) monitoringv1.PrometheusRuleSpec {
+	sel := fmt.Sprintf("job=%q,namespace=%q", autoscalerServiceName(a), a.Namespace)
+	return monitoringv1.PrometheusRuleSpec{
+		Groups: []monitoringv1.RuleGroup{
+			{
+				Name: "nomad-autoscaler.rules",
+				Rules: []monitoringv1.Rule{
+					{
+						Alert: "NomadAutoscalerScalingErrors",
+						Expr: intstr.FromString(fmt.Sprintf(
+							`rate(nomad_autoscaler_scale_invoke_error_count{%s}[15m]) > 0`, sel)),
+						For: ptr.To(monitoringv1.Duration("5m")),
+						Labels: map[string]string{
+							"severity": "warning",
+						},
+						Annotations: map[string]string{
+							"summary":     "Nomad Autoscaler scaling actions are failing",
+							"description": "Autoscaler {{ $labels.pod }} in namespace {{ $labels.namespace }} is returning errors from scaling invocations; scaling for its policies is stalled or flapping. Check the agent logs and the health of the target and APM plugins.",
+						},
+					},
+					{
+						// Policies exist but nothing evaluates. `unless`
+						// (not `and ... == 0`) so the alert also fires
+						// when the evaluation counter is entirely absent.
+						Alert: "NomadAutoscalerPolicyEvaluationsStalled",
+						Expr: intstr.FromString(fmt.Sprintf(
+							`max({__name__=~"nomad_autoscaler_.+_policy_total_num",%s}) > 0 unless sum(rate(nomad_autoscaler_scale_evaluate_ms_count{%s}[30m])) > 0`, sel, sel)),
+						For: ptr.To(monitoringv1.Duration("15m")),
+						Labels: map[string]string{
+							"severity": "warning",
+						},
+						Annotations: map[string]string{
+							"summary":     "Nomad Autoscaler has policies but is not evaluating them",
+							"description": "The autoscaler in namespace {{ $labels.namespace }} reports scaling policies but no policy evaluations in 30 minutes. In HA mode only the leader evaluates — check leader election (the HA lock) and the agent logs.",
+						},
+					},
+					{
+						Alert: "NomadAutoscalerAgentDown",
+						Expr: intstr.FromString(fmt.Sprintf(
+							`up{%s} == 0`, sel)),
+						For: ptr.To(monitoringv1.Duration("5m")),
+						Labels: map[string]string{
+							"severity": "critical",
+						},
+						Annotations: map[string]string{
+							"summary":     "Nomad Autoscaler agent scrape target down",
+							"description": "Agent {{ $labels.pod }} in namespace {{ $labels.namespace }} has not answered its metrics scrape for 5 minutes. No scaling actions occur while no agent holds leadership.",
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 // setCondition updates a condition, leaving LastTransitionTime to

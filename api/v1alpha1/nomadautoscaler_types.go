@@ -154,6 +154,12 @@ type AutoscalerMonitoringSpec struct {
 	// nil means "user said nothing" and reads as the default via
 	// IsEnabled().
 	Enabled *bool `json:"enabled,omitempty"`
+
+	// PrometheusRulesEnabled determines if a PrometheusRule with the
+	// operator's autoscaler alerts is created. Same opt-in shape as
+	// the NomadCluster monitoring surface.
+	// +kubebuilder:default=false
+	PrometheusRulesEnabled bool `json:"prometheusRulesEnabled,omitempty"`
 }
 
 // IsEnabled resolves the tri-state pointer: nil (unset) follows the
