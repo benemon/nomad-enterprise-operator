@@ -2219,6 +2219,400 @@ spec:
 		})
 	})
 
+	// NomadAutoscaler lifecycle (neo-2um.2): the full CR journey
+	// against a real licensed cluster — the pre-bootstrap gate, the
+	// agent resource set and rendered HCL, the HA scale round-trip
+	// (PDB + anti-affinity + high_availability block), the DAS config
+	// toggle, and finalizer cleanup verified on the Nomad API side.
+	Context("NomadAutoscaler lifecycle", Ordered, func() {
+		const asCluster = "as-cluster"
+		const asName = "as-agent"
+
+		asAgentName := asName + "-autoscaler-agent"
+		asConfigMap := asName + "-autoscaler-config"
+		asTokenSecret := asName + "-autoscaler-token"
+		asMetricsSvc := asName + "-autoscaler-metrics"
+		asPDB := asName + "-autoscaler"
+		asPolicy := "autoscaler-agent-" + namespace + "-" + asName
+		asLockPath := "nomad-autoscaler/" + namespace + "/" + asName + "/lock"
+
+		// bootstrapToken returns the cluster's ACL bootstrap secret-id
+		// for driving the in-pod nomad CLI as management.
+		bootstrapToken := func(g Gomega) string {
+			cmd := exec.Command("kubectl", "get", "secret", asCluster+"-acl-bootstrap", "-n", namespace,
+				"-o", "jsonpath={.data.secret-id}")
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			decoded, err := base64.StdEncoding.DecodeString(output)
+			g.Expect(err).NotTo(HaveOccurred())
+			return string(decoded)
+		}
+
+		agentConfig := func(g Gomega) string {
+			cmd := exec.Command("kubectl", "get", "configmap", asConfigMap, "-n", namespace,
+				"-o", `jsonpath={.data.autoscaler\.hcl}`)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			return output
+		}
+
+		configChecksum := func(g Gomega) string {
+			cmd := exec.Command("kubectl", "get", "deployment", asAgentName, "-n", namespace,
+				"-o", `jsonpath={.spec.template.metadata.annotations.checksum/config}`)
+			output, err := utils.Run(cmd)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(output).NotTo(BeEmpty(), "checksum/config annotation should be set")
+			return output
+		}
+
+		BeforeAll(func() {
+			cr := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "2.0.4-ent"
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: LoadBalancer
+      loadBalancerIP: "10.0.0.7"
+  server:
+    acl:
+      enabled: true
+`, asCluster, namespace)
+
+			By("applying the autoscaler's NomadCluster CR")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(cr)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply NomadCluster CR")
+
+			// Applied immediately so the pre-bootstrap window is
+			// observable: the cluster takes minutes to bootstrap ACLs
+			// and the first spec asserts the gate during that window.
+			autoscalerCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadAutoscaler
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  clusterRef:
+    name: %s
+`, asName, namespace, asCluster)
+
+			By("applying the NomadAutoscaler CR")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(autoscalerCR)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply NomadAutoscaler CR")
+		})
+
+		AfterAll(func() {
+			By("deleting the NomadAutoscaler and its cluster")
+			cmd := exec.Command("kubectl", "delete", "nomadautoscaler", asName, "-n", namespace,
+				"--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "nomadcluster", asCluster, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sts", asCluster, "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "StatefulSet should be deleted")
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("holds Ready=False/WaitingForACLBootstrap until the cluster bootstraps", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+					`-o`, `jsonpath={.status.conditions[?(@.type=="Ready")].status} {.status.conditions[?(@.type=="Ready")].reason}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("False WaitingForACLBootstrap"))
+			}).Should(Succeed())
+
+			By("verifying the cleanup finalizer is set")
+			cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+				"-o", "jsonpath={.metadata.finalizers[0]}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("nomad.hashicorp.com/autoscaler-cleanup"))
+		})
+
+		It("mints ACL credentials and creates the agent resource set once bootstrapped", func() {
+			By("waiting for the cluster ACL bootstrap")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", asCluster, "-n", namespace,
+					"-o", "jsonpath={.status.aclBootstrapped}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true"), "ACL not yet bootstrapped")
+			}, 5*time.Minute).Should(Succeed())
+
+			By("waiting for the agent token and policy to appear in status")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+					"-o", "jsonpath={.status.tokenAccessorID} {.status.policyName}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts := strings.Fields(output)
+				g.Expect(parts).To(HaveLen(2), "tokenAccessorID and policyName should be set")
+				g.Expect(parts[1]).To(Equal(asPolicy))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("verifying the owned resource set exists")
+			resources := []struct {
+				kind string
+				name string
+			}{
+				{"configmap", asConfigMap},
+				{"secret", asTokenSecret},
+				{"deployment", asAgentName},
+				{"service", asMetricsSvc},
+			}
+			for _, r := range resources {
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", r.kind, r.name, "-n", namespace)
+					_, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred(), "%s %s should exist", r.kind, r.name)
+				}).Should(Succeed())
+			}
+
+			By("verifying the token Secret carries the shared key convention")
+			cmd := exec.Command("kubectl", "get", "secret", asTokenSecret, "-n", namespace,
+				"-o", "jsonpath={.data.accessor-id} {.data.secret-id}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Fields(output)).To(HaveLen(2), "secret should carry accessor-id and secret-id")
+
+			By("verifying the Deployment image, checksum annotation, and surge strategy")
+			cmd = exec.Command("kubectl", "get", "deployment", asAgentName, "-n", namespace,
+				"-o", "jsonpath={.spec.template.spec.containers[0].image}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("hashicorp/nomad-autoscaler-enterprise:0.5.0-ent"))
+
+			Expect(configChecksum(Default)).NotTo(BeEmpty())
+
+			cmd = exec.Command("kubectl", "get", "deployment", asAgentName, "-n", namespace,
+				"-o", "jsonpath={.spec.strategy.rollingUpdate.maxSurge} {.spec.strategy.rollingUpdate.maxUnavailable}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("1 0"), "surge rollout keeps a warm standby before the old pod stops")
+
+			By("verifying the metrics Service targets the agent HTTP port")
+			cmd = exec.Command("kubectl", "get", "service", asMetricsSvc, "-n", namespace,
+				"-o", "jsonpath={.spec.ports[0].port}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("8080"))
+		})
+
+		It("renders single-replica HCL: nomad block only, no HA, no APM", func() {
+			config := agentConfig(Default)
+			Expect(config).To(ContainSubstring(
+				fmt.Sprintf("https://%s-internal.%s.svc:4646", asCluster, namespace)),
+				"nomad block should point at the internal TLS service")
+			Expect(config).To(ContainSubstring(`ca_cert   = "/tls/ca.crt"`))
+			Expect(config).To(ContainSubstring(`namespace = "default"`))
+			Expect(config).NotTo(ContainSubstring("high_availability"),
+				"HA block must be absent at replicas=1")
+			Expect(config).NotTo(ContainSubstring(`apm "prometheus"`),
+				"prometheus APM must be absent without DAS")
+		})
+
+		It("reaches Ready with the token and policy live on the Nomad API", func() {
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace, `-o`,
+					`jsonpath={.status.conditions[?(@.type=="Ready")].status} `+
+						`{.status.conditions[?(@.type=="Ready")].reason} {.status.readyReplicas}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True Deployed 1"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying status resource names and address")
+			cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+				"-o", "jsonpath={.status.deploymentName} {.status.configMapName} {.status.nomadAddress}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal(fmt.Sprintf("%s %s https://%s-internal.%s.svc:4646",
+				asAgentName, asConfigMap, asCluster, namespace)))
+
+			By("verifying the agent policy and token exist on the Nomad API")
+			token := bootstrapToken(Default)
+			cmd = exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+				"-o", "jsonpath={.status.tokenAccessorID}")
+			accessor, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "exec", asCluster+"-0", "-n", namespace, "--",
+				"sh", "-c", "NOMAD_TOKEN="+token+" nomad acl policy info "+asPolicy)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "agent policy should exist in Nomad")
+			Expect(output).To(ContainSubstring(`policy = "scale"`))
+			Expect(output).To(ContainSubstring("operator"),
+				"operator read must be granted without DAS: the enterprise agent's startup license check 403s without it")
+
+			cmd = exec.Command("kubectl", "exec", asCluster+"-0", "-n", namespace, "--",
+				"sh", "-c", "NOMAD_TOKEN="+token+" nomad acl token info "+accessor)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "agent token should exist in Nomad")
+		})
+
+		It("adds the HA block, PDB, and anti-affinity at replicas=2", func() {
+			checksumBefore := configChecksum(Default)
+
+			cmd := exec.Command("kubectl", "patch", "nomadautoscaler", asName, "-n", namespace,
+				"--type=merge", "-p", `{"spec":{"replicas":2}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the HA config block and the config roll")
+			Eventually(func(g Gomega) {
+				config := agentConfig(g)
+				g.Expect(config).To(ContainSubstring("high_availability"))
+				g.Expect(config).To(ContainSubstring(asLockPath),
+					"lock path must be unique per CR")
+				g.Expect(configChecksum(g)).NotTo(Equal(checksumBefore),
+					"config change must roll the Deployment via the checksum annotation")
+			}).Should(Succeed())
+
+			By("verifying the PDB and pod anti-affinity appear")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pdb", asPDB, "-n", namespace,
+					"-o", "jsonpath={.spec.minAvailable}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}).Should(Succeed())
+
+			cmd = exec.Command("kubectl", "get", "deployment", asAgentName, "-n", namespace,
+				"-o", "jsonpath={.spec.template.spec.affinity.podAntiAffinity}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("kubernetes.io/hostname"),
+				"replicas>1 must spread the agents across nodes")
+
+			By("waiting for both replicas to elect over the Nomad Variables lock and go Ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the upserted policy grants the HA lock variable path")
+			token := bootstrapToken(Default)
+			cmd = exec.Command("kubectl", "exec", asCluster+"-0", "-n", namespace, "--",
+				"sh", "-c", "NOMAD_TOKEN="+token+" nomad acl policy info "+asPolicy)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring(asLockPath),
+				"policy rules must track spec: HA needs variables capabilities on the lock path")
+		})
+
+		It("removes the PDB, anti-affinity, and HA block scaling back to 1", func() {
+			cmd := exec.Command("kubectl", "patch", "nomadautoscaler", asName, "-n", namespace,
+				"--type=merge", "-p", `{"spec":{"replicas":1}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				g.Expect(agentConfig(g)).NotTo(ContainSubstring("high_availability"))
+
+				cmd := exec.Command("kubectl", "get", "pdb", asPDB, "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "PDB should be deleted at replicas=1")
+
+				cmd = exec.Command("kubectl", "get", "deployment", asAgentName, "-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.affinity}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(BeEmpty(), "anti-affinity should be removed at replicas=1")
+			}).Should(Succeed())
+		})
+
+		It("renders the prometheus APM block when DAS is enabled", func() {
+			checksumBefore := configChecksum(Default)
+
+			cmd := exec.Command("kubectl", "patch", "nomadautoscaler", asName, "-n", namespace,
+				"--type=merge", "-p",
+				`{"spec":{"dynamicApplicationSizing":{"enabled":true,"prometheusURL":"http://das-prometheus.example.svc:9090"}}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				config := agentConfig(g)
+				g.Expect(config).To(ContainSubstring(`apm "prometheus"`))
+				g.Expect(config).To(ContainSubstring("http://das-prometheus.example.svc:9090"))
+				g.Expect(configChecksum(g)).NotTo(Equal(checksumBefore))
+			}).Should(Succeed())
+
+			By("verifying the upserted policy gains the DAS capabilities")
+			token := bootstrapToken(Default)
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "exec", asCluster+"-0", "-n", namespace, "--",
+					"sh", "-c", "NOMAD_TOKEN="+token+" nomad acl policy info "+asPolicy)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("submit-recommendation"))
+			}).Should(Succeed())
+		})
+
+		It("cleans up owned resources and Nomad ACL state on deletion", func() {
+			By("capturing the live credentials before deletion")
+			cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace,
+				"-o", "jsonpath={.status.tokenAccessorID}")
+			accessor, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(accessor).NotTo(BeEmpty())
+			token := bootstrapToken(Default)
+
+			By("deleting the NomadAutoscaler CR")
+			cmd = exec.Command("kubectl", "delete", "nomadautoscaler", asName, "-n", namespace, "--timeout=2m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "delete should complete once the finalizer runs")
+
+			By("verifying owned Kubernetes resources are gone")
+			owned := []struct {
+				kind string
+				name string
+			}{
+				{"deployment", asAgentName},
+				{"configmap", asConfigMap},
+				{"secret", asTokenSecret},
+				{"service", asMetricsSvc},
+			}
+			for _, r := range owned {
+				Eventually(func(g Gomega) {
+					cmd := exec.Command("kubectl", "get", r.kind, r.name, "-n", namespace)
+					_, err := utils.Run(cmd)
+					g.Expect(err).To(HaveOccurred(), "%s %s should be deleted", r.kind, r.name)
+				}).Should(Succeed())
+			}
+
+			By("verifying the token and policy are deleted from the Nomad API")
+			cmd = exec.Command("kubectl", "exec", asCluster+"-0", "-n", namespace, "--",
+				"sh", "-c", "NOMAD_TOKEN="+token+" nomad acl token info "+accessor)
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "agent token should be revoked")
+
+			cmd = exec.Command("kubectl", "exec", asCluster+"-0", "-n", namespace, "--",
+				"sh", "-c", "NOMAD_TOKEN="+token+" nomad acl policy info "+asPolicy)
+			_, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "agent policy should be deleted")
+		})
+	})
+
 	// The minimal sample is the first YAML a new user applies: this
 	// spec applies the ACTUAL FILE from config/samples and requires a
 	// Ready cluster — the quickstart cannot silently rot. Slow lane.
