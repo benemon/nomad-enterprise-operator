@@ -49,12 +49,14 @@ func TestBuildAutoscalerPolicyRules(t *testing.T) {
 		wantOneOf  string // substring that must appear exactly once
 	}{
 		{
+			// operator read is unconditional: the enterprise agent's
+			// startup license check needs it even with DAS disabled.
 			name:       "single namespace, no HA, no DAS",
-			want:       []string{`namespace "default"`, `policy = "scale"`, `node {`},
-			wantAbsent: []string{"variables", "submit-recommendation", "operator"},
+			want:       []string{`namespace "default"`, `policy = "scale"`, `node {`, "operator {"},
+			wantAbsent: []string{"variables", "submit-recommendation"},
 		},
 		{
-			name: "DAS adds the recommendations capability and operator read for the license check",
+			name: "DAS adds the recommendations capability",
 			mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
 				a.Spec.DynamicApplicationSizing.Enabled = true
 			},

@@ -413,17 +413,17 @@ func buildAutoscalerPolicyRules(a *nomadv1alpha1.NomadAutoscaler) string {
 }
 `)
 
-	// The enterprise agent validates the DAS feature against the
-	// cluster license at startup; without operator read the check gets
-	// a 403 and enterprise initialization fails (observed on the lab
-	// cluster, neo-csu).
-	if a.Spec.DynamicApplicationSizing.Enabled {
-		b.WriteString(`
+	// The enterprise agent (the default image) validates enterprise
+	// features against the cluster license at startup even when DAS is
+	// disabled; without operator read the check gets a 403 and
+	// enterprise initialization — including HA mode — fails (observed
+	// on the lab cluster with DAS on, neo-csu, and in e2e with DAS
+	// off, neo-2um.2).
+	b.WriteString(`
 operator {
   policy = "read"
 }
 `)
-	}
 
 	return b.String()
 }
