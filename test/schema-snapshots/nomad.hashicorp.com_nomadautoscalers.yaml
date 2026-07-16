@@ -393,6 +393,10 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec.clusterRef is immutable; delete and recreate the NomadAutoscaler
+            to retarget it at a different cluster
+          rule: self.spec.clusterRef == oldSelf.spec.clusterRef
     served: true
     storage: true
     subresources:
