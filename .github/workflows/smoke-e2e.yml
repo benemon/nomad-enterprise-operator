@@ -163,13 +163,20 @@ jobs:
               --timeout=240s
           done
           # Audit log is written by the nomad container into its mounted
-          # audit volume. We assert non-empty by exec'ing into pod-0 and
-          # checking byte count.
-          kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
-            sh -c 'test -s /nomad/audit/audit.log' || {
-              echo "::error::audit.log is empty or missing on ${CLUSTER_NAME}-0"
-              exit 1
-            }
+          # audit volume. Nomad flushes its first audit entries a beat
+          # after the PVCs bind, so poll for non-empty instead of a
+          # single-shot exec — the one-shot check raced startup and
+          # failed on runtime-irrelevant commits (neo-44r).
+          for _ in $(seq 1 12); do
+            if kubectl -n "${SAMPLE_NS}" exec "${CLUSTER_NAME}-0" -c nomad -- \
+              sh -c 'test -s /nomad/audit/audit.log' 2>/dev/null; then
+              echo "audit.log non-empty on ${CLUSTER_NAME}-0"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::audit.log still empty or missing on ${CLUSTER_NAME}-0 after 60s"
+          exit 1
 
       # Stage 5 (≤300s overall): Ready=True + leader observable.
       - name: 'Stage 5: Ready=True and leader observable (≤300s overall)'
