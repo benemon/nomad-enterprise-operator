@@ -28,13 +28,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
 
 // Every README spec-invariant gets a rejection and an acceptance case
 // against the real apiserver, so a marker regression cannot silently
-// drop a rule. Transition CELs are covered in their own suites.
+// drop a rule. Transition CELs are covered in their own suites,
+// except NomadAutoscaler clusterRef immutability, which is small
+// enough to live alongside its create-time invariants below.
 var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 	const namespace = "admission-invariants-test"
 	ctx := context.Background()
@@ -410,6 +413,198 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				if c.wantErr == "" {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(k8sClient.Delete(ctx, snap)).To(Succeed())
+					return
+				}
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(c.wantErr))
+			})
+		}
+	})
+
+	Describe("NomadAutoscaler", func() {
+		base := func(name string) *nomadv1alpha1.NomadAutoscaler {
+			return &nomadv1alpha1.NomadAutoscaler{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: nomadv1alpha1.NomadAutoscalerSpec{
+					ClusterRef: nomadv1alpha1.ClusterReference{Name: "some-cluster"},
+				},
+			}
+		}
+
+		type tc struct {
+			name    string
+			mutate  func(*nomadv1alpha1.NomadAutoscaler)
+			wantErr string
+			verify  func(*nomadv1alpha1.NomadAutoscaler)
+		}
+
+		cases := []tc{
+			{
+				name:   "baseline minimal autoscaler accepted (positive control)",
+				mutate: func(*nomadv1alpha1.NomadAutoscaler) {},
+				verify: func(a *nomadv1alpha1.NomadAutoscaler) {
+					Expect(a.Spec.Replicas).To(Equal(int32(1)), "replicas must default to 1")
+					Expect(a.Spec.Namespaces).To(Equal([]string{"default"}), "namespaces must default to [default]")
+					Expect(a.Spec.Image.Repository).To(Equal("hashicorp/nomad-autoscaler-enterprise"), "image must default to the enterprise repository")
+					Expect(a.Spec.LogLevel).To(Equal("INFO"))
+				},
+			},
+			{
+				// 0 is the Go zero value and never serializes; -1 exercises
+				// the same Minimum rule.
+				name: "negative replicas rejected by minimum",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Replicas = -1
+				},
+				wantErr: "should be greater than or equal to 1",
+			},
+			{
+				name: "replicas above maximum rejected",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Replicas = 4
+				},
+				wantErr: "should be less than or equal to 3",
+			},
+			{
+				name: "wildcard alongside other namespaces rejected by CEL",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Namespaces = []string{"*", "default"}
+				},
+				wantErr: "must be the only entry",
+			},
+			{
+				name: "wildcard alone accepted",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Namespaces = []string{"*"}
+				},
+			},
+			{
+				name: "invalid namespace name rejected by item pattern",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Namespaces = []string{"not a namespace"}
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "invalid log level rejected by enum",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.LogLevel = "TRACE"
+				},
+				wantErr: "supported values",
+			},
+			{
+				name: "malformed image digest rejected by pattern",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.Image.Digest = "sha256:short"
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "DAS without prometheusURL rejected by CEL",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.DynamicApplicationSizing.Enabled = true
+				},
+				wantErr: "prometheusURL is required",
+			},
+			{
+				name: "DAS with prometheusURL accepted",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.DynamicApplicationSizing.Enabled = true
+					a.Spec.DynamicApplicationSizing.PrometheusURL = "http://das-prometheus:9090"
+				},
+			},
+			{
+				name: "non-http prometheusURL rejected by pattern",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.DynamicApplicationSizing.Enabled = true
+					a.Spec.DynamicApplicationSizing.PrometheusURL = "das-prometheus:9090"
+				},
+				wantErr: "should match",
+			},
+			{
+				// The agent pod mounts the cluster's TLS Secret, which
+				// pods cannot do across namespaces (neo-2um.13).
+				name: "cross-namespace clusterRef rejected by CEL",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.ClusterRef.Namespace = "elsewhere"
+				},
+				wantErr: "clusterRef.namespace is not supported",
+			},
+		}
+
+		// Structural defaulting does not descend into an absent object,
+		// so default={} on spec.image is what materialises the nested
+		// image defaults for a YAML-applied CR that omits the block
+		// (neo-2um.15). The typed client cannot express an absent struct
+		// field (image:{} always serializes), hence unstructured.
+		It("defaults the whole image block on an image-less CR", func() {
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "nomad.hashicorp.com/v1alpha1",
+				"kind":       "NomadAutoscaler",
+				"metadata": map[string]interface{}{
+					"name":      "adm-autoscaler-imageless",
+					"namespace": namespace,
+				},
+				"spec": map[string]interface{}{
+					"clusterRef": map[string]interface{}{"name": "some-cluster"},
+				},
+			}}
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, u)).To(Succeed()) }()
+
+			fetched := &nomadv1alpha1.NomadAutoscaler{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "adm-autoscaler-imageless", Namespace: namespace}, fetched)).To(Succeed())
+			Expect(fetched.Spec.Image.PullPolicy).To(Equal(corev1.PullAlways),
+				"the documented Always retag defence must survive an omitted image block")
+			Expect(fetched.Spec.Image.Repository).To(Equal("hashicorp/nomad-autoscaler-enterprise"))
+			Expect(fetched.Spec.Image.Tag).To(Equal("0.5.0-ent"))
+		})
+
+		// clusterRef transition rule (neo-2um.3): retargeting orphans
+		// the previous cluster's ACL policy+token, so the reference is
+		// frozen after create; replace-by-recreate is the supported path.
+		It("rejects any spec.clusterRef change on update, accepts other field edits", func() {
+			a := base("adm-autoscaler-clusterref")
+			Expect(k8sClient.Create(ctx, a)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, a)).To(Succeed()) }()
+
+			key := types.NamespacedName{Name: a.Name, Namespace: namespace}
+
+			fetched := &nomadv1alpha1.NomadAutoscaler{}
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.LogLevel = "DEBUG"
+			Expect(k8sClient.Update(ctx, fetched)).To(Succeed(),
+				"non-clusterRef spec edits must remain allowed")
+
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.ClusterRef.Name = "other-cluster"
+			err := k8sClient.Update(ctx, fetched)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.clusterRef is immutable"))
+
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.ClusterRef.Namespace = "other-namespace"
+			err = k8sClient.Update(ctx, fetched)
+			Expect(err).To(HaveOccurred(),
+				"a namespace change is also a retarget and must be rejected")
+			Expect(err.Error()).To(ContainSubstring("spec.clusterRef is immutable"))
+		})
+
+		for i, c := range cases {
+			name := fmt.Sprintf("adm-autoscaler-%d", i)
+			It(c.name, func() {
+				a := base(name)
+				c.mutate(a)
+
+				err := k8sClient.Create(ctx, a)
+				if c.wantErr == "" {
+					Expect(err).NotTo(HaveOccurred())
+					if c.verify != nil {
+						fetched := &nomadv1alpha1.NomadAutoscaler{}
+						Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, fetched)).To(Succeed())
+						c.verify(fetched)
+					}
+					Expect(k8sClient.Delete(ctx, a)).To(Succeed())
 					return
 				}
 				Expect(err).To(HaveOccurred())

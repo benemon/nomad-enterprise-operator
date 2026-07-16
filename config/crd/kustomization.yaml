@@ -4,6 +4,7 @@
 resources:
 - bases/nomad.hashicorp.com_nomadclusters.yaml
 - bases/nomad.hashicorp.com_nomadsnapshots.yaml
+- bases/nomad.hashicorp.com_nomadautoscalers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

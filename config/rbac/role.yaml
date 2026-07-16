@@ -104,6 +104,7 @@ rules:
 - apiGroups:
   - nomad.hashicorp.com
   resources:
+  - nomadautoscalers
   - nomadclusters
   - nomadsnapshots
   verbs:
@@ -114,6 +115,7 @@ rules:
 - apiGroups:
   - nomad.hashicorp.com
   resources:
+  - nomadautoscalers/finalizers
   - nomadclusters/finalizers
   - nomadsnapshots/finalizers
   verbs:
@@ -121,6 +123,7 @@ rules:
 - apiGroups:
   - nomad.hashicorp.com
   resources:
+  - nomadautoscalers/status
   - nomadclusters/status
   - nomadsnapshots/status
   verbs:

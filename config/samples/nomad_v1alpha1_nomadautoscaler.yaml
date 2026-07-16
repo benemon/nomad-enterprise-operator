@@ -1,0 +1,39 @@
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadAutoscaler
+metadata:
+  labels:
+    app.kubernetes.io/name: nomad-enterprise-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: autoscaler
+spec:
+  # Reference to the NomadCluster the autoscaler acts on. Must live in
+  # the same namespace as this NomadAutoscaler (admission-enforced).
+  clusterRef:
+    name: nomad
+
+  # Above 1, replicas form a leader-elected HA group; only the leader
+  # evaluates policies
+  replicas: 2
+
+  # Nomad namespaces the agent may observe and scale ("*" for all)
+  namespaces:
+    - default
+
+  # Dynamic Application Sizing (Nomad Enterprise): sizing policies live
+  # in job specifications; enabling this wires the required ACL
+  # capability. Requires a Prometheus that scrapes the client agents'
+  # metrics (clients must set telemetry.publish_allocation_metrics).
+  dynamicApplicationSizing:
+    enabled: true
+    prometheusURL: http://das-prometheus:9090
+
+  monitoring:
+    enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

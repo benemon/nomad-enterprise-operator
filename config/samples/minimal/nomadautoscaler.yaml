@@ -1,0 +1,14 @@
+# Minimal NomadAutoscaler example - pairs with the minimal NomadCluster
+#
+# Deploys a single autoscaler agent against the cluster. Scaling
+# policies live in job specifications, not here. Nomad client agents
+# must publish telemetry (see the NomadAutoscaler CRD Reference in the
+# README) or scaling metrics read zero.
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadAutoscaler
+metadata:
+  name: autoscaler
+spec:
+  clusterRef:
+    name: nomad  # References the cluster from nomadcluster.yaml
