@@ -153,7 +153,7 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-16T16:23:51Z"
+    createdAt: "2026-07-16T16:27:31Z"
     description: Community operator for managing HashiCorp Nomad Enterprise clusters
       on Kubernetes and OpenShift. Not maintained or supported by HashiCorp.
     olm.skipRange: '>=0.1.0 <0.0.1'
@@ -182,6 +182,11 @@ spec:
         The XValidation rule below blocks a mode switch (adding/removing
         spec.schedule) while a one-shot Job is running; recurring mode is
         never blocked.
+
+        spec.clusterRef is immutable: retargeting would orphan the old
+        cluster's ACL policy and token (status.tokenAccessorID is only
+        checked against the new cluster). Delete and recreate to retarget —
+        the finalizer then cleans up the old credentials.
       displayName: Nomad Snapshot
       kind: NomadSnapshot
       name: nomadsnapshots.nomad.hashicorp.com

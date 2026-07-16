@@ -285,6 +285,11 @@ type SnapshotInfo struct {
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.nomadVersion"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="(has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status) || !has(self.status.phase) || self.status.phase != 'Running'",message="mode switch (adding/removing spec.schedule) is blocked while a one-shot snapshot Job is running; wait for it to complete"
+// spec.clusterRef is immutable: retargeting would orphan the old
+// cluster's ACL policy and token (status.tokenAccessorID is only
+// checked against the new cluster). Delete and recreate to retarget —
+// the finalizer then cleans up the old credentials.
+// +kubebuilder:validation:XValidation:rule="self.spec.clusterRef == oldSelf.spec.clusterRef",message="spec.clusterRef is immutable; delete and recreate the NomadSnapshot to retarget it at a different cluster"
 type NomadSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

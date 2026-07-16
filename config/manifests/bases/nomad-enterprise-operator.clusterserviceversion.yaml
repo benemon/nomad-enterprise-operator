@@ -34,6 +34,11 @@ spec:
         The XValidation rule below blocks a mode switch (adding/removing
         spec.schedule) while a one-shot Job is running; recurring mode is
         never blocked.
+
+        spec.clusterRef is immutable: retargeting would orphan the old
+        cluster's ACL policy and token (status.tokenAccessorID is only
+        checked against the new cluster). Delete and recreate to retarget —
+        the finalizer then cleans up the old credentials.
       displayName: Nomad Snapshot
       kind: NomadSnapshot
       name: nomadsnapshots.nomad.hashicorp.com
