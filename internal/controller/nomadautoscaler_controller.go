@@ -145,15 +145,12 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	clusterNamespace := autoscaler.Namespace
-	if autoscaler.Spec.ClusterRef.Namespace != "" {
-		clusterNamespace = autoscaler.Spec.ClusterRef.Namespace
-	}
-
+	// clusterRef is same-namespace by admission contract (CEL rejects
+	// clusterRef.namespace).
 	cluster := &nomadv1alpha1.NomadCluster{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      autoscaler.Spec.ClusterRef.Name,
-		Namespace: clusterNamespace,
+		Namespace: autoscaler.Namespace,
 	}, cluster); err != nil {
 		if k8serrors.IsNotFound(err) {
 			log.Error(err, "Referenced NomadCluster not found", "cluster", autoscaler.Spec.ClusterRef.Name)
@@ -170,6 +167,32 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{RequeueAfter: autoscalerRequeueDefault}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// The autoscaler requires ACLs (management token, minted policy and
+	// token): a cluster with ACLs disabled is a terminal
+	// misconfiguration, not a transient wait — without this gate the CR
+	// would sit at WaitingForACLBootstrap forever, since ACL-disabled
+	// clusters never set ACLBootstrapped.
+	if !cluster.Spec.Server.ACL.IsEnabled() {
+		log.Info("Referenced NomadCluster has ACLs disabled", "cluster", cluster.Name)
+		patchBase := autoscaler.DeepCopy()
+		prevReady := meta.FindStatusCondition(autoscaler.Status.Conditions, "Ready")
+		alreadyReported := prevReady != nil && prevReady.Reason == "ACLsDisabled"
+		r.setCondition(autoscaler, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ACLsDisabled",
+			Message: fmt.Sprintf("NomadCluster %s has ACLs disabled; the autoscaler requires an ACL-enabled cluster", cluster.Name),
+		})
+		if !alreadyReported && r.Recorder != nil {
+			r.Recorder.Event(autoscaler, corev1.EventTypeWarning, "ACLsDisabled",
+				fmt.Sprintf("NomadCluster %s has ACLs disabled; the autoscaler requires an ACL-enabled cluster", cluster.Name))
+		}
+		if err := r.Status().Patch(ctx, autoscaler, client.MergeFrom(patchBase)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: autoscalerRequeueDefault}, nil
 	}
 
 	if !cluster.Status.ACLBootstrapped {
@@ -191,7 +214,7 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	managementSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      managementSecretName,
-		Namespace: clusterNamespace,
+		Namespace: cluster.Namespace,
 	}, managementSecret); err != nil {
 		log.Info("Waiting for cluster management token secret", "secret", managementSecretName)
 		patchBase := autoscaler.DeepCopy()
@@ -210,12 +233,22 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	managementToken := string(managementSecret.Data[phases.SecretKeySecretID])
 	if managementToken == "" {
 		log.Info("Management token secret has no secret-id", "secret", managementSecretName)
+		patchBase := autoscaler.DeepCopy()
+		r.setCondition(autoscaler, metav1.Condition{
+			Type:    "Ready",
+			Status:  metav1.ConditionFalse,
+			Reason:  "WaitingForManagementToken",
+			Message: fmt.Sprintf("Management token secret %s has an empty secret-id", managementSecretName),
+		})
+		if err := r.Status().Patch(ctx, autoscaler, client.MergeFrom(patchBase)); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: autoscalerRequeueDefault}, nil
 	}
 
-	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
+	internalAddr := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
-	agentToken, err := r.ensureAutoscalerToken(ctx, autoscaler, cluster, clusterNamespace, managementToken)
+	agentToken, err := r.ensureAutoscalerToken(ctx, autoscaler, cluster, managementToken)
 	if err != nil {
 		log.Error(err, "Failed to ensure autoscaler agent token")
 		patchBase := autoscaler.DeepCopy()
@@ -246,13 +279,19 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	agentConfig := generateAutoscalerConfig(autoscaler, internalAddr)
 	configChecksum := phases.ConfigChecksum(map[string]string{"autoscaler.hcl": agentConfig})
+	// A token re-mint rewrites the Secret in place while the pod spec
+	// stays byte-identical, and env-injected Secrets are never re-read
+	// by running pods: hash the token into the template so a re-mint
+	// rolls the agents (the cluster StatefulSet's checksum/secrets
+	// pattern).
+	secretsChecksum := phases.ConfigChecksum(map[string]string{phases.SecretKeySecretID: agentToken})
 
 	if err := r.reconcileConfigMap(ctx, autoscaler, agentConfig); err != nil {
 		log.Error(err, "Failed to reconcile ConfigMap")
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileDeployment(ctx, autoscaler, cluster, configChecksum); err != nil {
+	if err := r.reconcileDeployment(ctx, autoscaler, cluster, configChecksum, secretsChecksum); err != nil {
 		log.Error(err, "Failed to reconcile Deployment")
 		return ctrl.Result{}, err
 	}
@@ -315,7 +354,15 @@ func (r *NomadAutoscalerReconciler) updateAgentStatus(
 	requeueAfter := 5 * time.Minute
 	wasDegraded := meta.IsStatusConditionTrue(autoscaler.Status.Conditions, "Degraded")
 	degradedReason, degradedMessage := "", ""
+	// A stuck rollout is evaluated first: it degrades regardless of the
+	// replica-count grace window. Were the order reversed, a replica
+	// loss during a stuck rollout would reset Available's transition
+	// time, land in the grace window, and CLEAR Degraded while the
+	// incident worsened — then re-fire a duplicate Warning.
 	switch {
+	case deployFound && deploymentRolloutStuck(deploy):
+		degradedReason = "RolloutStuck"
+		degradedMessage = "Agent Deployment rollout exceeded its progress deadline; new pods are not becoming ready"
 	case deployFound && autoscaler.Status.ReadyReplicas < autoscaler.Status.DesiredReplicas:
 		if since, ok := deploymentUnavailableSince(deploy); ok {
 			if elapsed := time.Since(since.Time); elapsed >= autoscalerDegradedGrace {
@@ -328,9 +375,6 @@ func (r *NomadAutoscalerReconciler) updateAgentStatus(
 				requeueAfter = remaining
 			}
 		}
-	case deployFound && deploymentRolloutStuck(deploy):
-		degradedReason = "RolloutStuck"
-		degradedMessage = "Agent Deployment rollout exceeded its progress deadline; new pods are not becoming ready"
 	}
 	if degradedReason != "" {
 		r.setDegraded(autoscaler, true, degradedReason, degradedMessage)
@@ -411,9 +455,9 @@ func (r *NomadAutoscalerReconciler) handleDeletion(ctx context.Context, autoscal
 // runNomadWithFallback mirrors the snapshot controller's helper:
 // internal Service first, one LB retry on network error. fn must be
 // idempotent.
-func (r *NomadAutoscalerReconciler) runNomadWithFallback(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace string, fn func(nomad.NomadAPI) error) error {
-	nomadClient, err := r.autoscalerNomadClient(ctx, cluster, clusterNamespace,
-		nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true))
+func (r *NomadAutoscalerReconciler) runNomadWithFallback(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, fn func(nomad.NomadAPI) error) error {
+	nomadClient, err := r.autoscalerNomadClient(ctx, cluster,
+		nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true))
 	if err != nil {
 		return err
 	}
@@ -427,7 +471,7 @@ func (r *NomadAutoscalerReconciler) runNomadWithFallback(ctx context.Context, cl
 	if loadBalancerAddr == "" {
 		return err
 	}
-	nomadClient, cerr := r.autoscalerNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr)
+	nomadClient, cerr := r.autoscalerNomadClient(ctx, cluster, loadBalancerAddr)
 	if cerr != nil {
 		return cerr
 	}
@@ -436,7 +480,7 @@ func (r *NomadAutoscalerReconciler) runNomadWithFallback(ctx context.Context, cl
 
 // autoscalerNomadClient creates a Nomad client for controller-side ACL
 // operations. verify_https_client is off, so only the CA is needed.
-func (r *NomadAutoscalerReconciler) autoscalerNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, clusterNamespace, address string) (nomad.NomadAPI, error) {
+func (r *NomadAutoscalerReconciler) autoscalerNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, address string) (nomad.NomadAPI, error) {
 	cfg := nomad.ClientConfig{
 		Address:    address,
 		TLSEnabled: true,
@@ -445,7 +489,7 @@ func (r *NomadAutoscalerReconciler) autoscalerNomadClient(ctx context.Context, c
 	tlsSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      phases.TLSSecretName(cluster.Name),
-		Namespace: clusterNamespace,
+		Namespace: cluster.Namespace,
 	}, tlsSecret); err != nil {
 		return nil, fmt.Errorf("failed to get TLS secret: %w", err)
 	}
@@ -493,18 +537,24 @@ func buildAutoscalerPolicyRules(a *nomadv1alpha1.NomadAutoscaler) string {
 	}
 
 	// HA lock lives in a fixed namespace; grant it separately when that
-	// namespace is not already in the list (wildcard grants scale
-	// everywhere but variables capabilities are never implied).
+	// namespace is not already in the list. Nomad resolves an exact
+	// namespace block over a glob WITHOUT merging, so when the list is
+	// the wildcard this exact block must repeat the full scale grant —
+	// a bare variables block would strip scale from the lock namespace.
 	if a.Spec.Replicas > 1 && !lockInGrantedNamespace {
+		scaleGrant := ""
+		if len(a.Spec.Namespaces) == 1 && a.Spec.Namespaces[0] == "*" {
+			scaleGrant = `  policy = "scale"` + dasCaps + "\n"
+		}
 		fmt.Fprintf(&b, `namespace %q {
-  variables {
+%s  variables {
     path %q {
       capabilities = ["write", "read", "list"]
     }
   }
 }
 
-`, autoscalerLockNamespace, autoscalerLockPath(a))
+`, autoscalerLockNamespace, scaleGrant, autoscalerLockPath(a))
 	}
 
 	b.WriteString(`node {
@@ -528,25 +578,37 @@ operator {
 }
 
 // ensureAutoscalerToken creates or retrieves the agent's dedicated ACL
-// token, following ensureSnapshotToken: reuse the recorded accessor if
-// it still resolves, else upsert the policy and mint a fresh token.
+// token: reuse the recorded accessor if it still resolves, else upsert
+// the policy and mint a fresh token.
 func (r *NomadAutoscalerReconciler) ensureAutoscalerToken(
 	ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler,
-	cluster *nomadv1alpha1.NomadCluster, clusterNamespace, authToken string,
+	cluster *nomadv1alpha1.NomadCluster, authToken string,
 ) (string, error) {
 	log := logf.FromContext(ctx)
 
 	policyName := fmt.Sprintf("autoscaler-agent-%s-%s", autoscaler.Namespace, autoscaler.Name)
 	policyRules := buildAutoscalerPolicyRules(autoscaler)
 
-	var existingSecretID string
-	var newToken *nomad.ACLTokenResult
-	err := r.runNomadWithFallback(ctx, cluster, clusterNamespace, func(nomadClient nomad.NomadAPI) error {
-		// The policy is always upserted: its rules derive from spec
-		// (namespaces, DAS, replicas) and must track spec changes even
-		// when the token is reused.
+	// The policy rules derive from spec (namespaces, DAS, replicas), and
+	// the upsert is a Nomad raft write: run it only when the spec
+	// changed or a token is about to be minted, not on every pass.
+	// Tradeoff: an out-of-band policy edit in Nomad persists until the
+	// next spec change or re-mint instead of self-healing on requeue.
+	specChanged := autoscaler.Generation != autoscaler.Status.ObservedGeneration
+	upsertPolicy := func(nomadClient nomad.NomadAPI) error {
 		if perr := nomadClient.CreateACLPolicy(authToken, policyName, "Autoscaler agent policy for "+autoscaler.Name, policyRules); perr != nil {
 			return fmt.Errorf("failed to create autoscaler agent policy: %w", perr)
+		}
+		return nil
+	}
+
+	var existingSecretID string
+	needMint := false
+	err := r.runNomadWithFallback(ctx, cluster, func(nomadClient nomad.NomadAPI) error {
+		if specChanged {
+			if perr := upsertPolicy(nomadClient); perr != nil {
+				return perr
+			}
 		}
 
 		if autoscaler.Status.TokenAccessorID != "" {
@@ -561,19 +623,36 @@ func (r *NomadAutoscalerReconciler) ensureAutoscalerToken(
 			log.Info("Existing token not found, creating new one", "accessor", autoscaler.Status.TokenAccessorID)
 		}
 
-		t, terr := nomadClient.CreateACLTokenWithPolicies(authToken, policyName, []string{policyName})
-		if terr != nil {
-			return fmt.Errorf("failed to create autoscaler agent token: %w", terr)
+		// About to mint at steady state (out-of-band token deletion):
+		// the policy may have drifted or vanished too, so upsert it
+		// before the token references it.
+		if !specChanged {
+			if perr := upsertPolicy(nomadClient); perr != nil {
+				return perr
+			}
 		}
-		newToken = t
+		needMint = true
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	if existingSecretID != "" {
+	if !needMint {
 		log.V(1).Info("Using existing autoscaler agent token", "accessor", autoscaler.Status.TokenAccessorID)
 		return existingSecretID, nil
+	}
+
+	// The mint runs OUTSIDE the retried helper, one attempt against one
+	// address: token creation is not idempotent, and a retry after a
+	// lost response would mint a second, permanently orphaned token.
+	nomadClient, err := r.autoscalerNomadClient(ctx, cluster,
+		nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true))
+	if err != nil {
+		return "", err
+	}
+	newToken, err := nomadClient.CreateACLTokenWithPolicies(authToken, policyName, []string{policyName})
+	if err != nil {
+		return "", fmt.Errorf("failed to create autoscaler agent token: %w", err)
 	}
 
 	log.Info("Created autoscaler agent token", "accessor", newToken.AccessorID, "policy", policyName)
@@ -582,6 +661,12 @@ func (r *NomadAutoscalerReconciler) ensureAutoscalerToken(
 	autoscaler.Status.TokenAccessorID = newToken.AccessorID
 	autoscaler.Status.PolicyName = policyName
 	if err := r.Status().Patch(ctx, autoscaler, client.MergeFrom(patchBase)); err != nil {
+		// An unrecorded live token would leak a fresh orphan on every
+		// retry of this failure: best-effort delete before surfacing.
+		if derr := nomadClient.DeleteACLToken(authToken, newToken.AccessorID); derr != nil {
+			log.Error(derr, "Failed to delete unrecorded autoscaler token after status patch failure",
+				"accessor", newToken.AccessorID)
+		}
 		return "", fmt.Errorf("failed to patch status with token accessor: %w", err)
 	}
 
@@ -593,15 +678,10 @@ func (r *NomadAutoscalerReconciler) ensureAutoscalerToken(
 func (r *NomadAutoscalerReconciler) cleanupNomadResources(ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler) error {
 	log := logf.FromContext(ctx)
 
-	clusterNamespace := autoscaler.Namespace
-	if autoscaler.Spec.ClusterRef.Namespace != "" {
-		clusterNamespace = autoscaler.Spec.ClusterRef.Namespace
-	}
-
 	cluster := &nomadv1alpha1.NomadCluster{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      autoscaler.Spec.ClusterRef.Name,
-		Namespace: clusterNamespace,
+		Namespace: autoscaler.Namespace,
 	}, cluster); err != nil {
 		return fmt.Errorf("failed to get cluster: %w", err)
 	}
@@ -614,7 +694,7 @@ func (r *NomadAutoscalerReconciler) cleanupNomadResources(ctx context.Context, a
 	managementSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      phases.OperatorManagementSecretName(cluster.Name),
-		Namespace: clusterNamespace,
+		Namespace: cluster.Namespace,
 	}, managementSecret); err == nil {
 		authToken = string(managementSecret.Data[phases.SecretKeySecretID])
 	}
@@ -626,15 +706,15 @@ func (r *NomadAutoscalerReconciler) cleanupNomadResources(ctx context.Context, a
 		bootstrapSecret := &corev1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{
 			Name:      bootstrapSecretName,
-			Namespace: clusterNamespace,
+			Namespace: cluster.Namespace,
 		}, bootstrapSecret); err != nil {
 			return fmt.Errorf("failed to get a cleanup auth token (management and bootstrap secrets both unavailable): %w", err)
 		}
 		authToken = string(bootstrapSecret.Data[phases.SecretKeySecretID])
 	}
 
-	internalAddr := nomad.InternalServiceAddress(cluster.Name, clusterNamespace, true)
-	nomadClient, err := r.autoscalerNomadClient(ctx, cluster, clusterNamespace, internalAddr)
+	internalAddr := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
+	nomadClient, err := r.autoscalerNomadClient(ctx, cluster, internalAddr)
 	if err != nil {
 		return err
 	}
@@ -644,7 +724,7 @@ func (r *NomadAutoscalerReconciler) cleanupNomadResources(ctx context.Context, a
 			if !nomad.IsNetworkError(err) {
 				log.Error(err, "Failed to delete autoscaler agent token")
 			} else if loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true); loadBalancerAddr != "" {
-				if lbClient, lbErr := r.autoscalerNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr); lbErr == nil {
+				if lbClient, lbErr := r.autoscalerNomadClient(ctx, cluster, loadBalancerAddr); lbErr == nil {
 					_ = lbClient.DeleteACLToken(authToken, autoscaler.Status.TokenAccessorID)
 				}
 			}
@@ -658,7 +738,7 @@ func (r *NomadAutoscalerReconciler) cleanupNomadResources(ctx context.Context, a
 			if !nomad.IsNetworkError(err) {
 				log.Error(err, "Failed to delete autoscaler agent policy")
 			} else if loadBalancerAddr := nomad.LoadBalancerAddress(cluster.Status.AdvertiseAddress, true); loadBalancerAddr != "" {
-				if lbClient, lbErr := r.autoscalerNomadClient(ctx, cluster, clusterNamespace, loadBalancerAddr); lbErr == nil {
+				if lbClient, lbErr := r.autoscalerNomadClient(ctx, cluster, loadBalancerAddr); lbErr == nil {
 					_ = lbClient.DeleteACLPolicy(authToken, autoscaler.Status.PolicyName)
 				}
 			}
@@ -675,11 +755,6 @@ func (r *NomadAutoscalerReconciler) cleanupNomadResources(ctx context.Context, a
 // Application Sizing policies live in job specifications and reach the
 // agent through its Nomad policy source.
 func generateAutoscalerConfig(a *nomadv1alpha1.NomadAutoscaler, nomadAddr string) string {
-	logLevel := a.Spec.LogLevel
-	if logLevel == "" {
-		logLevel = "INFO"
-	}
-
 	// The agent watches a single Nomad namespace or the wildcard. With
 	// multiple specific namespaces the agent watches "*" and the ACL
 	// token enforces the real boundary (wildcard reads return only what
@@ -706,7 +781,7 @@ http {
 telemetry {
   prometheus_metrics = true
 }
-`, logLevel, a.Spec.EnableDebug, nomadAddr, nomadNamespace)
+`, a.Spec.LogLevel, a.Spec.EnableDebug, nomadAddr, nomadNamespace)
 
 	if a.Spec.Replicas > 1 {
 		config += fmt.Sprintf(`
@@ -787,29 +862,18 @@ func autoscalerAgentLabels(autoscaler *nomadv1alpha1.NomadAutoscaler) map[string
 }
 
 // autoscalerImageRef builds the image reference; digest pinning takes
-// precedence over tag, same contract as phases.ImageRef.
+// precedence over tag, same contract as phases.ImageRef. Repository
+// and tag are apiserver-defaulted (default={} on spec.image), never
+// empty here.
 func autoscalerImageRef(a *nomadv1alpha1.NomadAutoscaler) string {
-	repo := a.Spec.Image.Repository
-	if repo == "" {
-		repo = "hashicorp/nomad-autoscaler-enterprise"
-	}
 	if a.Spec.Image.Digest != "" {
-		return repo + "@" + a.Spec.Image.Digest
+		return a.Spec.Image.Repository + "@" + a.Spec.Image.Digest
 	}
-	tag := a.Spec.Image.Tag
-	if tag == "" {
-		tag = "0.5.0-ent"
-	}
-	return repo + ":" + tag
+	return a.Spec.Image.Repository + ":" + a.Spec.Image.Tag
 }
 
 // reconcileDeployment creates or updates the agent Deployment.
-func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler, cluster *nomadv1alpha1.NomadCluster, configChecksum string) error {
-	replicas := autoscaler.Spec.Replicas
-	if replicas == 0 {
-		replicas = 1
-	}
-
+func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler, cluster *nomadv1alpha1.NomadCluster, configChecksum, secretsChecksum string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      autoscalerAgentName(autoscaler),
@@ -819,7 +883,7 @@ func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, aut
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		deploy.Spec = appsv1.DeploymentSpec{
-			Replicas: ptr.To(replicas),
+			Replicas: ptr.To(autoscaler.Spec.Replicas),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: autoscalerAgentLabels(autoscaler),
 			},
@@ -832,7 +896,7 @@ func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, aut
 					MaxUnavailable: ptr.To(intstr.FromInt32(0)),
 				},
 			},
-			Template: r.buildAgentPodTemplate(autoscaler, cluster, configChecksum),
+			Template: r.buildAgentPodTemplate(autoscaler, cluster, configChecksum, secretsChecksum),
 		}
 		return controllerutil.SetControllerReference(autoscaler, deploy, r.Scheme)
 	})
@@ -840,17 +904,20 @@ func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, aut
 	return err
 }
 
-// buildAgentPodTemplate builds the agent pod template. The config
-// checksum annotation rolls the Deployment when spec-derived config
-// changes.
+// buildAgentPodTemplate builds the agent pod template. The checksum
+// annotations roll the Deployment when spec-derived config or the
+// minted token changes.
 func (r *NomadAutoscalerReconciler) buildAgentPodTemplate(
 	autoscaler *nomadv1alpha1.NomadAutoscaler, cluster *nomadv1alpha1.NomadCluster,
-	configChecksum string,
+	configChecksum, secretsChecksum string,
 ) corev1.PodTemplateSpec {
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
-			Labels:      autoscalerAgentLabels(autoscaler),
-			Annotations: map[string]string{"checksum/config": configChecksum},
+			Labels: autoscalerAgentLabels(autoscaler),
+			Annotations: map[string]string{
+				"checksum/config":  configChecksum,
+				"checksum/secrets": secretsChecksum,
+			},
 		},
 		Spec: corev1.PodSpec{
 			// PSS restricted, same profile as the server pods.

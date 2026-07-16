@@ -255,5 +255,35 @@ var _ = Describe("NomadAutoscaler Events and Degraded condition (neo-2um.4)", fu
 			Expect(events).To(HaveLen(1))
 			Expect(events[0]).To(ContainSubstring("Warning AutoscalerDegraded"))
 		})
+
+		It("keeps Degraded=True when replica loss follows a stuck rollout (neo-2um.20)", func() {
+			stuck := appsv1.DeploymentCondition{
+				Type:   appsv1.DeploymentProgressing,
+				Status: corev1.ConditionFalse,
+				Reason: "ProgressDeadlineExceeded",
+			}
+
+			By("a stuck surge rollout degrades (old ReplicaSet keeps ready==desired)")
+			setDeploymentStatus(1, stuck)
+			reconcileOnce()
+			Expect(degraded().Reason).To(Equal("RolloutStuck"))
+
+			By("an old-RS pod dying flips Available=False inside the grace window")
+			setDeploymentStatus(0, stuck, appsv1.DeploymentCondition{
+				Type:               appsv1.DeploymentAvailable,
+				Status:             corev1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+			})
+			reconcileOnce()
+
+			cond := degraded()
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue),
+				"Degraded must not clear to AgentHealthy while the incident worsens")
+			Expect(cond.Reason).To(Equal("RolloutStuck"))
+
+			events := drainEvents(recorder)
+			Expect(events).To(HaveLen(1), "exactly one Warning for the whole incident: %v", events)
+			Expect(events[0]).To(ContainSubstring("Warning AutoscalerDegraded"))
+		})
 	})
 })

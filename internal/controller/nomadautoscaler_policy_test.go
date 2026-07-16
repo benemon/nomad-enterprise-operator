@@ -28,10 +28,13 @@ import (
 func testAutoscaler(name string, mutate func(*nomadv1alpha1.NomadAutoscaler)) *nomadv1alpha1.NomadAutoscaler {
 	a := &nomadv1alpha1.NomadAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns1"},
+		// Mirrors an apiserver-defaulted object: the controller no longer
+		// re-defaults replicas, namespaces, or logLevel in Go.
 		Spec: nomadv1alpha1.NomadAutoscalerSpec{
 			ClusterRef: nomadv1alpha1.ClusterReference{Name: "nomad"},
 			Replicas:   1,
 			Namespaces: []string{"default"},
+			LogLevel:   "INFO",
 		},
 	}
 	if mutate != nil {
@@ -71,20 +74,36 @@ func TestBuildAutoscalerPolicyRules(t *testing.T) {
 			wantOneOf: `namespace "default"`,
 		},
 		{
-			name: "HA with a non-default namespace emits a separate lock block",
+			// The exact default block must NOT carry scale here: only
+			// payments was granted, and nothing else covers default.
+			name: "HA with a non-default namespace emits a separate bare lock block",
 			mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
 				a.Spec.Replicas = 3
 				a.Spec.Namespaces = []string{"payments"}
 			},
-			want: []string{`namespace "payments"`, `namespace "default"`, "nomad-autoscaler/ns1/as/lock"},
+			want:      []string{`namespace "payments"`, `namespace "default"`, "nomad-autoscaler/ns1/as/lock"},
+			wantOneOf: `policy = "scale"`,
 		},
 		{
-			name: "wildcard namespace still gets an explicit lock grant",
+			// Nomad resolves exact blocks over globs without merging, so
+			// the exact lock block must repeat the wildcard's scale grant
+			// — a bare variables block would 403 scaling in "default".
+			name: "wildcard namespace: the exact lock block carries the full scale grant",
 			mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
 				a.Spec.Replicas = 2
 				a.Spec.Namespaces = []string{"*"}
 			},
-			want: []string{`namespace "*"`, `namespace "default"`, "nomad-autoscaler/ns1/as/lock"},
+			want: []string{`namespace "*"`, "nomad-autoscaler/ns1/as/lock",
+				"namespace \"default\" {\n  policy = \"scale\"\n  variables {"},
+		},
+		{
+			name: "wildcard + DAS: the exact lock block carries the recommendations capability too",
+			mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+				a.Spec.Replicas = 2
+				a.Spec.Namespaces = []string{"*"}
+				a.Spec.DynamicApplicationSizing.Enabled = true
+			},
+			want: []string{"namespace \"default\" {\n  policy = \"scale\"\n  capabilities = [\"submit-recommendation\"]\n  variables {"},
 		},
 	}
 

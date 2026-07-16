@@ -29,7 +29,10 @@ import (
 // Nomad policy source.
 // +kubebuilder:validation:XValidation:rule="!('*' in self.namespaces) || size(self.namespaces) == 1",message="namespaces: \"*\" must be the only entry when present"
 type NomadAutoscalerSpec struct {
-	// ClusterRef references the NomadCluster the autoscaler acts on
+	// ClusterRef references the NomadCluster the autoscaler acts on.
+	// Same-namespace only: the agent pod mounts the cluster's TLS
+	// Secret, and pods cannot mount Secrets across namespaces.
+	// +kubebuilder:validation:XValidation:rule="!has(self.__namespace__)",message="clusterRef.namespace is not supported: the NomadCluster must be in the NomadAutoscaler's own namespace"
 	ClusterRef ClusterReference `json:"clusterRef"`
 
 	// Replicas is the number of agent pods. Values above 1 enable the
@@ -44,6 +47,10 @@ type NomadAutoscalerSpec struct {
 
 	// Image for the autoscaler agent. Dynamic Application Sizing
 	// requires the enterprise image (the default).
+	// default={} materialises the object when omitted so the nested
+	// defaults (repository, tag, pullPolicy) always apply — structural
+	// defaulting does not descend into an absent object.
+	// +kubebuilder:default={}
 	// +optional
 	Image AutoscalerImageSpec `json:"image,omitempty"`
 

@@ -1018,7 +1018,7 @@ source. The CR covers two metric paths:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `clusterRef.name` | `string` | | Name of the target NomadCluster. **Immutable** — retargeting would orphan the minted ACL credentials, so delete and recreate instead (the finalizer cleans up) |
-| `clusterRef.namespace` | `string` | | Namespace of the target NomadCluster. Defaults to the NomadAutoscaler's namespace. Immutable |
+| `clusterRef.namespace` | `string` | | Not supported (admission-rejected): the NomadCluster must be in the NomadAutoscaler's own namespace, because the agent pod mounts the cluster's TLS Secret and pods cannot mount Secrets across namespaces |
 | `replicas` | `int` | `1` | Agent pods, 1–3. Above 1 enables the agent's [high-availability mode](#autoscaler-high-availability) |
 | `image.repository` | `string` | `hashicorp/nomad-autoscaler-enterprise` | Agent image. Dynamic Application Sizing needs the enterprise image |
 | `image.tag` | `string` | `0.5.0-ent` | Pinned concrete version, same rationale as [image version pinning](#image-version-pinning) |
@@ -1096,20 +1096,29 @@ Failover timing with the agent's defaults (`lock_ttl 60s`,
 
 ### Autoscaler ACL Token
 
-When ACLs are enabled on the referenced NomadCluster, the operator
-creates policy `autoscaler-agent-<namespace>-<name>` scoped to exactly
-what the spec needs: `scale` on each entry in `spec.namespaces`,
-`node:read`, `operator:read` (the enterprise agent's startup license
-check), variables access on the HA lock path when `replicas > 1`, and
-`submit-recommendation` when DAS is enabled. The policy is re-upserted
-on spec changes so it tracks the CR. The token lives in the
-`<name>-autoscaler-token` Secret; token and policy are deleted from
-Nomad when the NomadAutoscaler is deleted.
+The autoscaler **requires ACLs** on the referenced NomadCluster
+(`spec.server.acl.enabled: true`, the default): the agent authenticates
+with a dedicated token the operator mints. A cluster with ACLs disabled
+is reported as a terminal misconfiguration — `Ready=False` with reason
+`ACLsDisabled` and a Warning Event — not as a transient wait.
+
+The operator creates policy `autoscaler-agent-<namespace>-<name>`
+scoped to exactly what the spec needs: `scale` on each entry in
+`spec.namespaces`, `node:read`, `operator:read` (the enterprise agent's
+startup license check), variables access on the HA lock path when
+`replicas > 1`, and `submit-recommendation` when DAS is enabled. The
+policy is re-upserted on spec changes so it tracks the CR. The token
+lives in the `<name>-autoscaler-token` Secret; if the operator re-mints
+it (for example after an out-of-band deletion in Nomad), a
+`checksum/secrets` annotation rolls the agent pods onto the new token.
+Token and policy are deleted from Nomad when the NomadAutoscaler is
+deleted.
 
 ### Conditions
 
 `Ready=True` (reason `Deployed`) requires at least one ready agent
-replica. `Ready=False` reasons: `ClusterNotFound`,
+replica. `Ready=False` reasons: `ClusterNotFound`, `ACLsDisabled`
+(terminal, also emitted as a Warning Event),
 `WaitingForACLBootstrap`, `WaitingForManagementToken`,
 `TokenCreationFailed` (also emitted as a Warning Event), and
 `DeploymentNotReady`. A separate `Degraded` condition tracks agent

@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 )
@@ -520,7 +521,44 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 				wantErr: "should match",
 			},
+			{
+				// The agent pod mounts the cluster's TLS Secret, which
+				// pods cannot do across namespaces (neo-2um.13).
+				name: "cross-namespace clusterRef rejected by CEL",
+				mutate: func(a *nomadv1alpha1.NomadAutoscaler) {
+					a.Spec.ClusterRef.Namespace = "elsewhere"
+				},
+				wantErr: "clusterRef.namespace is not supported",
+			},
 		}
+
+		// Structural defaulting does not descend into an absent object,
+		// so default={} on spec.image is what materialises the nested
+		// image defaults for a YAML-applied CR that omits the block
+		// (neo-2um.15). The typed client cannot express an absent struct
+		// field (image:{} always serializes), hence unstructured.
+		It("defaults the whole image block on an image-less CR", func() {
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "nomad.hashicorp.com/v1alpha1",
+				"kind":       "NomadAutoscaler",
+				"metadata": map[string]interface{}{
+					"name":      "adm-autoscaler-imageless",
+					"namespace": namespace,
+				},
+				"spec": map[string]interface{}{
+					"clusterRef": map[string]interface{}{"name": "some-cluster"},
+				},
+			}}
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, u)).To(Succeed()) }()
+
+			fetched := &nomadv1alpha1.NomadAutoscaler{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "adm-autoscaler-imageless", Namespace: namespace}, fetched)).To(Succeed())
+			Expect(fetched.Spec.Image.PullPolicy).To(Equal(corev1.PullAlways),
+				"the documented Always retag defence must survive an omitted image block")
+			Expect(fetched.Spec.Image.Repository).To(Equal("hashicorp/nomad-autoscaler-enterprise"))
+			Expect(fetched.Spec.Image.Tag).To(Equal("0.5.0-ent"))
+		})
 
 		// clusterRef transition rule (neo-2um.3): retargeting orphans
 		// the previous cluster's ACL policy+token, so the reference is

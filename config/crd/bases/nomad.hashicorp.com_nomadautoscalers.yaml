@@ -65,8 +65,10 @@ spec:
               Nomad policy source.
             properties:
               clusterRef:
-                description: ClusterRef references the NomadCluster the autoscaler
-                  acts on
+                description: |-
+                  ClusterRef references the NomadCluster the autoscaler acts on.
+                  Same-namespace only: the agent pod mounts the cluster's TLS
+                  Secret, and pods cannot mount Secrets across namespaces.
                 properties:
                   name:
                     description: Name of the NomadCluster
@@ -78,6 +80,10 @@ spec:
                 required:
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: 'clusterRef.namespace is not supported: the NomadCluster
+                    must be in the NomadAutoscaler''s own namespace'
+                  rule: '!has(self.__namespace__)'
               dynamicApplicationSizing:
                 description: DynamicApplicationSizing configuration (Nomad Enterprise).
                 properties:
@@ -106,9 +112,13 @@ spec:
                 description: EnableDebug exposes the agent's pprof endpoints
                 type: boolean
               image:
+                default: {}
                 description: |-
                   Image for the autoscaler agent. Dynamic Application Sizing
                   requires the enterprise image (the default).
+                  default={} materialises the object when omitted so the nested
+                  defaults (repository, tag, pullPolicy) always apply — structural
+                  defaulting does not descend into an absent object.
                 properties:
                   digest:
                     description: |-
