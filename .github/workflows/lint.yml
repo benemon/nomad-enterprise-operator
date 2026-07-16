@@ -1,14 +1,17 @@
 name: Lint
 
+# Feature branches are covered by pull_request events and by rc-build.yml
+# (feat/**, fix/**), which calls this workflow — an unscoped push trigger
+# would run everything twice per push (neo-bf9).
 on:
   push:
-    branches: ['**']
+    branches: [main, stability]
   pull_request:
   workflow_call:
 
 jobs:
   lint:
-    name: Run on Ubuntu
+    name: golangci-lint
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code

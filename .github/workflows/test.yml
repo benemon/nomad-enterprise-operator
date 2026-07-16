@@ -1,8 +1,27 @@
 name: Tests
 
+# Unit + envtest suites, plus the per-package coverage gate that
+# enforces the thresholds in CONTRIBUTING.md §1.5:
+#
+#   pkg/...                          ≥ 75%
+#   internal/controller/phases/...   ≥ 65%
+#   internal/controller/...          ≥ 55%   (excluding the phases subtree)
+#
+# Exclusions (also per §1.5): cmd/..., zz_generated deepcopy. The
+# aggregation and threshold logic lives in hack/coverage-gate/main.go so
+# the rules are version-controlled Go, not buried in shell. Update the
+# gate in lockstep with §1.5.
+#
+# The gate consumes the cover.out that `make test` already emits — the
+# suite runs once (this used to be a separate coverage.yml running the
+# whole suite a second time; folded in per neo-bf9).
+#
+# Feature branches are covered by pull_request events and by rc-build.yml
+# (feat/**, fix/**), which calls this workflow.
+
 on:
   push:
-    branches: ['**']
+    branches: [main, stability]
   pull_request:
   workflow_call:
 
@@ -12,7 +31,7 @@ permissions:
 
 jobs:
   test:
-    name: Run on Ubuntu
+    name: Unit tests + coverage gate
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -22,11 +41,35 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
+
+      # Cache the setup-envtest binaries (etcd, kube-apiserver, kubectl).
+      # `make test` downloads them into ./bin via `setup-envtest use`; the
+      # cache key tracks ENVTEST_K8S_VERSION (derived from k8s.io/api in
+      # go.mod, same awk as the Makefile) so a go.mod bump invalidates the
+      # cache automatically.
+      - name: Resolve envtest k8s version
+        id: envtest
+        run: |
+          version=$(go list -m -f '{{ .Version }}' k8s.io/api | awk -F'[v.]' '{printf "1.%d", $3}')
+          echo "k8s_version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache envtest binaries
+        uses: actions/cache@v6
+        with:
+          path: bin/k8s
+          key: envtest-${{ runner.os }}-${{ steps.envtest.outputs.k8s_version }}
 
       - name: Running Tests
         run: |
           go mod tidy
           make test JUNIT_REPORT=unit.xml
+
+      - name: Generate per-function coverage report
+        run: go tool cover -func=cover.out | tee cover.func.txt
+
+      - name: Enforce per-package thresholds
+        run: go run ./hack/coverage-gate cover.func.txt
 
       # Dependabot-triggered runs get a read-only token that cannot
       # create check runs, so the report step is skipped for them.
@@ -39,9 +82,12 @@ jobs:
           reporter: java-junit
           use-actions-summary: false
 
-      - name: Upload test report artifact
+      - name: Upload test report and coverage artifacts
         uses: actions/upload-artifact@v7
         if: always()
         with:
           name: unit-junit
-          path: unit.xml
+          path: |
+            unit.xml
+            cover.out
+            cover.func.txt

@@ -18,6 +18,11 @@ permissions:
   contents: read
   checks: write
 
+env:
+  # Pinned: an unpinned 'latest' kind can break the gate on upstream
+  # releases. Keep in step with test-e2e.yml.
+  KIND_VERSION: v0.32.0
+
 jobs:
   nightly-e2e:
     name: Full suite on kind
@@ -31,14 +36,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          curl -Lo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
-
-      - name: Verify kind installation
-        run: kind version
+          kind version
 
       - name: Write Nomad Enterprise license file
         env:
@@ -50,7 +53,10 @@ jobs:
       - name: Run the full e2e suite
         run: |
           go mod tidy
-          make test-e2e JUNIT_REPORT=e2e-nightly.xml
+          # 'version upgrade' is skipped here because the upgrade-matrix
+          # job below runs it per consecutive-minor pair — the suite's
+          # default pair duplicates the matrix's newest entry (neo-bf9).
+          make test-e2e JUNIT_REPORT=e2e-nightly.xml GINKGO_SKIP='version upgrade'
 
       - name: Publish test report
         uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
@@ -92,11 +98,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          curl -Lo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
+          kind version
 
       - name: Write Nomad Enterprise license file
         env:

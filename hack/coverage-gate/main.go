@@ -12,7 +12,7 @@
 //	api/v1alpha1/zz_generated.deepcopy.go
 //
 // Exits 0 if every threshold holds, 1 otherwise, printing a per-package
-// summary and the first failing rule. Used by `.github/workflows/coverage.yml`.
+// summary and the first failing rule. Used by `.github/workflows/test.yml`.
 //
 // The input format is the standard `go tool cover -func` output, one
 // statement per line of the form:

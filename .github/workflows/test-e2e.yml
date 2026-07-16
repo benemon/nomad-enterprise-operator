@@ -3,12 +3,24 @@ name: E2E Tests
 # PR/push lane of the e2e matrix (neo-g1o / design review §2.10): runs
 # the functional suite but SKIPS the slow containers — scale-down,
 # version upgrade, leader failover — which run in nightly-e2e.yml.
+#
+# Callers can request the complete suite with `lane: full` (release.yml
+# does, so releases gate on everything the nightly runs). Direct
+# push/pull_request events always get the PR lane.
+#
+# Feature branches are covered by pull_request events; an unscoped push
+# trigger would run the suite twice per push (neo-bf9).
 
 on:
   push:
-    branches: ['**']
+    branches: [main, stability]
   pull_request:
   workflow_call:
+    inputs:
+      lane:
+        description: "'pr' skips the slow containers; 'full' runs the complete suite"
+        type: string
+        default: pr
     secrets:
       NOMAD_LICENSE:
         required: true
@@ -17,9 +29,14 @@ permissions:
   contents: read
   checks: write
 
+env:
+  # Pinned: an unpinned 'latest' kind can break the gate on upstream
+  # releases. Keep in step with nightly-e2e.yml.
+  KIND_VERSION: v0.32.0
+
 jobs:
   test-e2e:
-    name: Run on Ubuntu
+    name: e2e on kind (${{ inputs.lane == 'full' && 'full suite' || 'PR lane' }})
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -30,14 +47,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          curl -Lo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
-
-      - name: Verify kind installation
-        run: kind version
+          kind version
 
       - name: Write Nomad Enterprise license file
         env:
@@ -46,10 +61,16 @@ jobs:
           mkdir -p test/e2e/testdata
           echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
 
-      - name: Running Test e2e (PR lane - slow containers skipped)
+      - name: Run e2e suite
+        env:
+          LANE: ${{ inputs.lane }}
         run: |
           go mod tidy
-          make test-e2e JUNIT_REPORT=e2e-pr.xml GINKGO_SKIP='scale-down|version upgrade|leader failover|Keyring lifecycle|Keyring transit auth|Keyring HA pair|Keyring resilience|Multi-namespace fleet|Minimal sample quickstart'
+          # PR lane skips the slow containers (neo-g1o); lane=full clears
+          # the skip so callers like release.yml run the complete suite.
+          SKIP='scale-down|version upgrade|leader failover|Keyring lifecycle|Keyring transit auth|Keyring HA pair|Keyring resilience|Multi-namespace fleet|Minimal sample quickstart'
+          if [ "${LANE}" = "full" ]; then SKIP=''; fi
+          make test-e2e JUNIT_REPORT=e2e.xml GINKGO_SKIP="${SKIP}"
 
       # Dependabot-triggered runs get a read-only token that cannot
       # create check runs, so the report step is skipped for them.
@@ -57,8 +78,8 @@ jobs:
         uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         if: ${{ always() && github.actor != 'dependabot[bot]' }}
         with:
-          name: E2E Test Results (PR lane)
-          path: e2e-pr.xml
+          name: E2E Test Results (${{ inputs.lane == 'full' && 'full suite' || 'PR lane' }})
+          path: e2e.xml
           reporter: java-junit
           use-actions-summary: false
 
@@ -66,5 +87,5 @@ jobs:
         uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: e2e-pr-junit
-          path: e2e-pr.xml
+          name: e2e-junit
+          path: e2e.xml
