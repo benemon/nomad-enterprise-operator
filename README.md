@@ -923,7 +923,7 @@ full restore procedure is in the
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `clusterRef.name` | `string` | | Name of the target NomadCluster |
+| `clusterRef.name` | `string` | | Name of the target NomadCluster. **Immutable** — retargeting would orphan the minted ACL credentials, so delete and recreate instead (the finalizer cleans up) |
 | `clusterRef.namespace` | `string` | | Not supported (admission-rejected): the NomadCluster must be in the NomadSnapshot's own namespace, because the agent pod mounts the cluster's TLS Secret and pods cannot mount Secrets across namespaces |
 | `schedule` | `object` | | Optional. Present = recurring agent Deployment; omitted = one-shot Job |
 | `schedule.interval` | `string` | `1h` | Interval between snapshots. Must be a Go duration string (e.g. `1h`, `90m`, `1h30m`) — pattern-validated at admission |

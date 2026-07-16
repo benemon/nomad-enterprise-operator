@@ -412,6 +412,30 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 			},
 		}
 
+		// clusterRef transition rule (neo-2um.12, mirroring the
+		// autoscaler's neo-2um.3): retargeting orphans the previous
+		// cluster's ACL policy+token, so the reference is frozen after
+		// create; replace-by-recreate is the supported path.
+		It("rejects any spec.clusterRef change on update, accepts other field edits", func() {
+			s := base("adm-snapshot-clusterref")
+			Expect(k8sClient.Create(ctx, s)).To(Succeed())
+			defer func() { Expect(k8sClient.Delete(ctx, s)).To(Succeed()) }()
+
+			key := types.NamespacedName{Name: s.Name, Namespace: namespace}
+
+			fetched := &nomadv1alpha1.NomadSnapshot{}
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "2h", Retain: 12}
+			Expect(k8sClient.Update(ctx, fetched)).To(Succeed(),
+				"non-clusterRef spec edits must remain allowed")
+
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			fetched.Spec.ClusterRef.Name = "other-cluster"
+			err := k8sClient.Update(ctx, fetched)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.clusterRef is immutable"))
+		})
+
 		for i, c := range cases {
 			name := fmt.Sprintf("adm-snapshot-%d", i)
 			It(c.name, func() {

@@ -18,6 +18,11 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: NomadAutoscaler is the Schema for the nomadautoscalers API.
+      displayName: Nomad Autoscaler
+      kind: NomadAutoscaler
+      name: nomadautoscalers.nomad.hashicorp.com
+      version: v1alpha1
     - description: NomadCluster is the Schema for the nomadclusters API.
       displayName: Nomad Cluster
       kind: NomadCluster
@@ -29,6 +34,11 @@ spec:
         The XValidation rule below blocks a mode switch (adding/removing
         spec.schedule) while a one-shot Job is running; recurring mode is
         never blocked.
+
+        spec.clusterRef is immutable: retargeting would orphan the old
+        cluster's ACL policy and token (status.tokenAccessorID is only
+        checked against the new cluster). Delete and recreate to retarget —
+        the finalizer then cleans up the old credentials.
       displayName: Nomad Snapshot
       kind: NomadSnapshot
       name: nomadsnapshots.nomad.hashicorp.com
@@ -44,7 +54,8 @@ spec:
 
     Features include TLS certificate management, ACL bootstrap, gossip
     encryption, Prometheus monitoring, OpenShift Routes, persistent storage,
-    and automated snapshots.
+    automated snapshots, and managed Nomad Autoscaler agents (horizontal
+    application scaling and Dynamic Application Sizing).
   displayName: Nomad Enterprise Operator
   icon:
   - base64data: PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz48c3ZnIGlkPSJMb2dvcyIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB3aWR0aD0iNTAiIGhlaWdodD0iNzIiIHZpZXdCb3g9IjAgMCA1MCA3MiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMGNhOGU7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHBhdGggY2xhc3M9ImNscy0xIiBkPSJNMjUsNy4yTDAsMjEuNnYyOC44bDI1LDE0LjQsMjUtMTQuNHYtMjguOUwyNSw3LjJaTTM2LjEsMzguOGwtNi43LDMuOC04LTQuNHY5LjJsLTcuNiw0Ljh2LTE5LjJsNi0zLjcsOC4zLDQuNHYtOS4zbDgtNC44djE5LjJaIi8+PC9zdmc+

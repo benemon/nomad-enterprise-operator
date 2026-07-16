@@ -48,6 +48,11 @@ spec:
           The XValidation rule below blocks a mode switch (adding/removing
           spec.schedule) while a one-shot Job is running; recurring mode is
           never blocked.
+
+          spec.clusterRef is immutable: retargeting would orphan the old
+          cluster's ACL policy and token (status.tokenAccessorID is only
+          checked against the new cluster). Delete and recreate to retarget —
+          the finalizer then cleans up the old credentials.
         properties:
           apiVersion:
             description: |-
@@ -70,7 +75,10 @@ spec:
             description: NomadSnapshotSpec defines the desired state of NomadSnapshot.
             properties:
               clusterRef:
-                description: ClusterRef references the NomadCluster to snapshot
+                description: |-
+                  ClusterRef references the NomadCluster to snapshot.
+                  Same-namespace only: the agent pod mounts the cluster's TLS
+                  Secret, and pods cannot mount Secrets across namespaces.
                 properties:
                   name:
                     description: Name of the NomadCluster
@@ -82,6 +90,10 @@ spec:
                 required:
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: 'clusterRef.namespace is not supported: the NomadCluster
+                    must be in the NomadSnapshot''s own namespace'
+                  rule: '!has(self.__namespace__)'
               nodeSelector:
                 additionalProperties:
                   type: string
@@ -489,6 +501,9 @@ spec:
             one-shot snapshot Job is running; wait for it to complete
           rule: (has(self.spec.schedule) == has(oldSelf.spec.schedule)) || !has(self.status)
             || !has(self.status.phase) || self.status.phase != 'Running'
+        - message: spec.clusterRef is immutable; delete and recreate the NomadSnapshot
+            to retarget it at a different cluster
+          rule: self.spec.clusterRef == oldSelf.spec.clusterRef
     served: true
     storage: true
     subresources:
