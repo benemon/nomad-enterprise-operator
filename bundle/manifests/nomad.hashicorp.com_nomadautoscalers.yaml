@@ -171,6 +171,13 @@ spec:
                       nil means "user said nothing" and reads as the default via
                       IsEnabled().
                     type: boolean
+                  prometheusRulesEnabled:
+                    default: false
+                    description: |-
+                      PrometheusRulesEnabled determines if a PrometheusRule with the
+                      operator's autoscaler alerts is created. Same opt-in shape as
+                      the NomadCluster monitoring surface.
+                    type: boolean
                 type: object
               namespaces:
                 default:

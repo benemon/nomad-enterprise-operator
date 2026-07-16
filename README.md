@@ -1041,6 +1041,7 @@ source. The CR covers two metric paths:
 | `dynamicApplicationSizing.enabled` | `bool` | `false` | Enable DAS support |
 | `dynamicApplicationSizing.prometheusURL` | `string` | | Prometheus endpoint for usage history. Required when DAS is enabled (admission-enforced) |
 | `monitoring.enabled` | `bool` | `true` | Create the metrics Service (and ServiceMonitor where the CRD exists) for the agent's `/v1/metrics` endpoint |
+| `monitoring.prometheusRulesEnabled` | `bool` | `false` | Create a PrometheusRule with the operator's [autoscaler alerts](#autoscaler-alerts). Same opt-in shape as the NomadCluster field; deleted when toggled off |
 | `logLevel` | `string` | `INFO` | `DEBUG`, `INFO`, or `WARN` |
 | `enableDebug` | `bool` | `false` | Expose the agent's pprof endpoints |
 | `resources` / `nodeSelector` / `tolerations` | | | Standard pod scheduling knobs for the agent |
@@ -1128,6 +1129,18 @@ it (for example after an out-of-band deletion in Nomad), a
 `checksum/secrets` annotation rolls the agent pods onto the new token.
 Token and policy are deleted from Nomad when the NomadAutoscaler is
 deleted.
+
+### Autoscaler alerts
+
+With `monitoring.prometheusRulesEnabled: true` (and the Prometheus
+Operator CRDs present), the operator maintains a PrometheusRule scoped
+to this instance's metrics Service:
+
+| Alert | Severity | Fires when |
+|-------|----------|------------|
+| `NomadAutoscalerScalingErrors` | warning | Scaling invocations are returning errors (`scale_invoke_error_count` increasing) for 5m |
+| `NomadAutoscalerPolicyEvaluationsStalled` | warning | Scaling policies exist but no policy evaluations ran in 30 minutes — in HA mode only the leader evaluates, so check leader election first |
+| `NomadAutoscalerAgentDown` | critical | An agent's metrics scrape target has been down for 5 minutes |
 
 ### Conditions
 
