@@ -208,12 +208,24 @@ jobs:
           # (ServiceAccount bearer token auth, self-signed cert → -k).
           # F4 registers all seven §8.1 handles at startup; zero values
           # are acceptable, absence is a failure.
+          # Output is collected via `kubectl logs` after the pod completes:
+          # `kubectl run -i` attaches to capture stdout, and a fast-exiting
+          # container can finish before the attach lands, silently dropping
+          # the scrape and failing the first grep below (neo-9ho).
           kubectl -n nomad-enterprise-operator-system run metrics-probe \
-            --image=curlimages/curl:8.10.1 --restart=Never --rm -i --quiet \
+            --image=curlimages/curl:8.10.1 --restart=Never --quiet \
             --overrides='{"spec":{"serviceAccountName":"nomad-enterprise-operator-controller-manager"}}' \
             -- sh -c 'curl -sk -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
-              https://nomad-enterprise-operator-controller-manager-metrics-service:8443/metrics' \
-            > /tmp/metrics.out
+              https://nomad-enterprise-operator-controller-manager-metrics-service:8443/metrics'
+          kubectl -n nomad-enterprise-operator-system wait \
+            --for=jsonpath='{.status.phase}'=Succeeded pod/metrics-probe \
+            --timeout=120s
+          kubectl -n nomad-enterprise-operator-system logs metrics-probe > /tmp/metrics.out
+          kubectl -n nomad-enterprise-operator-system delete pod metrics-probe --ignore-not-found
+          if ! test -s /tmp/metrics.out; then
+            echo "::error::metrics scrape returned no output — probe or endpoint failure, not a missing metric"
+            exit 1
+          fi
           for m in \
             nomad_operator_phase_duration_seconds \
             nomad_operator_nomad_api_requests_total \
