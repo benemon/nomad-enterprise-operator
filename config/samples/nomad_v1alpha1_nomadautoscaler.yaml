@@ -6,10 +6,10 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: autoscaler
 spec:
-  # Reference to the NomadCluster the autoscaler acts on
+  # Reference to the NomadCluster the autoscaler acts on. Must live in
+  # the same namespace as this NomadAutoscaler (admission-enforced).
   clusterRef:
     name: nomad
-    # namespace: default  # Optional, defaults to same namespace
 
   # Above 1, replicas form a leader-elected HA group; only the leader
   # evaluates policies

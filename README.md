@@ -1023,6 +1023,7 @@ source. The CR covers two metric paths:
 | `image.repository` | `string` | `hashicorp/nomad-autoscaler-enterprise` | Agent image. Dynamic Application Sizing needs the enterprise image |
 | `image.tag` | `string` | `0.5.0-ent` | Pinned concrete version, same rationale as [image version pinning](#image-version-pinning) |
 | `image.digest` | `string` | | Optional content-digest pin; takes precedence over `tag` |
+| `image.pullPolicy` | `string` | `Always` | Defence against registry-side retags of the pinned tag; applies even when the `image` block is omitted |
 | `namespaces` | `[]string` | `["default"]` | Nomad namespaces the agent may observe and scale; drives both agent config and the minted ACL policy scope. `"*"` grants all and must be the only entry |
 | `dynamicApplicationSizing.enabled` | `bool` | `false` | Enable DAS support |
 | `dynamicApplicationSizing.prometheusURL` | `string` | | Prometheus endpoint for usage history. Required when DAS is enabled (admission-enforced) |
@@ -1031,8 +1032,9 @@ source. The CR covers two metric paths:
 | `enableDebug` | `bool` | `false` | Expose the agent's pprof endpoints |
 | `resources` / `nodeSelector` / `tolerations` | | | Standard pod scheduling knobs for the agent |
 
-Spec changes roll the agent automatically: the pod template carries a
-`checksum/config` annotation, and the Deployment uses a surge rollout
+Spec changes roll the agent automatically: the pod template carries
+`checksum/config` and `checksum/secrets` annotations (rendered config
+and minted token respectively), and the Deployment uses a surge rollout
 (`maxSurge: 1`, `maxUnavailable: 0`) so a warm agent is always up.
 Direct edits to the agent Deployment — including
 `kubectl rollout restart` — are reverted by the reconciler; roll the
