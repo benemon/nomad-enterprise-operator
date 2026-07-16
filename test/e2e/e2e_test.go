@@ -2376,6 +2376,10 @@ spec:
 				{"secret", asTokenSecret},
 				{"deployment", asAgentName},
 				{"service", asMetricsSvc},
+				// The suite installs the Prometheus Operator CRDs, so
+				// the discovery gate is on and the ServiceMonitor must
+				// materialise.
+				{"servicemonitor", asMetricsSvc},
 			}
 			for _, r := range resources {
 				Eventually(func(g Gomega) {
@@ -2432,10 +2436,12 @@ spec:
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadautoscaler", asName, "-n", namespace, `-o`,
 					`jsonpath={.status.conditions[?(@.type=="Ready")].status} `+
-						`{.status.conditions[?(@.type=="Ready")].reason} {.status.readyReplicas}`)
+						`{.status.conditions[?(@.type=="Ready")].reason} {.status.readyReplicas} `+
+						`{.status.conditions[?(@.type=="Degraded")].status}/{.status.conditions[?(@.type=="Degraded")].reason}`)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True Deployed 1"))
+				g.Expect(output).To(Equal("True Deployed 1 False/AgentHealthy"),
+					"Ready and Degraded must both be maintained through the real manager")
 			}, 5*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("verifying status resource names and address")
@@ -2566,6 +2572,45 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(ContainSubstring("submit-recommendation"))
 			}).Should(Succeed())
+		})
+
+		It("creates no monitoring resources when monitoring is disabled", func() {
+			// Creation-time gate only (matching the cluster monitoring
+			// phase): a CR born with monitoring off never gets the
+			// Service/ServiceMonitor.
+			noMonCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadAutoscaler
+metadata:
+  name: as-nomon
+  namespace: %s
+spec:
+  clusterRef:
+    name: %s
+  monitoring:
+    enabled: false
+`, namespace, asCluster)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(noMonCR)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() {
+				cmd := exec.Command("kubectl", "delete", "nomadautoscaler", "as-nomon", "-n", namespace,
+					"--ignore-not-found", "--timeout=2m")
+				_, _ = utils.Run(cmd)
+			}()
+
+			By("waiting for the agent Deployment (same reconcile pass decides monitoring)")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "as-nomon-autoscaler-agent", "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			for _, kind := range []string{"service", "servicemonitor"} {
+				cmd := exec.Command("kubectl", "get", kind, "as-nomon-autoscaler-metrics", "-n", namespace)
+				_, err := utils.Run(cmd)
+				Expect(err).To(HaveOccurred(), "%s must not be created with monitoring disabled", kind)
+			}
 		})
 
 		It("cleans up owned resources and Nomad ACL state on deletion", func() {

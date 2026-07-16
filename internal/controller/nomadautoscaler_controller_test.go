@@ -356,5 +356,32 @@ var _ = Describe("NomadAutoscaler Controller", func() {
 			err = k8sClient.Get(ctx, types.NamespacedName{Name: "shrink-autoscaler", Namespace: namespace}, pdb)
 			Expect(err).To(HaveOccurred(), "PDB must be deleted when HA mode is off")
 		})
+
+		It("should reconcile a cross-namespace clusterRef", func() {
+			// Cluster material (secrets, TLS) lives in the cluster's
+			// namespace; agent resources land in the autoscaler's.
+			agentNS := namespace + "-agent"
+			createTestNamespace(ctx, agentNS)
+
+			autoscaler = newTestAutoscaler(agentNS, "xns", "nomad")
+			autoscaler.Spec.ClusterRef.Namespace = namespace
+			Expect(k8sClient.Create(ctx, autoscaler)).To(Succeed())
+			nsName := types.NamespacedName{Name: autoscaler.Name, Namespace: agentNS}
+
+			reconcileToSteadyState(nsName)
+
+			By("agent HCL points at the cluster's namespace-local Service")
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns-autoscaler-config", Namespace: agentNS}, cm)).To(Succeed())
+			Expect(cm.Data["autoscaler.hcl"]).To(ContainSubstring(
+				fmt.Sprintf("https://nomad-internal.%s.svc:4646", namespace)))
+
+			By("token Secret and Deployment land in the autoscaler's namespace")
+			secret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns-autoscaler-token", Namespace: agentNS}, secret)).To(Succeed())
+			Expect(string(secret.Data["secret-id"])).To(Equal("test-secret"))
+			deploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "xns-autoscaler-agent", Namespace: agentNS}, deploy)).To(Succeed())
+		})
 	})
 })
