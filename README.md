@@ -9,7 +9,7 @@
 > API group used by CRDs in this project is a structural identifier inherited
 > from the Nomad ecosystem, not an endorsement or affiliation.
 
-A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise server clusters on OpenShift and Kubernetes. It manages the full lifecycle through two custom resources: `NomadCluster` for server clusters and `NomadSnapshot` for automated Raft snapshots.
+A Kubernetes operator for deploying and managing HashiCorp Nomad Enterprise server clusters on OpenShift and Kubernetes. It manages the full lifecycle through three custom resources: `NomadCluster` for server clusters, `NomadSnapshot` for automated Raft snapshots, and `NomadAutoscaler` for managed Nomad Autoscaler agents (horizontal application scaling and Dynamic Application Sizing).
 
 ## Contributing
 
@@ -54,8 +54,9 @@ cluster (sharding) is unsupported.
 
 ## Security posture
 
-All workloads — the operator, Nomad server pods, and snapshot agents —
-run under the Kubernetes Pod Security Standards **restricted** profile:
+All workloads — the operator, Nomad server pods, snapshot agents, and
+autoscaler agents — run under the Kubernetes Pod Security Standards
+**restricted** profile:
 non-root (explicit UID/fsGroup on vanilla Kubernetes; SCC-assigned on
 OpenShift), `RuntimeDefault` seccomp, no privilege escalation, all
 capabilities dropped, and read-only root filesystems with explicit
@@ -1191,7 +1192,8 @@ The full annotated sample is in
 
 ## Complete Example
 
-A production NomadCluster with TLS, ACLs, and a snapshot schedule:
+A production NomadCluster with TLS, ACLs, a snapshot schedule, and a
+managed autoscaler:
 
 ```yaml
 apiVersion: nomad.hashicorp.com/v1alpha1
@@ -1233,6 +1235,19 @@ spec:
   target:
     local:
       size: 10Gi
+---
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadAutoscaler
+metadata:
+  name: autoscaler
+spec:
+  clusterRef:
+    name: nomad-enterprise
+  replicas: 2
+  namespaces:
+    - default
+  monitoring:
+    enabled: true
 ```
 
 ## Observability
