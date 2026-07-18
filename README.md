@@ -189,7 +189,21 @@ The suggested namespace `nomad-enterprise-operator-system` will be pre-filled.
 
 ### Install with YAML manifests
 
-Build and apply the consolidated installer:
+For clusters without OLM, each release attaches a consolidated `install.yaml`
+containing the CRDs, RBAC, and operator Deployment pinned to that release's
+image. The manifest is self-contained — no webhooks, no cert-manager. Apply it
+directly:
+
+```sh
+kubectl apply -f https://github.com/benemon/nomad-enterprise-operator/releases/download/v<version>/install.yaml
+```
+
+To track the newest release instead of a pinned version, substitute
+`releases/latest/download/install.yaml`.
+
+To build the installer from a source checkout (for unreleased changes), pin the
+image explicitly — the Makefile default is a placeholder version that was never
+published:
 
 ```sh
 make build-installer IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v<version>

@@ -87,6 +87,11 @@ jobs:
             CATALOG_IMG=${{ env.IMAGE_TAG_BASE }}-catalog:v${{ env.VERSION }} \
             BUNDLE_IMGS=${{ env.IMAGE_TAG_BASE }}-bundle:v${{ env.VERSION }}
 
+      - name: Build installer manifest
+        run: |
+          make build-installer \
+            IMG=${{ env.IMAGE_TAG_BASE }}:v${{ env.VERSION }}
+
       - name: Create GitHub Release with generated notes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -97,3 +102,10 @@ jobs:
           gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
               --title "${GITHUB_REF_NAME}" --generate-notes ${PRERELEASE}
+
+      - name: Upload installer manifest to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/install.yaml \
+            --repo "${GITHUB_REPOSITORY}" --clobber
