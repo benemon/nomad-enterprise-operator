@@ -1,0 +1,56 @@
+# NomadAutoscaler for OpenShift - managed Nomad Autoscaler agents
+#
+# Deploys the Nomad Autoscaler against the referenced NomadCluster. The
+# operator automatically:
+#   - Provisions an ACL token with the autoscaler's required capabilities
+#     (and the app-sizing capability when DAS is enabled)
+#   - Deploys the agent with a generated configuration
+#   - Wires mTLS to the cluster using the same operator-managed CA
+#
+# OpenShift-specific behaviour:
+#   - monitoring.prometheusRulesEnabled emits a PrometheusRule that
+#     OpenShift user-workload-monitoring evaluates, surfacing the agent's
+#     scaling-error, stalled-evaluation, and agent-down alerts alongside
+#     the NomadCluster monitoring surface. Enable UWM on the cluster
+#     (enableUserWorkload: true in the cluster-monitoring-config) for the
+#     rules to be picked up.
+#
+apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadAutoscaler
+metadata:
+  name: autoscaler
+spec:
+  # References the comprehensive-sample cluster. Must live in the same
+  # namespace as this NomadAutoscaler (admission-enforced).
+  clusterRef:
+    name: nomad-enterprise
+
+  # Above 1, replicas form a leader-elected HA group; only the leader
+  # evaluates policies.
+  replicas: 2
+
+  # Nomad namespaces the agent may observe and scale ("*" for all).
+  namespaces:
+    - default
+
+  # Dynamic Application Sizing (Nomad Enterprise): sizing policies live in
+  # job specifications; enabling this wires the required ACL capability.
+  # Requires a Prometheus that scrapes the client agents' metrics (clients
+  # must set telemetry.publish_allocation_metrics). Point prometheusURL at
+  # that Prometheus - on OpenShift this is typically a user-workload
+  # Prometheus or a dedicated instance reachable from the agent namespace.
+  dynamicApplicationSizing:
+    enabled: true
+    prometheusURL: http://prometheus:9090
+
+  monitoring:
+    enabled: true
+    prometheusRulesEnabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
