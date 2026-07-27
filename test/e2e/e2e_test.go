@@ -3674,6 +3674,13 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(Equal("Ready"))
 			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+			// A cluster born with transit keyrings is phase Ready from its
+			// first reconcile, before the pod is scheduled — wait for the
+			// pod itself before exec'ing into it.
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready",
+				"pod/"+krB+"-0", "-n", namespace, "--timeout=120s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
 
 			By("NEGATIVE: a redacted aead snapshot must NOT decrypt on a virgin cluster")
 			cmd = exec.Command("sh", "-c", fmt.Sprintf(
