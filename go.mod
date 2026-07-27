@@ -3,7 +3,7 @@ module github.com/hashicorp/nomad-enterprise-operator
 go 1.26.0
 
 require (
-	github.com/go-logr/logr v1.4.3
+	github.com/go-logr/logr v1.4.4
 	github.com/hashicorp/hcl v1.0.1-vault-7
 	github.com/hashicorp/nomad/api v0.0.0-20260609230345-e9d7b7cc000c
 	github.com/hashicorp/vault/api v1.23.0
