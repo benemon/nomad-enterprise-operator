@@ -33,6 +33,7 @@ jobs:
       lane: full
     secrets:
       NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
+      VAULT_LICENSE: ${{ secrets.VAULT_LICENSE }}
 
   release:
     needs: test-e2e
