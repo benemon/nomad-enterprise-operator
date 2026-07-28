@@ -24,6 +24,8 @@ on:
     secrets:
       NOMAD_LICENSE:
         required: true
+      VAULT_LICENSE:
+        required: true
 
 permissions:
   contents: read
@@ -64,6 +66,9 @@ jobs:
       - name: Run e2e suite
         env:
           LANE: ${{ inputs.lane }}
+          # The keyring specs deploy Vault Enterprise dev pods; the
+          # suite feeds this into per-namespace vault-license Secrets.
+          VAULT_LICENSE: ${{ secrets.VAULT_LICENSE }}
         run: |
           go mod tidy
           # PR lane skips the slow containers (neo-g1o); lane=full clears

@@ -51,6 +51,10 @@ jobs:
           echo "${NOMAD_LICENSE}" > test/e2e/testdata/nomad.hclic
 
       - name: Run the full e2e suite
+        env:
+          # The keyring specs deploy Vault Enterprise dev pods; the
+          # suite feeds this into per-namespace vault-license Secrets.
+          VAULT_LICENSE: ${{ secrets.VAULT_LICENSE }}
         run: |
           go mod tidy
           # 'version upgrade' is skipped here because the upgrade-matrix

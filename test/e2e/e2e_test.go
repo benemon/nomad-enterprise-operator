@@ -56,6 +56,19 @@ const metricsRoleBindingName = "nomad-enterprise-operator-metrics-binding"
 // testClusterName is the name of the NomadCluster CR used in reconciliation tests
 const testClusterName = "test-cluster"
 
+// createVaultLicenseSecret creates the vault-license Secret in ns from
+// the VAULT_LICENSE env var (an Actions secret in CI, present for both
+// workflow and Dependabot runs). The Vault Enterprise dev pods the
+// keyring specs deploy reference it and will not start without one.
+func createVaultLicenseSecret(ns string) {
+	license := os.Getenv("VAULT_LICENSE")
+	Expect(license).NotTo(BeEmpty(),
+		"VAULT_LICENSE env var not set — the e2e Vault pods run Vault Enterprise and need a licence")
+	cmd := exec.Command("kubectl", "create", "secret", "generic", "vault-license",
+		"-n", ns, "--from-literal=license="+license)
+	_, _ = utils.Run(cmd)
+}
+
 // testSnapshotName is the name of the NomadSnapshot CR used in snapshot tests
 const testSnapshotName = "test-snapshot"
 
@@ -2851,14 +2864,16 @@ spec:
 		deployVault := func(ns string) {
 			cmd := exec.Command("kubectl", "create", "ns", ns)
 			_, _ = utils.Run(cmd)
+			createVaultLicenseSecret(ns)
 			vaultYAML := fmt.Sprintf(`apiVersion: v1
 kind: Pod
 metadata: {name: vault, namespace: %s, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault-enterprise:2.0-ent
     args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+    env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
 apiVersion: v1
 kind: Service
@@ -3045,14 +3060,16 @@ spec:
 			By("deploying Vault with transit and kubernetes auth (reviewer JWT mode)")
 			cmd := exec.Command("kubectl", "create", "ns", "e2e-vault")
 			_, _ = utils.Run(cmd)
+			createVaultLicenseSecret("e2e-vault")
 			vaultYAML := `apiVersion: v1
 kind: Pod
 metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault-enterprise:2.0-ent
     args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+    env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
 apiVersion: v1
 kind: Service
@@ -3557,14 +3574,16 @@ spec:
 			By("deploying a Vault dev pod with a transit key")
 			cmd := exec.Command("kubectl", "create", "ns", "e2e-vault")
 			_, _ = utils.Run(cmd)
+			createVaultLicenseSecret("e2e-vault")
 			vaultYAML := `apiVersion: v1
 kind: Pod
 metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault-enterprise:2.0-ent
     args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+    env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
 apiVersion: v1
 kind: Service
@@ -3805,6 +3824,7 @@ spec:
 		deployVault := func(ns string, devTLS bool) {
 			cmd := exec.Command("kubectl", "create", "ns", ns)
 			_, _ = utils.Run(cmd)
+			createVaultLicenseSecret(ns)
 			args, addr := `["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]`,
 				"http://127.0.0.1:8200"
 			if devTLS {
@@ -3817,8 +3837,9 @@ metadata: {name: vault, namespace: %s, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault-enterprise:2.0-ent
     args: %s
+    env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
 apiVersion: v1
 kind: Service
