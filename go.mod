@@ -12,7 +12,7 @@ require (
 	github.com/openshift/api v0.0.0-20260610173709-6dc0643171ce
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.93.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
@@ -85,7 +85,7 @@ require (
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/stretchr/objx v0.5.2 // indirect
+	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.65.0 // indirect
