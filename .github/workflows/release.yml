@@ -9,7 +9,50 @@ env:
   IMAGE_TAG_BASE: quay.io/benjamin_holmes/nomad-enterprise-operator
 
 jobs:
+  # Releases must not ship a stale default operand. Fails when a newer
+  # Nomad exists whose -ent image is published; the message says whether
+  # the fix is a default bump (patch) or also a new upgrade-matrix pair
+  # (minor). Ent tags can lag the OSS release, so a missing image is a
+  # notice, not a failure.
+  operand-currency:
+    name: Operand version currency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v7
+
+      - name: Compare default operand tag against latest Nomad release
+        run: |
+          default_version=$(sed -n 's/.*kubebuilder:default="\([0-9][0-9.]*\)-ent".*/\1/p' \
+            api/v1alpha1/nomadcluster_types.go | head -1)
+          if [ -z "$default_version" ]; then
+            echo "::error::could not extract the default operand tag from nomadcluster_types.go"
+            exit 1
+          fi
+          current_version=$(curl -fsS https://checkpoint-api.hashicorp.com/v1/check/nomad | jq -r .current_version)
+          echo "default operand: ${default_version}-ent / latest Nomad: ${current_version}"
+          if [ "$default_version" = "$current_version" ]; then
+            echo "default operand is current"
+            exit 0
+          fi
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:hashicorp/nomad:pull" | jq -r .token)
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json" \
+            "https://registry-1.docker.io/v2/hashicorp/nomad/manifests/${current_version}-ent")
+          if [ "$code" != "200" ]; then
+            echo "::notice::Nomad ${current_version} is out but hashicorp/nomad:${current_version}-ent is not on Docker Hub yet (HTTP ${code}); releasing with ${default_version}-ent"
+            exit 0
+          fi
+          if [ "${default_version%.*}" = "${current_version%.*}" ]; then
+            echo "::error::stale default operand: ${default_version}-ent pinned, ${current_version}-ent available (patch release — bump the default tag, regenerate manifests and the schema snapshot, update image assertions)"
+          else
+            echo "::error::stale default operand: ${default_version}-ent pinned, ${current_version}-ent available (new minor — bump the default tag AND append the consecutive upgrade-matrix pair in nightly-e2e.yml)"
+          fi
+          exit 1
+
   lint:
+    needs: operand-currency
     uses: ./.github/workflows/lint.yml
 
   test:
