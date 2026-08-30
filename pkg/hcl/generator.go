@@ -112,6 +112,7 @@ type templateData struct {
 	EvalGCThreshold        string
 	Autopilot              autopilotData
 	Keyrings               []KeyringBlock
+	Vaults                 []nomadv1alpha1.VaultEntry
 }
 
 type autopilotData struct {
@@ -171,6 +172,7 @@ func (g *Generator) buildTemplateData() templateData {
 		JobGCThreshold:       cluster.Spec.Server.GC.JobHistory,
 		BatchEvalGCThreshold: cluster.Spec.Server.GC.BatchEvalHistory,
 		EvalGCThreshold:      cluster.Spec.Server.GC.EvalHistory,
+		Vaults:               cluster.Spec.Server.Vaults,
 		// Autopilot is operator-owned per ADR 0003: cleanup_dead_servers
 		// must stay true for Serf cleanup delegation (AC-2.3.4e); the
 		// thresholds are Nomad's own defaults.
@@ -321,6 +323,29 @@ keyring "{{ .Type }}" {
   active = {{ .Active }}
 {{- range .Args }}
   {{ .Key }} = "{{ .Value }}"
+{{- end }}
+}
+{{- end }}
+{{- range .Vaults }}
+
+vault {
+  enabled = true
+  name    = {{ printf "%q" .Name }}
+{{- with .DefaultIdentity }}
+
+  default_identity {
+    aud = [{{- range $i, $aud := .Audiences }}{{ if $i }}, {{ end }}{{ printf "%q" $aud }}{{- end }}]
+{{- if .TTL }}
+    ttl = {{ printf "%q" .TTL }}
+{{- end }}
+{{- if .ExtraClaims }}
+    extra_claims {
+{{- range $key, $value := .ExtraClaims }}
+      {{ printf "%q" $key }} = {{ printf "%q" $value }}
+{{- end }}
+    }
+{{- end }}
+  }
 {{- end }}
 }
 {{- end }}

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	hclparser "github.com/hashicorp/hcl"
 	"k8s.io/utils/ptr"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -530,4 +531,116 @@ func TestGenerateKeyringBlocks(t *testing.T) {
 			t.Errorf("rendered HCL missing %q", want)
 		}
 	}
+}
+
+func TestGenerateVaultBlocks(t *testing.T) {
+	newGenerator := func(vaults []nomadv1alpha1.VaultEntry) *Generator {
+		return NewGenerator(&nomadv1alpha1.NomadCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "vault", Namespace: "ns"},
+			Spec: nomadv1alpha1.NomadClusterSpec{
+				Server: nomadv1alpha1.ServerSpec{Vaults: vaults},
+			},
+		}, "10.0.0.1", "key==")
+	}
+
+	t.Run("unset emits no stanza", func(t *testing.T) {
+		out, err := newGenerator(nil).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "vault {") {
+			t.Fatal("no vault stanza expected when unset")
+		}
+	})
+
+	t.Run("entry without default identity", func(t *testing.T) {
+		out, err := newGenerator([]nomadv1alpha1.VaultEntry{{Name: "default"}}).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "vault {\n  enabled = true\n  name    = \"default\"\n}") {
+			t.Fatalf("vault stanza mismatch:\n%s", out)
+		}
+		if strings.Count(out, "vault {") != 1 {
+			t.Fatalf("vault stanza count = %d, want 1", strings.Count(out, "vault {"))
+		}
+		if strings.Contains(out, "default_identity {") {
+			t.Fatal("default_identity must be omitted when unset")
+		}
+	})
+
+	t.Run("full entry is deterministic", func(t *testing.T) {
+		g := newGenerator([]nomadv1alpha1.VaultEntry{{
+			Name: "default",
+			DefaultIdentity: &nomadv1alpha1.VaultDefaultIdentity{
+				Audiences: []string{"vault.io", "nomad.example"},
+				TTL:       "1h",
+				ExtraClaims: map[string]string{
+					"z_claim": "${alloc.id}",
+					"a_claim": "${job.id}",
+				},
+			},
+		}})
+		first, err := g.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := g.Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first != second {
+			t.Fatal("identical vault config rendered different output")
+		}
+		for _, want := range []string{
+			`name    = "default"`,
+			`aud = ["vault.io", "nomad.example"]`,
+			`ttl = "1h"`,
+			"extra_claims {",
+			`"a_claim" = "${job.id}"`,
+			`"z_claim" = "${alloc.id}"`,
+		} {
+			if !strings.Contains(first, want) {
+				t.Errorf("rendered HCL missing %q", want)
+			}
+		}
+		if strings.Index(first, `"a_claim" =`) > strings.Index(first, `"z_claim" =`) {
+			t.Fatal("extra_claims keys are not sorted")
+		}
+	})
+
+	t.Run("multiple entries", func(t *testing.T) {
+		out, err := newGenerator([]nomadv1alpha1.VaultEntry{
+			{Name: "default"},
+			{Name: "secondary"},
+		}).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(out, "vault {") != 2 {
+			t.Fatalf("vault stanza count = %d, want 2", strings.Count(out, "vault {"))
+		}
+		for _, name := range []string{"default", "secondary"} {
+			if !strings.Contains(out, `name    = "`+name+`"`) {
+				t.Errorf("missing vault %q", name)
+			}
+		}
+	})
+
+	t.Run("rendered HCL parses", func(t *testing.T) {
+		out, err := newGenerator([]nomadv1alpha1.VaultEntry{{
+			Name: "default",
+			DefaultIdentity: &nomadv1alpha1.VaultDefaultIdentity{
+				Audiences:   []string{"vault.io"},
+				TTL:         "1h",
+				ExtraClaims: map[string]string{"job": "${job.id}"},
+			},
+		}}).Generate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := hclparser.Parse(out); err != nil {
+			t.Fatalf("rendered HCL does not parse: %v\n%s", err, out)
+		}
+	})
 }

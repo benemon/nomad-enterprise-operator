@@ -291,6 +291,51 @@ type ServerSpec struct {
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	Keyrings []KeyringEntry `json:"keyrings,omitempty"`
+
+	// Vaults declares Vault clusters for workload identity federation.
+	// Presence enables admission of jobs carrying vault blocks; the flow
+	// is secret-free — servers never authenticate to Vault (clients hold
+	// address/auth config and are out of operator scope). Multiple
+	// entries and non-"default" names are Nomad Enterprise capabilities.
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Vaults []VaultEntry `json:"vaults,omitempty"`
+}
+
+// VaultEntry declares one Vault cluster.
+type VaultEntry struct {
+	// Name is the cluster name jobs reference via vault.cluster;
+	// "default" serves jobs that do not specify one.
+	// +kubebuilder:default="default"
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9_-]*$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+
+	// DefaultIdentity injects a workload identity into tasks whose
+	// vault block does not declare its own. env/file exposure is
+	// deliberately not configurable here — tasks needing the raw JWT
+	// declare a jobspec identity block.
+	// +optional
+	DefaultIdentity *VaultDefaultIdentity `json:"defaultIdentity,omitempty"`
+}
+
+// VaultDefaultIdentity is the identity injected by default_identity.
+type VaultDefaultIdentity struct {
+	// Audiences must match the JWT auth method's bound_audiences.
+	// +kubebuilder:validation:MinItems=1
+	Audiences []string `json:"audiences"`
+
+	// TTL bounds the identity JWT's validity. Nomad duration, e.g. "1h".
+	// +kubebuilder:validation:Pattern=`^[0-9]+(s|m|h)([0-9]+(s|m|h))*$`
+	// +optional
+	TTL string `json:"ttl,omitempty"`
+
+	// ExtraClaims adds claims to the identity; values may use Nomad
+	// interpolation (${job.id}, ${alloc.id}, ...).
+	// +optional
+	ExtraClaims map[string]string `json:"extraClaims,omitempty"`
 }
 
 // KeyringEntry names one KMS keyring. Exactly one provider block must

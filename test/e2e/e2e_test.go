@@ -38,6 +38,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	operatortls "github.com/hashicorp/nomad-enterprise-operator/pkg/tls"
 	"github.com/hashicorp/nomad-enterprise-operator/test/utils"
 )
 
@@ -67,6 +68,43 @@ func createVaultLicenseSecret(ns string) {
 	cmd := exec.Command("kubectl", "create", "secret", "generic", "vault-license",
 		"-n", ns, "--from-literal=license="+license)
 	_, _ = utils.Run(cmd)
+}
+
+func deployVault(ns string) {
+	cmd := exec.Command("kubectl", "create", "ns", ns)
+	_, _ = utils.Run(cmd)
+	createVaultLicenseSecret(ns)
+	vaultYAML := fmt.Sprintf(`apiVersion: v1
+kind: Pod
+metadata: {name: vault, namespace: %s, labels: {app: vault}}
+spec:
+  containers:
+  - name: vault
+    image: hashicorp/vault-enterprise:2.0-ent
+    args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
+    env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vault, namespace: %s}
+spec:
+  selector: {app: vault}
+  ports: [{port: 8200, targetPort: 8200}]
+`, ns, ns)
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(vaultYAML)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred())
+	cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", ns, "--timeout=120s")
+	_, err = utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "exec", "vault", "-n", ns, "--", "sh", "-c",
+			"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+
+				"vault secrets enable transit || true; vault write -f transit/keys/nomad-keyring")
+		_, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+	}, 90*time.Second, 5*time.Second).Should(Succeed())
 }
 
 // testSnapshotName is the name of the NomadSnapshot CR used in snapshot tests
@@ -116,6 +154,14 @@ spec:
       enabled: true
     audit:
       enabled: true
+    vaults:
+    - defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
+    - name: secondary
+      defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
 `
 
 // stripLeftoverFinalizers force-clears finalizers on any remaining
@@ -707,6 +753,11 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(output).To(ContainSubstring("autopilot {"), "missing autopilot block")
 			Expect(output).To(ContainSubstring("cleanup_dead_servers"), "missing cleanup_dead_servers")
 
+			By("verifying Vault workload identity configuration in HCL")
+			Expect(output).To(ContainSubstring("vault {"), "missing vault block")
+			Expect(output).To(ContainSubstring(`name    = "default"`), "missing default vault name")
+			Expect(output).To(ContainSubstring(`aud = ["vault.io"]`), "missing Vault workload identity audience")
+
 			By("verifying telemetry configuration in HCL")
 			Expect(output).To(ContainSubstring("telemetry {"), "missing telemetry block")
 			Expect(output).To(ContainSubstring("prometheus_metrics"), "missing prometheus_metrics")
@@ -915,6 +966,96 @@ var _ = Describe("Manager", Ordered, func() {
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).NotTo(BeEmpty(), "operator management secret should contain a non-empty secret-id")
+		})
+
+		It("registers a job carrying a Vault block", func() {
+			By("reading the operator management token")
+			cmd := exec.Command("kubectl", "get", "secret", testClusterName+"-operator-management", "-n", namespace,
+				"-o", "jsonpath={.data.secret-id}")
+			encodedToken, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			token, err := base64.StdEncoding.DecodeString(encodedToken)
+			Expect(err).NotTo(HaveOccurred())
+
+			job := `job "vault-wi-admission" {
+  type = "batch"
+
+  group "test" {
+    task "test" {
+      driver = "raw_exec"
+
+      config {
+        command = "/bin/true"
+      }
+
+      vault {
+        role = "e2e-dummy"
+      }
+    }
+  }
+}
+`
+			By("registering the job without contacting Vault")
+			cmd = exec.Command("kubectl", "exec", "-i", testClusterName+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "job", "run", "-detach", "-")
+			cmd.Stdin = strings.NewReader(job)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Vault job registration failed: %s", output)
+
+			cmd = exec.Command("kubectl", "exec", testClusterName+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "job", "stop", "-purge", "vault-wi-admission")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to purge Vault admission job: %s", output)
+		})
+
+		It("admits jobs for declared Vault clusters and rejects undeclared clusters", func() {
+			cmd := exec.Command("kubectl", "get", "secret", testClusterName+"-operator-management", "-n", namespace,
+				"-o", "jsonpath={.data.secret-id}")
+			encodedToken, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			token, err := base64.StdEncoding.DecodeString(encodedToken)
+			Expect(err).NotTo(HaveOccurred())
+
+			secondaryJob := `job "vault-wi-secondary-admission" {
+  type = "batch"
+
+  group "test" {
+    task "test" {
+      driver = "raw_exec"
+
+      config {
+        command = "/bin/true"
+      }
+
+      vault {
+        cluster = "secondary"
+        role    = "e2e-dummy"
+      }
+    }
+  }
+}
+`
+			By("registering a job against the declared secondary Vault cluster")
+			cmd = exec.Command("kubectl", "exec", "-i", testClusterName+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "job", "run", "-detach", "-")
+			cmd.Stdin = strings.NewReader(secondaryJob)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "secondary Vault job registration failed: %s", output)
+
+			cmd = exec.Command("kubectl", "exec", testClusterName+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "job", "stop", "-purge", "vault-wi-secondary-admission")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to purge secondary Vault admission job: %s", output)
+
+			absentJob := strings.ReplaceAll(secondaryJob, "vault-wi-secondary-admission", "vault-wi-absent-admission")
+			absentJob = strings.ReplaceAll(absentJob, `cluster = "secondary"`, `cluster = "absent"`)
+			By("rejecting a job against an undeclared Vault cluster")
+			cmd = exec.Command("kubectl", "exec", "-i", testClusterName+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "job", "run", "-detach", "-")
+			cmd.Stdin = strings.NewReader(absentJob)
+			output, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "undeclared Vault cluster job unexpectedly registered: %s", output)
+			Expect(output).To(ContainSubstring("absent"))
 		})
 
 		It("should enrich status with Nomad API data", func() {
@@ -2861,43 +3002,6 @@ spec:
 `, name, ns, prefix, tokenSecret)
 		}
 
-		deployVault := func(ns string) {
-			cmd := exec.Command("kubectl", "create", "ns", ns)
-			_, _ = utils.Run(cmd)
-			createVaultLicenseSecret(ns)
-			vaultYAML := fmt.Sprintf(`apiVersion: v1
-kind: Pod
-metadata: {name: vault, namespace: %s, labels: {app: vault}}
-spec:
-  containers:
-  - name: vault
-    image: hashicorp/vault-enterprise:2.0-ent
-    args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
-    env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
----
-apiVersion: v1
-kind: Service
-metadata: {name: vault, namespace: %s}
-spec:
-  selector: {app: vault}
-  ports: [{port: 8200, targetPort: 8200}]
-`, ns, ns)
-			cmd = exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(vaultYAML)
-			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/vault", "-n", ns, "--timeout=120s")
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			Eventually(func(g Gomega) {
-				cmd := exec.Command("kubectl", "exec", "vault", "-n", ns, "--", "sh", "-c",
-					"export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=e2e-root; "+
-						"vault secrets enable transit || true; vault write -f transit/keys/nomad-keyring")
-				_, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-			}, 90*time.Second, 5*time.Second).Should(Succeed())
-		}
-
 		BeforeAll(func() {
 			By("deploying TWO independent Vault clusters")
 			deployVault("e2e-vault")
@@ -2978,6 +3082,391 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(out).To(ContainSubstring("hotel345"))
 			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+		})
+	})
+
+	Context("Vault workload identity federation", Ordered, func() {
+		const wiCluster = "vault-wi"
+		// The client fixture needs a privileged root pod (writable
+		// cgroups), which the operator namespace's restricted
+		// PodSecurity label forbids — so it lives in its own namespace,
+		// like the Vault pods.
+		const wiClientNS = "e2e-nomad-client"
+
+		BeforeAll(func() {
+			By("deploying two independent Vault Enterprise clusters")
+			deployVault("e2e-vault")
+			deployVault("e2e-vault2")
+
+			clusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "2.0.4-ent"
+  license:
+    secretName: nomad-license
+  topology:
+    datacenter: dc1
+  services:
+    external:
+      type: NodePort
+  server:
+    acl:
+      enabled: false
+    vaults:
+    - name: default
+      defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
+    - name: secondary
+      defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
+`, wiCluster, namespace)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create workload identity cluster: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", wiCluster, "-n", namespace,
+					"-o", "jsonpath={.status.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Running"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("minting a Nomad client certificate from the operator CA")
+			cmd = exec.Command("kubectl", "get", "secret", wiCluster+"-ca", "-n", namespace,
+				"-o", `jsonpath={.data.tls\.crt}`)
+			encodedCACert, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			caCert, err := base64.StdEncoding.DecodeString(encodedCACert)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "get", "secret", wiCluster+"-ca", "-n", namespace,
+				"-o", `jsonpath={.data.tls\.key}`)
+			encodedCAKey, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			caKey, err := base64.StdEncoding.DecodeString(encodedCAKey)
+			Expect(err).NotTo(HaveOccurred())
+			clientCert, err := operatortls.IssueCertificate(&operatortls.CABundle{
+				CACertPEM: caCert,
+				CAKeyPEM:  caKey,
+			}, operatortls.CertificateRequest{
+				CommonName: "client.global.nomad",
+				TTL:        24 * time.Hour,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			clientConfig := fmt.Sprintf(`region = "global"
+datacenter = "dc1"
+data_dir = "/nomad/data"
+bind_addr = "0.0.0.0"
+
+client {
+  enabled = true
+
+  server_join {
+    retry_join = ["%s-0.%s-headless.%s.svc.cluster.local"]
+    retry_interval = "5s"
+    retry_max = 0
+  }
+}
+
+plugin "raw_exec" {
+  config {
+    enabled = true
+  }
+}
+
+tls {
+  http = true
+  rpc  = true
+
+  ca_file   = "/nomad/tls/ca.crt"
+  cert_file = "/nomad/tls/tls.crt"
+  key_file  = "/nomad/tls/tls.key"
+
+  verify_server_hostname = true
+  verify_https_client    = false
+}
+
+vault {
+  enabled               = true
+  name                  = "default"
+  address               = "http://vault.e2e-vault.svc.cluster.local:8200"
+  jwt_auth_backend_path = "nomad-workloads"
+}
+
+vault {
+  enabled               = true
+  name                  = "secondary"
+  address               = "http://vault.e2e-vault2.svc.cluster.local:8200"
+  namespace             = "team-a"
+  jwt_auth_backend_path = "nomad-workloads"
+}
+`, wiCluster, wiCluster, namespace)
+			clientYAML := fmt.Sprintf(`apiVersion: v1
+kind: Secret
+metadata:
+  name: %s-client
+  namespace: %s
+type: Opaque
+data:
+  client.hcl: %s
+  ca.crt: %s
+  tls.crt: %s
+  tls.key: %s
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s-client
+  namespace: %s
+spec:
+  containers:
+  - name: nomad
+    image: hashicorp/nomad:2.0.4-ent
+    command: ["nomad"]
+    args: ["agent", "-config=/nomad/config/client.hcl"]
+    # Clients need no license. Privileged root for writable cgroups (why
+    # client-in-container is unsupported for production); acceptable for
+    # a disposable fixture.
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - name: client-config
+      mountPath: /nomad/config
+      readOnly: true
+    - name: client-tls
+      mountPath: /nomad/tls
+      readOnly: true
+    - name: client-data
+      mountPath: /nomad/data
+  volumes:
+  - name: client-config
+    secret:
+      secretName: %s-client
+      items:
+      - key: client.hcl
+        path: client.hcl
+  - name: client-tls
+    secret:
+      secretName: %s-client
+      items:
+      - key: ca.crt
+        path: ca.crt
+      - key: tls.crt
+        path: tls.crt
+      - key: tls.key
+        path: tls.key
+  - name: client-data
+    emptyDir: {}
+`, wiCluster, wiClientNS, base64Encode([]byte(clientConfig)), base64Encode(clientCert.CACertPEM),
+				base64Encode(clientCert.CertPEM), base64Encode(clientCert.KeyPEM), wiCluster, wiClientNS,
+				wiCluster, wiCluster)
+			cmd = exec.Command("kubectl", "create", "ns", wiClientNS)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clientYAML)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create Nomad client fixture: %s", output)
+			DeferCleanup(func() {
+				out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous=false",
+					"pod/"+wiCluster+"-client", "-n", wiClientNS))
+				_, _ = fmt.Fprintf(GinkgoWriter, "vault-wi client pod logs:\n%s\n", out)
+			})
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/"+wiCluster+"-client", "-n", wiClientNS,
+				"--timeout=180s")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Nomad client pod did not become Ready: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
+					"nomad", "node", "status", "-json"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(ContainSubstring(`"Status": "ready"`))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("creating the second Nomad namespace")
+			output, err = utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
+				"nomad", "namespace", "apply", "-description", "Vault workload identity e2e", "team-b"))
+			Expect(err).NotTo(HaveOccurred(), "failed to create Nomad namespace: %s", output)
+
+			By("creating the Vault Enterprise namespace")
+			output, err = utils.Run(exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault2", "--",
+				"env", "VAULT_ADDR=http://127.0.0.1:8200", "VAULT_TOKEN=e2e-root",
+				"vault", "namespace", "create", "team-a"))
+			Expect(err).NotTo(HaveOccurred(), "failed to create Vault namespace: %s", output)
+
+			jwksURL := fmt.Sprintf("https://%s-internal.%s.svc.cluster.local:4646/.well-known/jwks.json", wiCluster, namespace)
+			vaultSetups := []struct {
+				kubeNamespace  string
+				vaultNamespace string
+				nomadNamespace string
+				jobID          string
+				role           string
+				policy         string
+				secretValue    string
+			}{
+				{"e2e-vault", "", "default", "vault-wi-default", "nomad-default", "vault-wi-default", "root-secret"},
+				{"e2e-vault2", "team-a", "team-b", "vault-wi-secondary", "nomad-secondary", "vault-wi-secondary", "team-a-secret"},
+			}
+			for _, setup := range vaultSetups {
+				By("configuring JWT workload identity in " + setup.kubeNamespace + "/" + setup.vaultNamespace)
+				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
+					"sh", "-c", "cat >/tmp/nomad-ca.pem")
+				cmd.Stdin = strings.NewReader(string(caCert))
+				output, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "failed to install Nomad CA in Vault pod: %s", output)
+
+				vaultEnv := []string{"VAULT_ADDR=http://127.0.0.1:8200", "VAULT_TOKEN=e2e-root"}
+				if setup.vaultNamespace != "" {
+					vaultEnv = append(vaultEnv, "VAULT_NAMESPACE="+setup.vaultNamespace)
+				}
+				args := append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+				args = append(args, "vault", "auth", "enable", "-path=nomad-workloads", "jwt")
+				output, err = utils.Run(exec.Command("kubectl", args...))
+				Expect(err).NotTo(HaveOccurred(), "failed to enable Vault JWT auth: %s", output)
+
+				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+				args = append(args, "vault", "write", "auth/nomad-workloads/config",
+					"jwks_url="+jwksURL, "jwks_ca_pem=@/tmp/nomad-ca.pem")
+				output, err = utils.Run(exec.Command("kubectl", args...))
+				Expect(err).NotTo(HaveOccurred(), "failed to configure Vault JWT auth: %s", output)
+
+				policy := `path "secret/data/e2e" { capabilities = ["read"] }`
+				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
+					"sh", "-c", "cat >/tmp/nomad-policy.hcl")
+				cmd.Stdin = strings.NewReader(policy)
+				output, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "failed to write Vault policy file: %s", output)
+				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+				args = append(args, "vault", "policy", "write", setup.policy, "/tmp/nomad-policy.hcl")
+				output, err = utils.Run(exec.Command("kubectl", args...))
+				Expect(err).NotTo(HaveOccurred(), "failed to write Vault policy: %s", output)
+
+				role := fmt.Sprintf(`{"role_type":"jwt","bound_audiences":["vault.io"],`+
+					`"bound_claims":{"nomad_namespace":"%s","nomad_job_id":"%s"},`+
+					`"user_claim":"/nomad_job_id","user_claim_json_pointer":true,`+
+					`"token_type":"service","token_policies":["%s"],`+
+					`"token_period":"30m","token_explicit_max_ttl":0}`,
+					setup.nomadNamespace, setup.jobID, setup.policy)
+				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
+					"sh", "-c", "cat >/tmp/nomad-role.json")
+				cmd.Stdin = strings.NewReader(role)
+				output, err = utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "failed to write Vault role file: %s", output)
+				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+				args = append(args, "vault", "write", "auth/nomad-workloads/role/"+setup.role, "@/tmp/nomad-role.json")
+				output, err = utils.Run(exec.Command("kubectl", args...))
+				Expect(err).NotTo(HaveOccurred(), "failed to write Vault JWT role: %s", output)
+
+				if setup.vaultNamespace != "" {
+					// A fresh Vault namespace has no secrets engines; dev
+					// mode mounts secret/ in the root namespace only.
+					args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+					args = append(args, "vault", "secrets", "enable", "-path=secret", "-version=2", "kv")
+					output, err = utils.Run(exec.Command("kubectl", args...))
+					Expect(err).NotTo(HaveOccurred(), "failed to enable KV engine in Vault namespace: %s", output)
+				}
+
+				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+				args = append(args, "vault", "kv", "put", "secret/e2e", "value="+setup.secretValue)
+				output, err = utils.Run(exec.Command("kubectl", args...))
+				Expect(err).NotTo(HaveOccurred(), "failed to write Vault test secret: %s", output)
+			}
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadcluster", wiCluster, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "ns", wiClientNS, "--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
+				"-l", "app.kubernetes.io/instance="+wiCluster, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			for _, ns := range []string{"e2e-vault", "e2e-vault2"} {
+				cmd = exec.Command("kubectl", "delete", "ns", ns, "--ignore-not-found", "--timeout=2m")
+				_, _ = utils.Run(cmd)
+			}
+		})
+
+		It("renders secrets through both Vault clusters in two Nomad namespaces", func() {
+			jobs := []struct {
+				id          string
+				namespace   string
+				vaultBlock  string
+				secretValue string
+			}{
+				{"vault-wi-default", "default", `role = "nomad-default"`, "root-secret"},
+				{"vault-wi-secondary", "team-b", `cluster = "secondary"
+        role = "nomad-secondary"`, "team-a-secret"},
+			}
+			for _, testJob := range jobs {
+				job := fmt.Sprintf(`job "%s" {
+  namespace = "%s"
+  datacenters = ["dc1"]
+
+  group "test" {
+    task "reader" {
+      driver = "raw_exec"
+
+      config {
+        command = "/bin/sh"
+        args = ["-c", "while true; do sleep 30; done"]
+      }
+
+      vault {
+        %s
+      }
+
+      template {
+        data = <<EOH
+{{ with secret "secret/data/e2e" }}{{ .Data.data.value }}{{ end }}
+EOH
+        destination = "local/value"
+      }
+    }
+  }
+}
+`, testJob.id, testJob.namespace, testJob.vaultBlock)
+				By("registering " + testJob.id + " without an identity block")
+				cmd := exec.Command("kubectl", "exec", "-i", wiCluster+"-0", "-n", namespace, "--",
+					"nomad", "job", "run", "-detach", "-")
+				cmd.Stdin = strings.NewReader(job)
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred(), "workload identity job registration failed: %s", output)
+
+				var allocID string
+				Eventually(func(g Gomega) {
+					out, err := utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
+						"nomad", "job", "allocs", "-namespace="+testJob.namespace, "-json", testJob.id))
+					g.Expect(err).NotTo(HaveOccurred())
+					var allocs []struct {
+						ID           string `json:"ID"`
+						ClientStatus string `json:"ClientStatus"`
+					}
+					g.Expect(json.Unmarshal([]byte(out), &allocs)).To(Succeed())
+					g.Expect(allocs).NotTo(BeEmpty())
+					g.Expect(allocs[0].ClientStatus).To(Equal("running"))
+					allocID = allocs[0].ID
+				}, 4*time.Minute, 5*time.Second).Should(Succeed())
+
+				By("reading the template-rendered secret from allocation " + allocID)
+				output, err = utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
+					"nomad", "alloc", "exec", "-namespace="+testJob.namespace, "-task=reader", allocID,
+					"cat", "local/value"))
+				Expect(err).NotTo(HaveOccurred(), "failed to read rendered Vault secret: %s", output)
+				Expect(strings.TrimSpace(output)).To(Equal(testJob.secretValue))
+
+				output, err = utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
+					"nomad", "job", "stop", "-purge", "-namespace="+testJob.namespace, testJob.id))
+				Expect(err).NotTo(HaveOccurred(), "failed to purge workload identity job: %s", output)
+			}
 		})
 	})
 
