@@ -3222,13 +3222,6 @@ metadata:
   name: %s-client
   namespace: %s
 spec:
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-    seccompProfile:
-      type: RuntimeDefault
   containers:
   - name: nomad
     image: hashicorp/nomad:2.0.4-ent
@@ -3240,10 +3233,10 @@ spec:
         secretKeyRef:
           name: nomad-license
           key: license
+    # The client needs root and writable cgroups (why client-in-container
+    # is unsupported for production); acceptable for a disposable fixture.
     securityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: ["ALL"]
+      privileged: true
     volumeMounts:
     - name: client-config
       mountPath: /nomad/config
@@ -3279,6 +3272,11 @@ spec:
 			cmd.Stdin = strings.NewReader(clientYAML)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "failed to create Nomad client fixture: %s", output)
+			DeferCleanup(func() {
+				out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous=false",
+					"pod/"+wiCluster+"-client", "-n", namespace))
+				_, _ = fmt.Fprintf(GinkgoWriter, "vault-wi client pod logs:\n%s\n", out)
+			})
 			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/"+wiCluster+"-client", "-n", namespace,
 				"--timeout=180s")
 			output, err = utils.Run(cmd)
@@ -3348,7 +3346,11 @@ spec:
 				output, err = utils.Run(exec.Command("kubectl", args...))
 				Expect(err).NotTo(HaveOccurred(), "failed to write Vault policy: %s", output)
 
-				role := fmt.Sprintf(`{"role_type":"jwt","bound_audiences":["vault.io"],"bound_claims":{"nomad_namespace":"%s","nomad_job_id":"%s"},"user_claim":"/nomad_job_id","user_claim_json_pointer":true,"token_type":"service","token_policies":["%s"],"token_period":"30m","token_explicit_max_ttl":0}`,
+				role := fmt.Sprintf(`{"role_type":"jwt","bound_audiences":["vault.io"],`+
+					`"bound_claims":{"nomad_namespace":"%s","nomad_job_id":"%s"},`+
+					`"user_claim":"/nomad_job_id","user_claim_json_pointer":true,`+
+					`"token_type":"service","token_policies":["%s"],`+
+					`"token_period":"30m","token_explicit_max_ttl":0}`,
 					setup.nomadNamespace, setup.jobID, setup.policy)
 				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
 					"sh", "-c", "cat >/tmp/nomad-role.json")
