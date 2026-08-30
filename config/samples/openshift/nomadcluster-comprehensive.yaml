@@ -7,6 +7,7 @@
 #   - Audit logging with persistent storage
 #   - OpenShift Route with reencrypt TLS termination (auto-configured when TLS enabled)
 #   - ServiceMonitor and PrometheusRule for observability
+#   - Vault workload identity declaration with a default identity
 #   - Custom resource limits for production workloads
 #
 apiVersion: nomad.hashicorp.com/v1alpha1
@@ -60,6 +61,16 @@ spec:
   server:
     acl:
       enabled: true
+    # Vault workload identity: declares the Vault cluster so jobs with
+    # vault{} blocks admit, and stamps a default identity into tasks
+    # that declare none. Secret-free — servers never authenticate to
+    # Vault; client-side address/auth config is out of operator scope.
+    # Safe without a reachable Vault (admission-only). See the README's
+    # Vault Workload Identity section for the Vault-side JWKS setup.
+    vaults:
+    - defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
     # mTLS is always enabled. The operator generates CA and all certificates.
     # To use your own CA (e.g. from Vault PKI):
     # tls:
