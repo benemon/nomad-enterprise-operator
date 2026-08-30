@@ -268,8 +268,9 @@ make undeploy
 Server-scoped configuration is split across the subsections below:
 [TLS](#tls-specservertls), [ACL](#acl-specserveracl),
 [Audit](#audit-specserveraudit),
-[Garbage Collection](#garbage-collection-specservergc), and
-[Keyrings](#keyrings-specserverkeyrings).
+[Garbage Collection](#garbage-collection-specservergc),
+[Keyrings](#keyrings-specserverkeyrings), and
+[Vault Workload Identity](#vault-workload-identity-specservervaults).
 
 ### TLS (`spec.server.tls`)
 
@@ -500,6 +501,91 @@ A denied TokenReview surfaces on the cluster as the
 `KeyringVaultReviewerDenied` condition reason with this table's
 remediation.
 
+### Vault Workload Identity (`spec.server.vaults`)
+
+Nomad servers refuse any job carrying a `vault {}` block unless the
+server configuration declares the Vault cluster:
+
+> Error submitting job: Unexpected response code: 500 (rpc error:
+> \* Vault "default" not enabled but used in the job)
+
+`spec.server.vaults` declares those clusters. The flow is
+**secret-free by design**: under workload identity federation the
+servers never authenticate to Vault — declaring the cluster is enough
+to admit jobs and to stamp a default identity into them. Connection
+and auth settings (`address`, `namespace`, `jwt_auth_backend_path`,
+TLS) are client-side configuration, and Nomad clients are outside the
+operator's scope (see
+[Architectural boundaries](#architectural-boundaries)).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `server.vaults[].name` | `string` | `default` | Cluster name jobs reference via `vault.cluster`; `default` serves jobs that do not specify one. Unique, ≤63 chars |
+| `server.vaults[].defaultIdentity` | `object` | | Identity injected into tasks whose `vault` block declares no `identity` of its own |
+| `server.vaults[].defaultIdentity.audiences` | `[]string` | | Required within `defaultIdentity`; must match the JWT auth method's `bound_audiences` |
+| `server.vaults[].defaultIdentity.ttl` | `string` | | Identity JWT validity (Nomad duration, e.g. `"1h"`). Unset means no expiry — set it to bound the replay window |
+| `server.vaults[].defaultIdentity.extraClaims` | `map` | | Extra identity claims; values may use Nomad interpolation (`${job.id}`, `${alloc.id}`, ...) |
+
+`defaultIdentity` is what removes per-job boilerplate. Declaring:
+
+```yaml
+spec:
+  server:
+    vaults:
+    - defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
+```
+
+lets a job consume Vault secrets with nothing but a role and a
+template — no `identity` block anywhere:
+
+```hcl
+job "web" {
+  group "app" {
+    task "server" {
+      driver = "docker"
+
+      vault {
+        role = "web" # jwt auth role bound to this job's identity claims
+      }
+
+      template {
+        data        = <<EOH
+{{ with secret "secret/data/web" }}API_KEY={{ .Data.data.api_key }}{{ end }}
+EOH
+        destination = "secrets/app.env"
+        env         = true
+      }
+    }
+  }
+}
+```
+
+Multiple entries and non-`default` names are Nomad Enterprise
+capabilities; a job selects one with `vault { cluster = "secondary" }`,
+and a job naming an undeclared cluster is rejected at submission.
+
+**The identity JWT is never exposed to tasks by default.** The
+cluster-wide default deliberately omits Nomad's `env`/`file` identity
+options: making every defaulted task hold a login-capable credential
+is the wrong altitude for a cluster setting. A task that needs the raw
+JWT (app-side Vault login, or presenting it to a JWKS-validating third
+party) declares its own jobspec `identity` block, which takes
+precedence over the default.
+
+**Setting or changing `spec.server.vaults` rolls the server
+StatefulSet** (rendered config change), like every server-config
+field.
+
+Vault-side prerequisites (outside the operator): a `jwt` auth method
+whose `jwks_url` points at the cluster's JWKS endpoint —
+`https://<name>-internal.<namespace>.svc.cluster.local:4646/.well-known/jwks.json`
+with `jwks_ca_pem` set to the cluster CA — plus roles and policies
+bound to the identity claims (`nomad_namespace`, `nomad_job_id`, and
+any `extraClaims`). Client-side, each cluster name maps to an address
+in the Nomad client's own `vault` stanza.
+
 ### Gossip Encryption (`spec.gossip`)
 
 | Field | Type | Default | Description |
@@ -641,6 +727,8 @@ Rejected at admission (API server, no operator involvement):
 | `spec.image.pullPolicy` ∈ Always/IfNotPresent/Never; `spec.services.*.type` ∈ LoadBalancer/NodePort; `spec.persistence.reclaimPolicy` ∈ Retain/Delete | enum |
 | Each `keyrings[]` entry configures exactly one provider; entry names unique; at most 8 entries | CEL + listType=map |
 | `transit.auth.method` ∈ token/kubernetes/jwt, with exactly the matching per-method block; `mount` required unless `method: token` | enum + CEL |
+| `vaults[]` entry names match `^[a-zA-Z][a-zA-Z0-9_-]*$`, unique, at most 8 entries | pattern + listType=map |
+| `vaults[].defaultIdentity` requires non-empty `audiences`; `ttl` matches the Nomad duration pattern | required + MinItems + pattern |
 
 Enforced at reconcile time (visible via `kubectl get nomadcluster` and
 the `Ready` condition, not an admission error):
@@ -1192,8 +1280,8 @@ The full annotated sample is in
 
 ## Complete Example
 
-A production NomadCluster with TLS, ACLs, a snapshot schedule, and a
-managed autoscaler:
+A production NomadCluster with TLS, ACLs, Vault workload identity, a
+snapshot schedule, and a managed autoscaler:
 
 ```yaml
 apiVersion: nomad.hashicorp.com/v1alpha1
@@ -1212,6 +1300,10 @@ spec:
       enabled: true
     audit:
       enabled: true
+    vaults:
+    - defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
   persistence:
     size: 10Gi
   resources:
