@@ -57,3 +57,88 @@ func TestMetricsMarkerOnHeadlessServiceOnly(t *testing.T) {
 		}
 	}
 }
+
+// A removed CR field must clear the corresponding Service field: a
+// stale spec.loadBalancerIP makes MetalLB reject the allocation when an
+// address annotation is also present (neo-8t2). CR annotations prune
+// via applied-key bookkeeping; annotations other controllers own
+// survive.
+func TestExternalServiceReconcilesRemovedFields(t *testing.T) {
+	ctx := context.Background()
+	cluster := newTestCluster("svc-ns", "svc")
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeLoadBalancer
+	cluster.Spec.Services.External.LoadBalancerIP = "172.16.101.99"
+	cluster.Spec.Services.External.Annotations = map[string]string{
+		"metallb.io/loadBalancerIPs": "172.16.101.99",
+	}
+	phase := &ServicesPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	if result := phase.Execute(ctx, cluster); result.Error != nil {
+		t.Fatalf("Execute() error = %v", result.Error)
+	}
+
+	key := types.NamespacedName{Name: "svc-external", Namespace: "svc-ns"}
+	svc := &corev1.Service{}
+	if err := phase.Client.Get(ctx, key, svc); err != nil {
+		t.Fatalf("external service missing: %v", err)
+	}
+	if svc.Spec.LoadBalancerIP != "172.16.101.99" {
+		t.Fatalf("loadBalancerIP = %q, want set", svc.Spec.LoadBalancerIP)
+	}
+	if svc.Annotations["nomad.hashicorp.com/applied-annotations"] != "metallb.io/loadBalancerIPs" {
+		t.Fatalf("applied-annotations record = %q", svc.Annotations["nomad.hashicorp.com/applied-annotations"])
+	}
+
+	// A controller-owned annotation appears out of band.
+	svc.Annotations["metallb.io/ip-allocated-from-pool"] = "lab-pool"
+	if err := phase.Client.Update(ctx, svc); err != nil {
+		t.Fatalf("simulating foreign annotation: %v", err)
+	}
+
+	cluster.Spec.Services.External.LoadBalancerIP = ""
+	cluster.Spec.Services.External.Annotations = nil
+	if result := phase.Execute(ctx, cluster); result.Error != nil {
+		t.Fatalf("Execute() after removal error = %v", result.Error)
+	}
+	if err := phase.Client.Get(ctx, key, svc); err != nil {
+		t.Fatalf("external service missing after removal: %v", err)
+	}
+	if svc.Spec.LoadBalancerIP != "" {
+		t.Errorf("loadBalancerIP = %q, want cleared", svc.Spec.LoadBalancerIP)
+	}
+	if _, present := svc.Annotations["metallb.io/loadBalancerIPs"]; present {
+		t.Error("removed CR annotation was not pruned")
+	}
+	if svc.Annotations["metallb.io/ip-allocated-from-pool"] != "lab-pool" {
+		t.Error("foreign annotation did not survive reconcile")
+	}
+	if _, present := svc.Annotations["nomad.hashicorp.com/applied-annotations"]; present {
+		t.Error("applied-annotations record not removed when CR annotations cleared")
+	}
+
+	// Steady state must not churn writes.
+	before := svc.ResourceVersion
+	if result := phase.Execute(ctx, cluster); result.Error != nil {
+		t.Fatalf("steady-state Execute() error = %v", result.Error)
+	}
+	if err := phase.Client.Get(ctx, key, svc); err != nil {
+		t.Fatalf("external service missing after steady state: %v", err)
+	}
+	if svc.ResourceVersion != before {
+		t.Errorf("steady-state reconcile wrote the Service (rv %s -> %s)", before, svc.ResourceVersion)
+	}
+
+	cluster.Spec.Services.External.Type = corev1.ServiceTypeNodePort
+	if result := phase.Execute(ctx, cluster); result.Error != nil {
+		t.Fatalf("Execute() after type change error = %v", result.Error)
+	}
+	if err := phase.Client.Get(ctx, key, svc); err != nil {
+		t.Fatalf("external service missing after type change: %v", err)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeNodePort {
+		t.Errorf("type = %q, want NodePort", svc.Spec.Type)
+	}
+}

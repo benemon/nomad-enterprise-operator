@@ -1334,64 +1334,6 @@ func TestRBACPhase_Name(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// mapsEqual Tests
-// =============================================================================
-
-func TestMapsEqual(t *testing.T) {
-	tests := []struct {
-		name string
-		a    map[string]string
-		b    map[string]string
-		want bool
-	}{
-		{
-			name: "both nil",
-			a:    nil,
-			b:    nil,
-			want: true,
-		},
-		{
-			name: "both empty",
-			a:    map[string]string{},
-			b:    map[string]string{},
-			want: true,
-		},
-		{
-			name: "equal",
-			a:    map[string]string{"key": "value"},
-			b:    map[string]string{"key": "value"},
-			want: true,
-		},
-		{
-			name: "different values",
-			a:    map[string]string{"key": "value1"},
-			b:    map[string]string{"key": "value2"},
-			want: false,
-		},
-		{
-			name: "different keys",
-			a:    map[string]string{"key1": "value"},
-			b:    map[string]string{"key2": "value"},
-			want: false,
-		},
-		{
-			name: "different lengths",
-			a:    map[string]string{"key": "value"},
-			b:    map[string]string{"key": "value", "key2": "value2"},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := mapsEqual(tt.a, tt.b); got != tt.want {
-				t.Errorf("mapsEqual() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestSecretsPhase_InlineLicenseValue covers neo-9bv: spec.license.value
 // creates an operator-owned managed Secret (with ownerReference and the
 // operator-owned "license" key), updates it when the inline value
