@@ -18,6 +18,8 @@ package phases
 
 import (
 	"context"
+	"sort"
+	"strings"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -182,6 +184,16 @@ func (p *ServicesPhase) ensureService(ctx context.Context, cluster *nomadv1alpha
 	err := p.Client.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, existing)
 	if err != nil {
 		if errors.IsNotFound(err) {
+			if len(svc.Annotations) > 0 {
+				// Copy before stamping the record: svc.Annotations
+				// aliases the CR spec map.
+				a := make(map[string]string, len(svc.Annotations)+1)
+				for k, v := range svc.Annotations {
+					a[k] = v
+				}
+				a[appliedAnnotationsKey] = appliedAnnotationsRecord(svc.Annotations)
+				svc.Annotations = a
+			}
 			p.Log.Info("Creating Service", "name", svc.Name, "type", svc.Spec.Type)
 			if err := p.Client.Create(ctx, svc); err != nil {
 				return Error(err, "Failed to create Service "+svc.Name)
@@ -191,10 +203,25 @@ func (p *ServicesPhase) ensureService(ctx context.Context, cluster *nomadv1alpha
 		return Error(err, "Failed to get Service "+svc.Name)
 	}
 
-	// Update annotations if changed (for external service)
-	if svc.Annotations != nil && !mapsEqual(existing.Annotations, svc.Annotations) {
-		existing.Annotations = svc.Annotations
-		p.Log.Info("Updating Service annotations", "name", svc.Name)
+	// Reconcile the CR-owned surface. Spec fields are authoritative —
+	// a removed CR field clears the Service field (a stale
+	// loadBalancerIP makes MetalLB reject the allocation). Annotations
+	// go through applied-key bookkeeping so removed CR annotations are
+	// pruned without touching annotations other controllers own.
+	changed := false
+	if existing.Spec.Type != svc.Spec.Type {
+		existing.Spec.Type = svc.Spec.Type
+		changed = true
+	}
+	if existing.Spec.LoadBalancerIP != svc.Spec.LoadBalancerIP {
+		existing.Spec.LoadBalancerIP = svc.Spec.LoadBalancerIP
+		changed = true
+	}
+	if reconcileAppliedAnnotations(existing, svc.Annotations) {
+		changed = true
+	}
+	if changed {
+		p.Log.Info("Updating Service", "name", svc.Name)
 		if err := p.Client.Update(ctx, existing); err != nil {
 			return Error(err, "Failed to update Service "+svc.Name)
 		}
@@ -203,14 +230,55 @@ func (p *ServicesPhase) ensureService(ctx context.Context, cluster *nomadv1alpha
 	return OK()
 }
 
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
+// appliedAnnotationsKey records which annotations the CR set on a
+// Service, so a later reconcile can prune removed ones without touching
+// annotations other controllers own (MetalLB allocation markers, cloud
+// LB state).
+const appliedAnnotationsKey = "nomad.hashicorp.com/applied-annotations"
+
+func reconcileAppliedAnnotations(existing *corev1.Service, desired map[string]string) bool {
+	changed := false
+	if existing.Annotations == nil && len(desired) > 0 {
+		existing.Annotations = map[string]string{}
 	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
+	for _, k := range strings.Split(existing.Annotations[appliedAnnotationsKey], ",") {
+		if k == "" {
+			continue
+		}
+		if _, ok := desired[k]; !ok {
+			if _, present := existing.Annotations[k]; present {
+				delete(existing.Annotations, k)
+				changed = true
+			}
 		}
 	}
-	return true
+	for k, v := range desired {
+		if existing.Annotations[k] != v {
+			existing.Annotations[k] = v
+			changed = true
+		}
+	}
+	record := appliedAnnotationsRecord(desired)
+	switch {
+	case record == "":
+		if _, present := existing.Annotations[appliedAnnotationsKey]; present {
+			delete(existing.Annotations, appliedAnnotationsKey)
+			changed = true
+		}
+	case existing.Annotations[appliedAnnotationsKey] != record:
+		existing.Annotations[appliedAnnotationsKey] = record
+		changed = true
+	}
+	return changed
+}
+
+// appliedAnnotationsRecord is deterministic: annotation keys cannot
+// contain commas, so a sorted comma-join round-trips.
+func appliedAnnotationsRecord(desired map[string]string) string {
+	keys := make([]string, 0, len(desired))
+	for k := range desired {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
