@@ -3087,6 +3087,11 @@ spec:
 
 	Context("Vault workload identity federation", Ordered, func() {
 		const wiCluster = "vault-wi"
+		// The client fixture needs a privileged root pod (writable
+		// cgroups), which the operator namespace's restricted
+		// PodSecurity label forbids — so it lives in its own namespace,
+		// like the Vault pods.
+		const wiClientNS = "e2e-nomad-client"
 
 		BeforeAll(func() {
 			By("deploying two independent Vault Enterprise clusters")
@@ -3227,14 +3232,9 @@ spec:
     image: hashicorp/nomad:2.0.4-ent
     command: ["nomad"]
     args: ["agent", "-config=/nomad/config/client.hcl"]
-    env:
-    - name: NOMAD_LICENSE
-      valueFrom:
-        secretKeyRef:
-          name: nomad-license
-          key: license
-    # The client needs root and writable cgroups (why client-in-container
-    # is unsupported for production); acceptable for a disposable fixture.
+    # Clients need no license. Privileged root for writable cgroups (why
+    # client-in-container is unsupported for production); acceptable for
+    # a disposable fixture.
     securityContext:
       privileged: true
     volumeMounts:
@@ -3265,19 +3265,21 @@ spec:
         path: tls.key
   - name: client-data
     emptyDir: {}
-`, wiCluster, namespace, base64Encode([]byte(clientConfig)), base64Encode(clientCert.CACertPEM),
-				base64Encode(clientCert.CertPEM), base64Encode(clientCert.KeyPEM), wiCluster, namespace,
+`, wiCluster, wiClientNS, base64Encode([]byte(clientConfig)), base64Encode(clientCert.CACertPEM),
+				base64Encode(clientCert.CertPEM), base64Encode(clientCert.KeyPEM), wiCluster, wiClientNS,
 				wiCluster, wiCluster)
+			cmd = exec.Command("kubectl", "create", "ns", wiClientNS)
+			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(clientYAML)
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "failed to create Nomad client fixture: %s", output)
 			DeferCleanup(func() {
 				out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous=false",
-					"pod/"+wiCluster+"-client", "-n", namespace))
+					"pod/"+wiCluster+"-client", "-n", wiClientNS))
 				_, _ = fmt.Fprintf(GinkgoWriter, "vault-wi client pod logs:\n%s\n", out)
 			})
-			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/"+wiCluster+"-client", "-n", namespace,
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready", "pod/"+wiCluster+"-client", "-n", wiClientNS,
 				"--timeout=180s")
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Nomad client pod did not become Ready: %s", output)
@@ -3382,8 +3384,7 @@ spec:
 			cmd := exec.Command("kubectl", "delete", "nomadcluster", wiCluster, "-n", namespace,
 				"--ignore-not-found", "--timeout=3m")
 			_, _ = utils.Run(cmd)
-			cmd = exec.Command("kubectl", "delete", "pod/"+wiCluster+"-client", "secret/"+wiCluster+"-client",
-				"-n", namespace, "--ignore-not-found")
+			cmd = exec.Command("kubectl", "delete", "ns", wiClientNS, "--ignore-not-found", "--timeout=2m")
 			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "pvc", "-n", namespace,
 				"-l", "app.kubernetes.io/instance="+wiCluster, "--ignore-not-found")
