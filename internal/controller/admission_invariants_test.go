@@ -114,7 +114,7 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 			{
 				name: "concrete patch tag accepted",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
-					c.Spec.Image.Tag = "2.0.4-ent"
+					c.Spec.Image.Tag = "2.0.5-ent"
 				},
 			},
 			{

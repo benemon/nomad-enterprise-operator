@@ -94,7 +94,7 @@ type ImageSpec struct {
 	// Tag is the container image tag, default-pinned to a concrete
 	// patch version: a registry-side retag mid-roll can produce
 	// version-mismatched Raft peers and silent quorum loss.
-	// +kubebuilder:default="2.0.4-ent"
+	// +kubebuilder:default="2.0.5-ent"
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
 
@@ -166,7 +166,10 @@ type ExternalServiceSpec struct {
 	// +kubebuilder:default="LoadBalancer"
 	Type corev1.ServiceType `json:"type,omitempty"`
 
-	// LoadBalancerIP is the requested IP for LoadBalancer type
+	// LoadBalancerIP is the requested IP for LoadBalancer type.
+	// Under MetalLB, do not combine with an address annotation
+	// (metallb.io/loadBalancerIPs) — MetalLB rejects the allocation
+	// when both are set.
 	// +optional
 	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
 

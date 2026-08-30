@@ -97,7 +97,7 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 2.0.4-ent
+                    default: 2.0.5-ent
                     description: |-
                       Tag is the container image tag, default-pinned to a concrete
                       patch version: a registry-side retag mid-roll can produce
@@ -873,8 +873,11 @@ spec:
                         description: Annotations for the external service
                         type: object
                       loadBalancerIP:
-                        description: LoadBalancerIP is the requested IP for LoadBalancer
-                          type
+                        description: |-
+                          LoadBalancerIP is the requested IP for LoadBalancer type.
+                          Under MetalLB, do not combine with an address annotation
+                          (metallb.io/loadBalancerIPs) — MetalLB rejects the allocation
+                          when both are set.
                         type: string
                       type:
                         default: LoadBalancer
