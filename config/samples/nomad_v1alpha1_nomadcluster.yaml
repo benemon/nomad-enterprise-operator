@@ -54,6 +54,10 @@ spec:
       enabled: true
       # Delivery (enforced), format (json), and rotation (24h × 15 files)
       # are operator-owned per ADR 0003.
+    vaults:
+    - defaultIdentity:
+        audiences: ["vault.io"]
+        ttl: "1h"
     # GC retention: how long terminal job/eval/alloc history is kept
     # before garbage collection. Unset fields keep Nomad's own defaults
     # (job 4h, batch-eval 24h, eval 1h). High-churn dispatch workloads

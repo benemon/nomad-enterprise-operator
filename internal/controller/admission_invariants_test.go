@@ -158,6 +158,86 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 			},
 			{
+				name: "vault default identity with empty audiences rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{{
+						DefaultIdentity: &nomadv1alpha1.VaultDefaultIdentity{Audiences: []string{}},
+					}}
+				},
+				wantErr: "at least 1 items",
+			},
+			{
+				name: "vault ttl with unknown unit rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{{
+						DefaultIdentity: &nomadv1alpha1.VaultDefaultIdentity{
+							Audiences: []string{"vault.io"}, TTL: "1x",
+						},
+					}}
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "vault ttl without unit rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{{
+						DefaultIdentity: &nomadv1alpha1.VaultDefaultIdentity{
+							Audiences: []string{"vault.io"}, TTL: "60",
+						},
+					}}
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "duplicate vault names rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{
+						{Name: "default"}, {Name: "default"},
+					}
+				},
+				wantErr: "Duplicate value",
+			},
+			{
+				name: "vault name beginning with digit rejected",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{{Name: "9bad"}}
+				},
+				wantErr: "should match",
+			},
+			{
+				name: "empty vault entry accepted with default name",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{{}}
+				},
+				verify: func(g Gomega, c *nomadv1alpha1.NomadCluster) {
+					g.Expect(c.Spec.Server.Vaults).To(HaveLen(1))
+					g.Expect(c.Spec.Server.Vaults[0].Name).To(Equal("default"))
+				},
+			},
+			{
+				name: "full vault entry accepted",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{{
+						Name: "default",
+						DefaultIdentity: &nomadv1alpha1.VaultDefaultIdentity{
+							Audiences: []string{"vault.io"},
+							TTL:       "1h",
+							ExtraClaims: map[string]string{
+								"job": "${job.id}",
+							},
+						},
+					}}
+				},
+			},
+			{
+				name: "two distinct vault entries accepted",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.Server.Vaults = []nomadv1alpha1.VaultEntry{
+						{Name: "default"}, {Name: "secondary"},
+					}
+				},
+			},
+			{
 				name: "transit auth with unknown method rejected",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
 					c.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{{
@@ -348,6 +428,29 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				Expect(err.Error()).To(ContainSubstring(c.wantErr))
 			})
 		}
+
+		It("vault default identity without audiences is rejected", func() {
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "nomad.hashicorp.com/v1alpha1",
+				"kind":       "NomadCluster",
+				"metadata": map[string]interface{}{
+					"name":      "adm-cluster-vault-no-audiences",
+					"namespace": namespace,
+				},
+				"spec": map[string]interface{}{
+					"license": map[string]interface{}{"secretName": "nomad-license"},
+					"server": map[string]interface{}{
+						"vaults": []interface{}{map[string]interface{}{
+							"defaultIdentity": map[string]interface{}{},
+						}},
+					},
+				},
+			}}
+			err := k8sClient.Create(ctx, u)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("audiences"))
+			Expect(err.Error()).To(ContainSubstring("Required value"))
+		})
 	})
 
 	Describe("NomadSnapshot", func() {

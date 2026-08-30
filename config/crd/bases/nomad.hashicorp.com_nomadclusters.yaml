@@ -807,6 +807,59 @@ spec:
                         - secretName
                         type: object
                     type: object
+                  vaults:
+                    description: |-
+                      Vaults declares Vault clusters for workload identity federation.
+                      Presence enables admission of jobs carrying vault blocks; the flow
+                      is secret-free — servers never authenticate to Vault (clients hold
+                      address/auth config and are out of operator scope). Multiple
+                      entries and non-"default" names are Nomad Enterprise capabilities.
+                    items:
+                      description: VaultEntry declares one Vault cluster.
+                      properties:
+                        defaultIdentity:
+                          description: |-
+                            DefaultIdentity injects a workload identity into tasks whose
+                            vault block does not declare its own. env/file exposure is
+                            deliberately not configurable here — tasks needing the raw JWT
+                            declare a jobspec identity block.
+                          properties:
+                            audiences:
+                              description: Audiences must match the JWT auth method's
+                                bound_audiences.
+                              items:
+                                type: string
+                              minItems: 1
+                              type: array
+                            extraClaims:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                ExtraClaims adds claims to the identity; values may use Nomad
+                                interpolation (${job.id}, ${alloc.id}, ...).
+                              type: object
+                            ttl:
+                              description: TTL bounds the identity JWT's validity.
+                                Nomad duration, e.g. "1h".
+                              pattern: ^[0-9]+(s|m|h)([0-9]+(s|m|h))*$
+                              type: string
+                          required:
+                          - audiences
+                          type: object
+                        name:
+                          default: default
+                          description: |-
+                            Name is the cluster name jobs reference via vault.cluster;
+                            "default" serves jobs that do not specify one.
+                          maxLength: 63
+                          pattern: ^[a-zA-Z][a-zA-Z0-9_-]*$
+                          type: string
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                 type: object
               services:
                 description: Services configuration for Nomad endpoints
