@@ -4,6 +4,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Nested module: Dependabot resolves the parent hashicorp/nomad tag,
+    # which does not contain the api package, and fails the whole
+    # go_modules run. Managed manually until upstream tagging or
+    # Dependabot handles nested modules.
+    ignore:
+      - dependency-name: "github.com/hashicorp/nomad/api"
     groups:
       kubernetes:
         patterns:
