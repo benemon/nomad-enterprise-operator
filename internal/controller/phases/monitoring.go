@@ -77,13 +77,32 @@ func (p *MonitoringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.No
 		return result
 	}
 
-	// Create PrometheusRule if enabled
+	// PrometheusRule follows the toggle both ways: toggling off deletes
+	// the rule rather than orphaning it until cluster deletion (the
+	// autoscaler's reconcileMonitoring pattern).
 	if cluster.Spec.Monitoring.PrometheusRulesEnabled {
 		if result := p.ensurePrometheusRule(ctx, cluster); result.Error != nil || result.Requeue {
 			return result
 		}
+	} else {
+		if result := p.deletePrometheusRule(ctx, cluster); result.Error != nil || result.Requeue {
+			return result
+		}
 	}
 
+	return OK()
+}
+
+func (p *MonitoringPhase) deletePrometheusRule(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	rule := &monitoringv1.PrometheusRule{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cluster.Name,
+			Namespace: cluster.Namespace,
+		},
+	}
+	if err := p.Client.Delete(ctx, rule); err != nil && !errors.IsNotFound(err) {
+		return Error(err, "Failed to delete PrometheusRule")
+	}
 	return OK()
 }
 

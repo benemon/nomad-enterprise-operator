@@ -209,3 +209,39 @@ func TestPrometheusRuleContent(t *testing.T) {
 		}
 	}
 }
+
+// Toggling prometheusRulesEnabled off must delete the rule rather than
+// orphaning it until cluster deletion (neo-kqh; parity with the
+// autoscaler's reconcileMonitoring).
+func TestPrometheusRuleDeletedOnToggleOff(t *testing.T) {
+	_ = monitoringv1.AddToScheme(scheme.Scheme)
+
+	cluster := newTestCluster("mon-ns", "mon")
+	cluster.Spec.Monitoring.PrometheusRulesEnabled = true
+	phase := &MonitoringPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	if result := phase.ensurePrometheusRule(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("ensurePrometheusRule() error = %v", result.Error)
+	}
+	rule := &monitoringv1.PrometheusRule{}
+	key := types.NamespacedName{Name: "mon", Namespace: "mon-ns"}
+	if err := phase.Client.Get(context.Background(), key, rule); err != nil {
+		t.Fatalf("PrometheusRule not created: %v", err)
+	}
+
+	cluster.Spec.Monitoring.PrometheusRulesEnabled = false
+	if result := phase.deletePrometheusRule(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("deletePrometheusRule() error = %v", result.Error)
+	}
+	if err := phase.Client.Get(context.Background(), key, rule); err == nil {
+		t.Fatal("PrometheusRule still present after toggle-off")
+	}
+
+	// Toggle-off on a cluster that never had a rule must not error.
+	if result := phase.deletePrometheusRule(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("deletePrometheusRule() on absent rule error = %v", result.Error)
+	}
+}
