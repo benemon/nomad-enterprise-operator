@@ -353,7 +353,14 @@ On OpenShift, leave `spec.trustBundle` unset. When
 `spec.openshift.enabled: true`, the operator creates
 `<cluster>-trust-bundle` with
 `config.openshift.io/inject-trusted-cabundle: "true"`; the OpenShift
-network operator injects the platform trust bundle. On other platforms,
+network operator injects the platform trust bundle. Note that the
+injected bundle carries public roots and proxy CAs, not the OpenShift
+service CA — endpoints presenting service-serving certificates (for
+example an in-cluster S3-compatible `.svc` endpoint as a snapshot
+target) will fail verification. If you need the full chain, render your
+own bundle (for example the injected bundle concatenated with your
+namespace's `openshift-service-ca.crt`) and reference it as a custom
+ConfigMap like any other bundle. On other platforms,
 reference a ConfigMap containing your CA bundle, or bake CA roots into a
 custom operand image. Changing bundle content changes the server pod
 checksum and rolls the StatefulSet.
