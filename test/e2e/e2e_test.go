@@ -1196,7 +1196,7 @@ data:
 				kind string
 				name string
 			}{
-				{"configmap", testSnapshotName + "-snapshot-config"},
+				{"secret", testSnapshotName + "-snapshot-config"},
 				{"secret", testSnapshotName + "-snapshot-token"},
 				{"pvc", testSnapshotName + "-snapshots"},
 				{"deployment", testSnapshotName + "-snapshot-agent"},
@@ -1245,9 +1245,9 @@ data:
 		})
 
 		It("should generate valid snapshot agent HCL config", func() {
-			cmd := exec.Command("kubectl", "get", "configmap",
-				testSnapshotName+"-snapshot-config", "-n", namespace,
-				`-o`, `jsonpath={.data.snapshot\.hcl}`)
+			cmd := exec.Command("sh", "-c", fmt.Sprintf(
+				`kubectl get secret %s-snapshot-config -n %s -o jsonpath='{.data.snapshot\.hcl}' | base64 -d`,
+				testSnapshotName, namespace))
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(ContainSubstring("snapshot {"), "missing snapshot block")
@@ -1274,7 +1274,7 @@ data:
 			Expect(output).To(Equal(testSnapshotName + "-snapshot-agent"))
 
 			cmd = exec.Command("kubectl", "get", "nomadsnapshot", testSnapshotName, "-n", namespace,
-				"-o", "jsonpath={.status.configMapName}")
+				"-o", "jsonpath={.status.configSecretName}")
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal(testSnapshotName + "-snapshot-config"))
@@ -1320,7 +1320,7 @@ data:
 				name string
 			}{
 				{"deployment", testSnapshotName + "-snapshot-agent"},
-				{"configmap", testSnapshotName + "-snapshot-config"},
+				{"secret", testSnapshotName + "-snapshot-config"},
 				{"secret", testSnapshotName + "-snapshot-token"},
 				{"pvc", testSnapshotName + "-snapshots"},
 			}

@@ -1037,7 +1037,10 @@ across modes.
 Changing `spec.target` or `spec.schedule` on a recurring NomadSnapshot
 updates the agent config and rolls the Deployment automatically — the
 pod template carries a `checksum/config` annotation, so the agent
-always runs the current config. A failed one-shot Job sets the
+always runs the current config. The rendered config is stored in the
+`<snapshot>-snapshot-config` Secret because S3 and Azure credentials are
+part of the provider stanza. Its name is reported in
+`status.configSecretName`. A failed one-shot Job sets the
 `Degraded` condition and emits a `SnapshotDegraded` Warning Event.
 
 **Restore compatibility.** Snapshots restore only to the same Nomad
@@ -1099,6 +1102,22 @@ Exactly one target must be specified.
 | `container` | `string` | | Azure container name |
 | `accountName` | `string` | | Storage account name |
 | `credentialsSecretRef.name` | `string` | | Secret with `AZURE_BLOB_ACCOUNT_KEY` |
+
+Credential delivery is provider-specific because the snapshot agent's
+backends expose different authentication surfaces:
+
+| Provider | Settings and credential delivery |
+|----------|----------------------------------|
+| S3 | `bucket`, `region`, endpoint settings, `access_key_id`, and `secret_access_key` are rendered together in `aws_storage`. When `credentialsSecretRef` is omitted, the AWS SDK uses ambient identity. |
+| Azure Blob | `account_name`, `account_key`, and `container_name` are rendered together in `azure_blob_storage`. The agent does not read an Azure account-key environment variable. |
+| GCS | Agent-imposed exception: `google_storage` accepts only `bucket`. A referenced service-account key remains mounted as a file with `GOOGLE_APPLICATION_CREDENTIALS`; when omitted, Application Default Credentials use ambient identity. |
+
+The operator reads referenced credential Secrets before rendering. A
+missing Secret reports `Ready=False` with reason
+`CredentialsSecretNotFound`; an absent or empty required key reports
+`CredentialsSecretInvalid`. Secret changes enqueue reconciliation. For
+S3 and Azure, the credentials are included in `checksum/config`, so
+rotation rolls a recurring Deployment onto the new config.
 
 Ambient identity for S3 and GCS targets carries the same pod-identity
 caveat as [server keyrings](#keyrings-specserverkeyrings): node-level
@@ -1427,6 +1446,8 @@ sub-field keeps its last-known value).
 | `AutopilotUnhealthy` | Raft autopilot reports unhealthy — see `status.autopilot` |
 | `LicenseSecretNotFound` | `spec.license.secretName` references a Secret that does not exist — create it; the operator re-reconciles the moment it appears |
 | `TrustBundleConfigMapNotFound` | `spec.trustBundle.configMapRef.name` references a ConfigMap that does not exist |
+| `CredentialsSecretNotFound` | A NomadSnapshot target references a Secret that does not exist |
+| `CredentialsSecretInvalid` | A NomadSnapshot target's credential Secret is missing a required key or contains an empty value |
 | `LicenseSecretInvalid` | The license Secret exists but is missing the `license` key |
 | `CAExpired` | The CA certificate has expired; TLS handshakes fail cluster-wide — see `status.certificateAuthority`. Takes precedence over `WaitingForReplicas` so the cascading pod failures are attributed to their cause |
 | `PhaseFailed` | A reconcile phase errored; the message names the phase |
