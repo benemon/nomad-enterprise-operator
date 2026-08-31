@@ -3527,6 +3527,168 @@ EOH
 		})
 	})
 
+	// Real Azure verification, gated on the scoped CI credentials
+	// (sp-nomad-ci: wrap/unwrap on one dedicated key, one dedicated
+	// storage account — nothing else). kind cannot fake these
+	// boundaries: the stanza-name and env-delivery bugs shipped green
+	// through every offline layer.
+	Context("Azure cloud verification", Ordered, func() {
+		const azCluster = "azure-ci"
+
+		azureEnv := func(name string) string { return os.Getenv(name) }
+
+		BeforeAll(func() {
+			if azureEnv("AZURE_CI_CLIENT_SECRET") == "" || azureEnv("AZURE_CI_STORAGE_KEY") == "" {
+				Skip("Azure CI credentials not present")
+			}
+
+			By("building the trust bundle from the runner's CA store")
+			// The operand image has no roots; the runner's bundle
+			// supplies Azure's public CAs — exercising the BYO
+			// trustBundle path (kind has no OpenShift injector).
+			cmd := exec.Command("kubectl", "create", "configmap", "azure-ci-trust", "-n", namespace,
+				"--from-file=ca-bundle.crt=/etc/ssl/certs/ca-certificates.crt")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create trust bundle ConfigMap: %s", output)
+
+			By("staging the scoped credentials")
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "azure-ci-keyring", "-n", namespace,
+				"--from-literal=AZURE_CLIENT_ID="+azureEnv("AZURE_CI_CLIENT_ID"),
+				"--from-literal=AZURE_CLIENT_SECRET="+azureEnv("AZURE_CI_CLIENT_SECRET"))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create keyring credentials: %s", output)
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "azure-ci-storage", "-n", namespace,
+				"--from-literal=AZURE_BLOB_ACCOUNT_KEY="+azureEnv("AZURE_CI_STORAGE_KEY"))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create storage credentials: %s", output)
+
+			By("creating a cluster born with the azurekeyvault keyring")
+			// Born-with-KMS wraps the initial root key at bootstrap: a
+			// broken credential or trust path keeps the keyring from
+			// initialising at all.
+			clusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "2.0.5-ent"
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: NodePort
+  trustBundle:
+    configMapRef:
+      name: azure-ci-trust
+  server:
+    keyrings:
+    - name: azure
+      azurekeyvault:
+        vaultName: %s
+        keyName: %s
+        tenantID: %s
+        credentialsSecretRef:
+          name: azure-ci-keyring
+`, azCluster, namespace, azureEnv("AZURE_CI_KV_NAME"), azureEnv("AZURE_CI_KEY_NAME"), azureEnv("AZURE_CI_TENANT_ID"))
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create azure cluster: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", azCluster, "-n", namespace,
+					"-o", "jsonpath={.status.phase}/{.status.keyring.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Running/Ready"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadsnapshot", "azure-ci-snap", "-n", namespace,
+				"--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "nomadcluster", azCluster, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret", "azure-ci-keyring", "azure-ci-storage",
+				"-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "configmap", "azure-ci-trust", "-n", namespace,
+				"--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			if _, err := exec.LookPath("az"); err == nil {
+				_, _ = utils.Run(exec.Command("az", "storage", "blob", "delete-batch",
+					"--account-name", azureEnv("AZURE_CI_STORAGE_ACCOUNT"),
+					"--source", azureEnv("AZURE_CI_CONTAINER"),
+					"--account-key", azureEnv("AZURE_CI_STORAGE_KEY")))
+			}
+		})
+
+		It("wraps root keys with Azure Key Vault", func() {
+			By("forcing a rotation through the wrapper")
+			cmd := exec.Command("kubectl", "get", "secret", azCluster+"-operator-management", "-n", namespace,
+				"-o", "jsonpath={.data.secret-id}")
+			encodedToken, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			token, err := base64.StdEncoding.DecodeString(encodedToken)
+			Expect(err).NotTo(HaveOccurred())
+			output, err := utils.Run(exec.Command("kubectl", "exec", azCluster+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "operator", "root", "keyring", "rotate", "-now"))
+			Expect(err).NotTo(HaveOccurred(), "rotation under the azure wrapper failed: %s", output)
+
+			By("verifying the keyring stays Ready")
+			Consistently(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", azCluster, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready"))
+			}, 30*time.Second, 10*time.Second).Should(Succeed())
+		})
+
+		It("uploads snapshots to Azure Blob Storage", func() {
+			snapshotCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: azure-ci-snap
+  namespace: %s
+spec:
+  clusterRef:
+    name: %s
+  target:
+    azure:
+      container: %s
+      accountName: %s
+      credentialsSecretRef:
+        name: azure-ci-storage
+`, namespace, azCluster, azureEnv("AZURE_CI_CONTAINER"), azureEnv("AZURE_CI_STORAGE_ACCOUNT"))
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(snapshotCR)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create azure snapshot: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadsnapshot", "azure-ci-snap",
+					"-n", namespace, "-o", "jsonpath={.status.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Succeeded"))
+			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+
+			// Observation-grade when the runner has az: the object must
+			// actually exist in the container.
+			if _, err := exec.LookPath("az"); err == nil {
+				out, err := utils.Run(exec.Command("az", "storage", "blob", "list",
+					"--account-name", azureEnv("AZURE_CI_STORAGE_ACCOUNT"),
+					"--container-name", azureEnv("AZURE_CI_CONTAINER"),
+					"--account-key", azureEnv("AZURE_CI_STORAGE_KEY"),
+					"--query", "[].name", "-o", "tsv"))
+				Expect(err).NotTo(HaveOccurred(), "blob listing failed: %s", out)
+				Expect(out).To(ContainSubstring(".snap"), "no snapshot object found in the container")
+			}
+		})
+	})
+
 	// Keyring transit auth (neo-3xe P2): operator-managed Vault login
 	// via the cluster's own ServiceAccount — mint, scheduled renewal,
 	// and revocation recovery, against real kubernetes-auth TokenReview

@@ -26,6 +26,14 @@ on:
         required: true
       VAULT_LICENSE:
         required: true
+      # Cloud verification lanes skip cleanly when these are absent
+      # (forks, credential-less callers).
+      AZURE_CI_CLIENT_ID:
+        required: false
+      AZURE_CI_CLIENT_SECRET:
+        required: false
+      AZURE_CI_STORAGE_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -69,6 +77,18 @@ jobs:
           # The keyring specs deploy Vault Enterprise dev pods; the
           # suite feeds this into per-namespace vault-license Secrets.
           VAULT_LICENSE: ${{ secrets.VAULT_LICENSE }}
+          # Azure cloud lanes: specs skip when the secrets are empty.
+          # Non-secret values name the dedicated CI vault/key/account
+          # (vault-azure-infra: sp-nomad-ci, blast radius limited to
+          # these resources).
+          AZURE_CI_CLIENT_ID: ${{ secrets.AZURE_CI_CLIENT_ID }}
+          AZURE_CI_CLIENT_SECRET: ${{ secrets.AZURE_CI_CLIENT_SECRET }}
+          AZURE_CI_STORAGE_KEY: ${{ secrets.AZURE_CI_STORAGE_KEY }}
+          AZURE_CI_TENANT_ID: f41ba6d7-5897-4c86-8b5e-90aa354e6c48
+          AZURE_CI_KV_NAME: kv-nomad-ci-orbital
+          AZURE_CI_KEY_NAME: nomad-ci-keyring
+          AZURE_CI_STORAGE_ACCOUNT: sanomadciorbital
+          AZURE_CI_CONTAINER: nomad-ci-snapshots
         run: |
           go mod tidy
           # PR lane skips the slow containers (neo-g1o); lane=full clears
