@@ -212,7 +212,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 		})
 	})
 
-	Context("ConfigMap Generation", func() {
+	Context("Config Secret Generation", func() {
 		var (
 			ctx       context.Context
 			namespace string
@@ -222,7 +222,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 
 		BeforeEach(func() {
 			ctx = context.Background()
-			namespace = fmt.Sprintf("test-snapshot-configmap-%d", time.Now().UnixNano())
+			namespace = fmt.Sprintf("test-snapshot-config-secret-%d", time.Now().UnixNano())
 			createTestNamespace(ctx, namespace)
 			createLicenseSecret(ctx, namespace)
 		})
@@ -347,11 +347,11 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("Verifying deployment name format")
 			snapshotName := "hourly-backup"
 			expectedDeploymentName := snapshotName + "-snapshot-agent"
-			expectedConfigMapName := snapshotName + "-snapshot-config"
+			expectedConfigSecretName := snapshotName + "-snapshot-config"
 			expectedPVCName := snapshotName + "-snapshots"
 
 			Expect(expectedDeploymentName).To(Equal("hourly-backup-snapshot-agent"))
-			Expect(expectedConfigMapName).To(Equal("hourly-backup-snapshot-config"))
+			Expect(expectedConfigSecretName).To(Equal("hourly-backup-snapshot-config"))
 			Expect(expectedPVCName).To(Equal("hourly-backup-snapshots"))
 		})
 	})
@@ -453,7 +453,7 @@ var _ = Describe("NomadSnapshot Controller", func() {
 			By("Checking status has expected field names")
 			// Verify the status struct has the fields we expect
 			Expect(snapshot.Status.DeploymentName).To(BeEmpty()) // Not set until full reconcile
-			Expect(snapshot.Status.ConfigMapName).To(BeEmpty())
+			Expect(snapshot.Status.ConfigSecretName).To(BeEmpty())
 			Expect(snapshot.Status.NomadAddress).To(BeEmpty())
 		})
 	})
@@ -540,7 +540,7 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 				},
 			}
 
-			config := reconciler.generateSnapshotConfig(snapshot)
+			config := reconciler.generateSnapshotConfig(snapshot, nil)
 
 			Expect(config).To(ContainSubstring("snapshot {"))
 			Expect(config).To(ContainSubstring(`interval         = "1h"`))
@@ -569,15 +569,15 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 				},
 			}
 
-			config := reconciler.generateSnapshotConfig(snapshot)
+			config := reconciler.generateSnapshotConfig(snapshot, nil)
 
 			Expect(config).To(ContainSubstring(`interval         = "6h"`))
 			Expect(config).To(ContainSubstring("retain           = 48"))
 			Expect(config).To(ContainSubstring("stale            = true"))
-			Expect(config).To(ContainSubstring("aws_s3 {"))
-			Expect(config).To(ContainSubstring(`bucket              = "my-bucket"`))
-			Expect(config).To(ContainSubstring(`region              = "eu-west-1"`))
-			Expect(config).To(ContainSubstring(`endpoint            = "https://s3.custom.endpoint"`))
+			Expect(config).To(ContainSubstring("aws_storage {"))
+			Expect(config).To(ContainSubstring(`s3_bucket           = "my-bucket"`))
+			Expect(config).To(ContainSubstring(`s3_region           = "eu-west-1"`))
+			Expect(config).To(ContainSubstring(`s3_endpoint         = "https://s3.custom.endpoint"`))
 			Expect(config).To(ContainSubstring("s3_force_path_style = true"))
 		})
 
@@ -597,9 +597,9 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 				},
 			}
 
-			config := reconciler.generateSnapshotConfig(snapshot)
+			config := reconciler.generateSnapshotConfig(snapshot, nil)
 
-			Expect(config).To(ContainSubstring("google_cloud_storage {"))
+			Expect(config).To(ContainSubstring("google_storage {"))
 			Expect(config).To(ContainSubstring(`bucket = "gcs-nomad-snapshots"`))
 		})
 
@@ -620,7 +620,7 @@ var _ = Describe("NomadSnapshot Helper Functions", func() {
 				},
 			}
 
-			config := reconciler.generateSnapshotConfig(snapshot)
+			config := reconciler.generateSnapshotConfig(snapshot, nil)
 
 			Expect(config).To(ContainSubstring("azure_blob_storage {"))
 			Expect(config).To(ContainSubstring(`container_name = "nomad-snapshots"`))

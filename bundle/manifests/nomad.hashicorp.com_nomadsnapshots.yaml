@@ -404,9 +404,9 @@ spec:
                   - type
                   type: object
                 type: array
-              configMapName:
-                description: ConfigMapName is the name of the snapshot agent configuration
-                  ConfigMap
+              configSecretName:
+                description: ConfigSecretName is the name of the snapshot agent configuration
+                  Secret
                 type: string
               deploymentName:
                 description: DeploymentName is the name of the snapshot agent deployment
