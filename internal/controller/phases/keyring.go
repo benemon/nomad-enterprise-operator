@@ -78,6 +78,9 @@ type keyringState struct {
 
 	// LastDegraded dedupes degraded-cause events across revisits.
 	LastDegraded string `json:"lastDegraded,omitempty"`
+	// LastRetirementPending dedupes retirement reminders until the
+	// count changes.
+	LastRetirementPending string `json:"lastRetirementPending,omitempty"`
 }
 
 // storedKeyring is one persisted keyring: the full spec entry, or nil
@@ -171,16 +174,28 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		// active keys remain, drop the demoted entries.
 		token, terr := getManagementToken(ctx, p.Client, cluster)
 		if terr == nil {
-			done, kerr := p.removeInactiveKeys(ctx, cluster, token)
+			done, pending, kerr := p.removeInactiveKeys(ctx, cluster, token)
 			if kerr != nil {
 				p.surfaceDegraded(ctx, cluster, state, cm, "KeyringRotationPending",
 					fmt.Sprintf("Keyring cleanup pending: %v", kerr))
 				p.RevisitAfter = 15 * time.Second
 				break
 			}
+			if pending > 0 {
+				key := "keys"
+				if pending == 1 {
+					key = "key"
+				}
+				msg := fmt.Sprintf("%d old %s awaiting expiry of workload-identity claims", pending, key)
+				p.surfaceRetirementPending(ctx, cluster, state, cm, msg)
+			} else if state.LastRetirementPending != "" {
+				state.LastRetirementPending = ""
+				_ = p.saveState(ctx, cm, state)
+			}
 			if done {
 				state.Retiring = nil
 				state.Phase = keyringPhaseRetiring
+				state.LastRetirementPending = ""
 				if err := p.saveState(ctx, cm, state); err != nil {
 					return Error(err, "Failed to persist keyring state")
 				}
@@ -235,10 +250,16 @@ func (p *KeyringPhase) publish(cluster *nomadv1alpha1.NomadCluster, state *keyri
 	p.KeyringEntries = entries
 
 	displayPhase := state.Phase
+	if displayPhase == keyringPhaseRotating {
+		displayPhase = keyringPhaseReady
+	}
 	if p.probeDegraded {
 		displayPhase = "Degraded"
 	}
-	st := &nomadv1alpha1.KeyringStatus{Phase: displayPhase}
+	st := &nomadv1alpha1.KeyringStatus{
+		Phase:             displayPhase,
+		RetirementPending: state.LastRetirementPending,
+	}
 	for _, sk := range state.Active {
 		st.Active = append(st.Active, storedName(sk))
 	}
@@ -353,16 +374,17 @@ func (p *KeyringPhase) keyringClient(cluster *nomadv1alpha1.NomadCluster, token 
 
 // removeInactiveKeys deletes terminal non-active keys; true when only
 // active keys remain. Keys still rekeying are waited on, not deleted.
-func (p *KeyringPhase) removeInactiveKeys(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, token string) (bool, error) {
+func (p *KeyringPhase) removeInactiveKeys(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, token string) (bool, int, error) {
 	client, err := p.keyringClient(cluster, token)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	keys, err := client.KeyringList(ctx, token)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	done := true
+	pending := 0
 	for _, k := range keys {
 		switch k.State {
 		case "active":
@@ -370,15 +392,22 @@ func (p *KeyringPhase) removeInactiveKeys(ctx context.Context, cluster *nomadv1a
 		case "inactive":
 			done = false
 			if err := client.KeyringDelete(ctx, token, k.KeyID); err != nil {
-				return false, err
+				// Claim-held keys refuse deletion; they count as
+				// pending and drain as workload identities expire.
+				if strings.Contains(strings.ToLower(err.Error()), "root key in use") {
+					pending++
+					continue
+				}
+				return false, pending, err
 			}
 		default:
 			// "rekeying" (and anything unknown): re-encryption still in
 			// flight — deletion would be refused; just wait.
 			done = false
+			pending++
 		}
 	}
-	return done, nil
+	return done, pending, nil
 }
 
 // keyringConfigDelivered reports whether the live ConfigMap carries the
@@ -606,6 +635,7 @@ func (p *KeyringPhase) absorbSpecChanges(ctx context.Context, cluster *nomadv1al
 	state.Active = active
 	state.Retiring = mergeRetiring(state.Retiring, demoted)
 	state.Phase = keyringPhaseIntroducing
+	state.LastRetirementPending = ""
 	if err := p.saveState(ctx, cm, state); err != nil {
 		return Error(err, "Failed to persist keyring state")
 	}
@@ -658,6 +688,18 @@ func (p *KeyringPhase) surfaceDegraded(ctx context.Context, cluster *nomadv1alph
 	_ = p.saveState(ctx, cm, state)
 	if p.Recorder != nil {
 		p.Recorder.Event(cluster, corev1.EventTypeWarning, reason, msg)
+	}
+}
+
+// surfaceRetirementPending emits a Normal event when the pending count changes.
+func (p *KeyringPhase) surfaceRetirementPending(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap, msg string) {
+	if state.LastRetirementPending == msg {
+		return
+	}
+	state.LastRetirementPending = msg
+	_ = p.saveState(ctx, cm, state)
+	if p.Recorder != nil {
+		p.Recorder.Event(cluster, corev1.EventTypeNormal, "KeyringRetirementPending", msg)
 	}
 }
 
