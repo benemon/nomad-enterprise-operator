@@ -927,3 +927,61 @@ func TestSnapshotAgentSecurityContext(t *testing.T) {
 		t.Error("agent read-only root requires the /tmp staging mount")
 	}
 }
+
+func TestSnapshotAgentTrustBundle(t *testing.T) {
+	tests := []struct {
+		name       string
+		bundle     *nomadv1alpha1.TrustBundleSpec
+		wantBundle bool
+	}{
+		{name: "no trust bundle"},
+		{
+			name: "effective trust bundle",
+			bundle: &nomadv1alpha1.TrustBundleSpec{
+				ConfigMapRef: corev1.LocalObjectReference{Name: "snapshot-roots"},
+				Key:          "roots.pem",
+			},
+			wantBundle: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snap := newOneShotSnapshot("trust")
+			cluster := newTestCluster("snap-ns", "test-cluster")
+			cluster.Spec.TrustBundle = tt.bundle
+			r, _ := newSnapshotReconciler(snap, cluster)
+
+			template := r.buildAgentPodTemplate(snap, cluster, "https://addr:4646", "c", "s")
+			var volume *corev1.Volume
+			for i := range template.Spec.Volumes {
+				if template.Spec.Volumes[i].Name == "trust-bundle" {
+					volume = &template.Spec.Volumes[i]
+				}
+			}
+			var mount *corev1.VolumeMount
+			for i := range template.Spec.Containers[0].VolumeMounts {
+				if template.Spec.Containers[0].VolumeMounts[i].Name == "trust-bundle" {
+					mount = &template.Spec.Containers[0].VolumeMounts[i]
+				}
+			}
+
+			if !tt.wantBundle {
+				if volume != nil || mount != nil {
+					t.Fatalf("unexpected trust bundle volume=%+v mount=%+v", volume, mount)
+				}
+				return
+			}
+			if volume == nil || volume.ConfigMap == nil || volume.ConfigMap.Name != "snapshot-roots" {
+				t.Fatalf("trust bundle volume = %+v", volume)
+			}
+			if len(volume.ConfigMap.Items) != 1 || volume.ConfigMap.Items[0].Key != "roots.pem" ||
+				volume.ConfigMap.Items[0].Path != "ca-certificates.crt" {
+				t.Errorf("trust bundle items = %+v", volume.ConfigMap.Items)
+			}
+			if mount == nil || mount.MountPath != "/etc/ssl/certs" || !mount.ReadOnly {
+				t.Errorf("trust bundle mount = %+v", mount)
+			}
+		})
+	}
+}

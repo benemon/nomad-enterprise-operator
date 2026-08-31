@@ -341,6 +341,32 @@ defaults. Values are Nomad durations (`s`/`m`/`h`, e.g. `30m`, `2h`).
 | `server.gc.batchEvalHistory` | `string` | Nomad `24h` | Minimum retention of a terminal batch evaluation and its allocations (`batch_eval_gc_threshold`) |
 | `server.gc.evalHistory` | `string` | Nomad `1h` | Minimum retention of a terminal non-batch evaluation and its allocations (`eval_gc_threshold`) |
 
+### Trust bundle (`spec.trustBundle`)
+
+The Nomad Enterprise operand image ships without CA roots. Cloud
+keyrings (`awskms`, `azurekeyvault`, and `gcpckms`) and cloud snapshot
+targets therefore need a trust bundle to verify public TLS endpoints.
+The operator mounts the selected ConfigMap into server and snapshot-agent
+pods as `/etc/ssl/certs/ca-certificates.crt`.
+
+On OpenShift, leave `spec.trustBundle` unset. When
+`spec.openshift.enabled: true`, the operator creates
+`<cluster>-trust-bundle` with
+`config.openshift.io/inject-trusted-cabundle: "true"`; the OpenShift
+network operator injects the platform trust bundle. On other platforms,
+reference a ConfigMap containing your CA bundle, or bake CA roots into a
+custom operand image. Changing bundle content changes the server pod
+checksum and rolls the StatefulSet.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `trustBundle.configMapRef.name` | `string` | | ConfigMap in the NomadCluster namespace containing the CA bundle |
+| `trustBundle.key` | `string` | `ca-bundle.crt` | ConfigMap key containing the PEM bundle |
+
+Transit keyrings can still use `caSecretRef` as a per-entry override.
+Private CA roots shared across providers can instead be consolidated in
+the trust bundle.
+
 ### Keyrings (`spec.server.keyrings`)
 
 Nomad's root encryption keys — which protect Variables and sign
@@ -739,6 +765,7 @@ the `Ready` condition, not an admission error):
 | Scale-down requires a Raft leader | Scale-down pauses; `Ready` reason `ScaleDownBlocked` |
 | `audit.enabled=true` requires `audit.size` | Never violated in practice: `audit.size` defaults to `5Gi` at admission, and the operator falls back to `5Gi` if the field is explicitly cleared |
 | Multiple transit keyring entries require a distinct non-empty `keyIDPrefix` on each | `Ready` reason `KeyringInvalid` |
+| `spec.trustBundle` references a missing ConfigMap | `Ready` reason `TrustBundleConfigMapNotFound` |
 
 Not validated: the existence of the Secret named by
 `spec.license.secretName` is not checked at admission (a missing Secret
@@ -1399,6 +1426,7 @@ sub-field keeps its last-known value).
 | `LicenseExpired` | Nomad Enterprise license invalid — see `status.license` |
 | `AutopilotUnhealthy` | Raft autopilot reports unhealthy — see `status.autopilot` |
 | `LicenseSecretNotFound` | `spec.license.secretName` references a Secret that does not exist — create it; the operator re-reconciles the moment it appears |
+| `TrustBundleConfigMapNotFound` | `spec.trustBundle.configMapRef.name` references a ConfigMap that does not exist |
 | `LicenseSecretInvalid` | The license Secret exists but is missing the `license` key |
 | `CAExpired` | The CA certificate has expired; TLS handshakes fail cluster-wide — see `status.certificateAuthority`. Takes precedence over `WaitingForReplicas` so the cascading pod failures are attributed to their cause |
 | `PhaseFailed` | A reconcile phase errored; the message names the phase |

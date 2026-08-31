@@ -981,6 +981,23 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 		},
 	}
 
+	if name, key, ok := phases.TrustBundle(cluster); ok {
+		template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "trust-bundle",
+			MountPath: "/etc/ssl/certs",
+			ReadOnly:  true,
+		})
+		template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+			Name: "trust-bundle",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					Items:                []corev1.KeyToPath{{Key: key, Path: "ca-certificates.crt"}},
+				},
+			},
+		})
+	}
+
 	// Add storage credentials if specified
 	r.addStorageCredentials(snapshot, &template.Spec)
 

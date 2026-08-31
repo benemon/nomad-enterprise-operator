@@ -165,6 +165,23 @@ type Phase interface {
 // image has no USER directive.
 const nonRootUserID = int64(65532)
 
+const defaultTrustBundleKey = "ca-bundle.crt"
+
+// TrustBundle returns the effective ConfigMap name and key.
+func TrustBundle(cluster *nomadv1alpha1.NomadCluster) (string, string, bool) {
+	if cluster.Spec.TrustBundle != nil {
+		key := cluster.Spec.TrustBundle.Key
+		if key == "" {
+			key = defaultTrustBundleKey
+		}
+		return cluster.Spec.TrustBundle.ConfigMapRef.Name, key, true
+	}
+	if cluster.Spec.OpenShift.Enabled {
+		return cluster.Name + "-trust-bundle", defaultTrustBundleKey, true
+	}
+	return "", "", false
+}
+
 // getManagementToken loads the operator management token, empty with
 // no error when ACLs are disabled; a missing Secret defers the caller.
 func getManagementToken(ctx context.Context, c client.Client, cluster *nomadv1alpha1.NomadCluster) (string, error) {

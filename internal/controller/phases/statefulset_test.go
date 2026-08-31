@@ -23,11 +23,15 @@ import (
 	"testing"
 
 	hclparse "github.com/hashicorp/hcl"
+	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	hclgen "github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	"k8s.io/utils/ptr"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -35,6 +39,199 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
+
+func TestStatefulSetTrustBundle(t *testing.T) {
+	tests := []struct {
+		name             string
+		configure        func(*nomadv1alpha1.NomadCluster)
+		objects          func(*nomadv1alpha1.NomadCluster) []runtime.Object
+		wantBundle       bool
+		wantConfigMap    string
+		wantKey          string
+		wantInjected     bool
+		wantInjectedGone bool
+	}{
+		{
+			name:             "vanilla without trust bundle",
+			configure:        func(*nomadv1alpha1.NomadCluster) {},
+			wantInjectedGone: true,
+		},
+		{
+			name: "OpenShift injected trust bundle",
+			configure: func(cluster *nomadv1alpha1.NomadCluster) {
+				cluster.Spec.OpenShift.Enabled = true
+			},
+			wantBundle:    true,
+			wantConfigMap: "nomad-trust-bundle",
+			wantKey:       "ca-bundle.crt",
+			wantInjected:  true,
+		},
+		{
+			name: "explicit trust bundle with custom key",
+			configure: func(cluster *nomadv1alpha1.NomadCluster) {
+				cluster.Spec.OpenShift.Enabled = true
+				cluster.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+					ConfigMapRef: corev1.LocalObjectReference{Name: "corporate-roots"},
+					Key:          "roots.pem",
+				}
+			},
+			objects: func(cluster *nomadv1alpha1.NomadCluster) []runtime.Object {
+				return []runtime.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: "corporate-roots", Namespace: cluster.Namespace,
+				}}}
+			},
+			wantBundle:       true,
+			wantConfigMap:    "corporate-roots",
+			wantKey:          "roots.pem",
+			wantInjectedGone: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := newTestCluster("ns", "nomad")
+			tt.configure(cluster)
+			var objects []runtime.Object
+			if tt.objects != nil {
+				objects = tt.objects(cluster)
+			}
+			phaseCtx := newTestPhaseContext(objects...)
+			configPhase := NewConfigMapPhase(phaseCtx)
+			if result := configPhase.Execute(context.Background(), cluster); result.Error != nil {
+				t.Fatalf("ConfigMapPhase.Execute() error = %v", result.Error)
+			}
+
+			sts := NewStatefulSetPhase(phaseCtx).buildStatefulSet(context.Background(), cluster)
+			var volume *corev1.Volume
+			for i := range sts.Spec.Template.Spec.Volumes {
+				if sts.Spec.Template.Spec.Volumes[i].Name == "trust-bundle" {
+					volume = &sts.Spec.Template.Spec.Volumes[i]
+				}
+			}
+			var mount *corev1.VolumeMount
+			for i := range sts.Spec.Template.Spec.Containers[0].VolumeMounts {
+				if sts.Spec.Template.Spec.Containers[0].VolumeMounts[i].Name == "trust-bundle" {
+					mount = &sts.Spec.Template.Spec.Containers[0].VolumeMounts[i]
+				}
+			}
+			if !tt.wantBundle {
+				if volume != nil || mount != nil {
+					t.Fatalf("unexpected trust bundle volume=%+v mount=%+v", volume, mount)
+				}
+			} else {
+				if volume == nil || volume.ConfigMap == nil {
+					t.Fatalf("trust bundle ConfigMap volume missing: %+v", volume)
+				}
+				if volume.ConfigMap.Name != tt.wantConfigMap {
+					t.Errorf("ConfigMap name = %q, want %q", volume.ConfigMap.Name, tt.wantConfigMap)
+				}
+				if len(volume.ConfigMap.Items) != 1 || volume.ConfigMap.Items[0].Key != tt.wantKey ||
+					volume.ConfigMap.Items[0].Path != "ca-certificates.crt" {
+					t.Errorf("ConfigMap items = %+v, want key %q at ca-certificates.crt", volume.ConfigMap.Items, tt.wantKey)
+				}
+				if mount == nil || mount.MountPath != "/etc/ssl/certs" || !mount.ReadOnly {
+					t.Errorf("trust bundle mount = %+v", mount)
+				}
+			}
+
+			injected := &corev1.ConfigMap{}
+			err := phaseCtx.Client.Get(context.Background(), types.NamespacedName{
+				Name: "nomad-trust-bundle", Namespace: cluster.Namespace,
+			}, injected)
+			if tt.wantInjected {
+				if err != nil {
+					t.Fatalf("injected ConfigMap missing: %v", err)
+				}
+				if got := injected.Labels["config.openshift.io/inject-trusted-cabundle"]; got != "true" {
+					t.Errorf("inject label = %q, want true", got)
+				}
+				if len(injected.Data) != 0 || len(injected.BinaryData) != 0 {
+					t.Errorf("injected ConfigMap starts with data: %+v %+v", injected.Data, injected.BinaryData)
+				}
+			}
+			if tt.wantInjectedGone && !apierrors.IsNotFound(err) {
+				t.Fatalf("injected ConfigMap unexpectedly exists or lookup failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestTrustBundleChecksum(t *testing.T) {
+	cluster := newTestCluster("ns", "nomad")
+	cluster.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+		ConfigMapRef: corev1.LocalObjectReference{Name: "roots"},
+	}
+
+	t.Run("absent and empty ConfigMaps do not error", func(t *testing.T) {
+		absent := NewStatefulSetPhase(newTestPhaseContext())
+		if _, err := absent.computeTrustBundleChecksum(context.Background(), cluster); err != nil {
+			t.Fatalf("absent ConfigMap error = %v", err)
+		}
+
+		empty := NewStatefulSetPhase(newTestPhaseContext(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: "roots", Namespace: "ns",
+		}}))
+		if _, err := empty.computeTrustBundleChecksum(context.Background(), cluster); err != nil {
+			t.Fatalf("empty ConfigMap error = %v", err)
+		}
+	})
+
+	t.Run("content change changes pod checksum", func(t *testing.T) {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "roots", Namespace: "ns"},
+			Data:       map[string]string{"ca-bundle.crt": "first"},
+		}
+		phaseCtx := newTestPhaseContext(cm)
+		phase := NewStatefulSetPhase(phaseCtx)
+		before := phase.buildStatefulSet(context.Background(), cluster).Spec.Template.Annotations["checksum/config"]
+
+		stored := &corev1.ConfigMap{}
+		key := types.NamespacedName{Name: "roots", Namespace: "ns"}
+		if err := phaseCtx.Client.Get(context.Background(), key, stored); err != nil {
+			t.Fatalf("get ConfigMap: %v", err)
+		}
+		stored.Data["ca-bundle.crt"] = "second"
+		if err := phaseCtx.Client.Update(context.Background(), stored); err != nil {
+			t.Fatalf("update ConfigMap: %v", err)
+		}
+
+		after := phase.buildStatefulSet(context.Background(), cluster).Spec.Template.Annotations["checksum/config"]
+		if before == after {
+			t.Fatalf("checksum/config did not change: %q", before)
+		}
+	})
+}
+
+func TestTrustBundleMissingConfigMap(t *testing.T) {
+	cluster := newTestCluster("ns", "nomad")
+	cluster.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+		ConfigMapRef: corev1.LocalObjectReference{Name: "missing-roots"},
+	}
+	result := NewConfigMapPhase(newTestPhaseContext()).Execute(context.Background(), cluster)
+	if result.Error == nil {
+		t.Fatal("missing trust bundle ConfigMap did not fail validation")
+	}
+	if result.Reason != "TrustBundleConfigMapNotFound" {
+		t.Errorf("reason = %q, want TrustBundleConfigMapNotFound", result.Reason)
+	}
+}
+
+func TestNeedsUpdateTrustBundleRemoval(t *testing.T) {
+	phase := NewStatefulSetPhase(newTestPhaseContext())
+	withBundle := newTestCluster("ns", "nomad")
+	withBundle.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+		ConfigMapRef: corev1.LocalObjectReference{Name: "roots"},
+	}
+	withoutBundle := withBundle.DeepCopy()
+	withoutBundle.Spec.TrustBundle = nil
+
+	existing := phase.buildStatefulSet(context.Background(), withBundle)
+	desired := phase.buildStatefulSet(context.Background(), withoutBundle)
+	update, reason := phase.needsUpdate(existing, desired)
+	if !update || reason != "trust bundle mount" {
+		t.Errorf("update=%v reason=%q, want trust bundle mount drift", update, reason)
+	}
+}
 
 // TestBuildStatefulSet_ChecksumExcludesReplicas: clusters differing
 // only in spec.replicas must produce identical checksum/config — a

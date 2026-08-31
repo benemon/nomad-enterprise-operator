@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"sort"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
@@ -53,6 +54,10 @@ func (p *ConfigMapPhase) Name() string {
 // encryption key (and inline keyring tokens), so it needs Secret-class
 // custody — etcd encryption scope, RBAC class, tmpfs volume mounts.
 func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	if result := p.ensureTrustBundle(ctx, cluster); result.Error != nil || result.Requeue {
+		return result
+	}
+
 	// Generate server.hcl configuration
 	generator := hcl.NewGenerator(cluster, p.AdvertiseAddress, p.GossipKey)
 	generator.Keyrings = p.Keyrings
@@ -104,6 +109,64 @@ func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	}
 
 	return p.reapLegacyConfigMap(ctx, cluster)
+}
+
+func (p *ConfigMapPhase) ensureTrustBundle(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
+	name, _, ok := TrustBundle(cluster)
+	if !ok {
+		return OK()
+	}
+
+	if cluster.Spec.TrustBundle != nil {
+		cm := &corev1.ConfigMap{}
+		if err := p.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, cm); err != nil {
+			if errors.IsNotFound(err) {
+				return ErrorWithReason(fmt.Errorf("trust bundle ConfigMap %q not found", name),
+					"TrustBundleConfigMapNotFound",
+					fmt.Sprintf("Trust bundle ConfigMap %q not found", name))
+			}
+			return Error(err, "Failed to get trust bundle ConfigMap")
+		}
+		return OK()
+	}
+
+	labels := GetLabels(cluster)
+	labels["config.openshift.io/inject-trusted-cabundle"] = "true"
+	desired := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: cluster.Namespace,
+			Labels:    labels,
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, desired, p.Scheme); err != nil {
+		return Error(err, "Failed to set owner reference on trust bundle ConfigMap")
+	}
+
+	existing := &corev1.ConfigMap{}
+	err := p.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, existing)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			p.Log.Info("Creating OpenShift trust bundle ConfigMap", "name", name)
+			if err := p.Client.Create(ctx, desired); err != nil {
+				return Error(err, "Failed to create trust bundle ConfigMap")
+			}
+			return OK()
+		}
+		return Error(err, "Failed to get trust bundle ConfigMap")
+	}
+
+	if !reflect.DeepEqual(existing.Labels, desired.Labels) ||
+		!reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) {
+		existing.Labels = desired.Labels
+		existing.OwnerReferences = desired.OwnerReferences
+		p.Log.Info("Updating OpenShift trust bundle ConfigMap", "name", name)
+		if err := p.Client.Update(ctx, existing); err != nil {
+			return Error(err, "Failed to update trust bundle ConfigMap")
+		}
+	}
+
+	return OK()
 }
 
 // reapLegacyConfigMap deletes the pre-Secret rendered-config ConfigMap
