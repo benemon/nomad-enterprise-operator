@@ -26,6 +26,7 @@ spec:
     # datacenter defaults to namespace if empty
   openshift:
     enabled: true
+    # Leaving spec.trustBundle unset uses OpenShift's injected trusted-CA ConfigMap.
     route:
       enabled: true
       # Route always uses reencrypt termination with HTTP→HTTPS redirect.

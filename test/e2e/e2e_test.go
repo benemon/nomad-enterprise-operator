@@ -143,6 +143,9 @@ spec:
     tag: "2.0.5-ent"
   license:
     secretName: nomad-license
+  trustBundle:
+    configMapRef:
+      name: e2e-trust-bundle
   monitoring:
     prometheusRulesEnabled: true
   services:
@@ -551,10 +554,27 @@ var _ = Describe("Manager", Ordered, func() {
 
 	Context("NomadCluster reconciliation", Ordered, func() {
 		BeforeAll(func() {
-			By("applying the NomadCluster CR")
+			By("pre-creating the trust bundle ConfigMap")
+			trustBundle := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-trust-bundle
+  namespace: nomad-enterprise-operator-system
+data:
+  ca-bundle.crt: |
+    -----BEGIN CERTIFICATE-----
+    trust-bundle-e2e-payload
+    -----END CERTIFICATE-----
+`
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
-			cmd.Stdin = strings.NewReader(testClusterCR)
+			cmd.Stdin = strings.NewReader(trustBundle)
 			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create trust bundle ConfigMap")
+
+			By("applying the NomadCluster CR")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(testClusterCR)
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to apply NomadCluster CR")
 		})
 
@@ -1650,6 +1670,50 @@ spec:
 			cmd = exec.Command("kubectl", "delete", "nomadsnapshot", "test-snapshot-fail", "-n", namespace)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("mounts and removes the system trust bundle", func() {
+			By("reading the trust bundle from the server pod")
+			cmd := exec.Command("kubectl", "exec", testClusterName+"-0", "-n", namespace,
+				"-c", "nomad", "--", "cat", "/etc/ssl/certs/ca-certificates.crt")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("trust-bundle-e2e-payload"))
+
+			By("capturing the current server pod UID")
+			cmd = exec.Command("kubectl", "get", "pod", testClusterName+"-0", "-n", namespace,
+				"-o", "jsonpath={.metadata.uid}")
+			beforeUID, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("removing spec.trustBundle")
+			cmd = exec.Command("kubectl", "patch", "nomadcluster", testClusterName, "-n", namespace,
+				"--type=merge", "-p", `{"spec":{"trustBundle":null}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the StatefulSet template to remove the volume and mount")
+			trustJSONPath := `jsonpath={.spec.template.spec.volumes[?(@.name=="trust-bundle")].name}` +
+				`{.spec.template.spec.containers[0].volumeMounts[?(@.name=="trust-bundle")].name}`
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", testClusterName, "-n", namespace,
+					"-o", trustJSONPath)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(BeEmpty())
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the server pod to roll without the mount")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", testClusterName+"-0", "-n", namespace,
+					"-o", "jsonpath={.metadata.uid} {.status.conditions[?(@.type==\"Ready\")].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				fields := strings.Fields(output)
+				g.Expect(fields).To(HaveLen(2))
+				g.Expect(fields[0]).NotTo(Equal(strings.TrimSpace(beforeUID)))
+				g.Expect(fields[1]).To(Equal("True"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
 		It("should clean up resources on CR deletion", func() {

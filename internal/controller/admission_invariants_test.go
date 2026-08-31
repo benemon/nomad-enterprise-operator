@@ -390,6 +390,25 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				},
 			},
 			{
+				name: "trustBundle with ConfigMap ref only accepted",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+						ConfigMapRef: corev1.LocalObjectReference{Name: "platform-roots"},
+					}
+				},
+			},
+			{
+				name: "trustBundle key defaults to ca-bundle.crt",
+				mutate: func(c *nomadv1alpha1.NomadCluster) {
+					c.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+						ConfigMapRef: corev1.LocalObjectReference{Name: "platform-roots"},
+					}
+				},
+				verify: func(g Gomega, c *nomadv1alpha1.NomadCluster) {
+					g.Expect(c.Spec.TrustBundle.Key).To(Equal("ca-bundle.crt"))
+				},
+			},
+			{
 				name: "reclaimPolicy defaults to Delete",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
 					c.Spec.Persistence.ReclaimPolicy = ""
@@ -428,6 +447,25 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 				Expect(err.Error()).To(ContainSubstring(c.wantErr))
 			})
 		}
+
+		It("rejects an empty trustBundle", func() {
+			u := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "nomad.hashicorp.com/v1alpha1",
+				"kind":       "NomadCluster",
+				"metadata": map[string]interface{}{
+					"name":      "adm-cluster-empty-trust-bundle",
+					"namespace": namespace,
+				},
+				"spec": map[string]interface{}{
+					"license":     map[string]interface{}{"secretName": "nomad-license"},
+					"trustBundle": map[string]interface{}{},
+				},
+			}}
+			u.SetGroupVersionKind(nomadv1alpha1.GroupVersion.WithKind("NomadCluster"))
+			err := k8sClient.Create(ctx, u)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("configMapRef"))
+		})
 
 		It("vault default identity without audiences is rejected", func() {
 			u := &unstructured.Unstructured{Object: map[string]interface{}{

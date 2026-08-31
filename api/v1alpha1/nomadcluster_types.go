@@ -50,6 +50,10 @@ type NomadClusterSpec struct {
 	// +optional
 	OpenShift OpenShiftSpec `json:"openshift,omitempty"`
 
+	// TrustBundle names a ConfigMap mounted as the system trust store.
+	// +optional
+	TrustBundle *TrustBundleSpec `json:"trustBundle,omitempty"`
+
 	// Monitoring configures ServiceMonitor and PrometheusRule creation.
 	// Resources are created when enabled AND the Prometheus Operator
 	// CRDs are installed; independent of openshift.enabled.
@@ -83,6 +87,16 @@ type NomadClusterSpec struct {
 	// ImagePullSecrets for private registries
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+}
+
+// TrustBundleSpec references the CA bundle ConfigMap.
+type TrustBundleSpec struct {
+	// ConfigMapRef names the ConfigMap in the cluster's namespace.
+	ConfigMapRef corev1.LocalObjectReference `json:"configMapRef"`
+
+	// Key within the ConfigMap holding the PEM bundle.
+	// +kubebuilder:default="ca-bundle.crt"
+	Key string `json:"key,omitempty"`
 }
 
 // ImageSpec defines container image configuration

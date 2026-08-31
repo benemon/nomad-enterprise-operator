@@ -204,7 +204,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// including it would roll pods — and break quorum — on every
 	// replica change.
 	keyringsJSON, _ := json.Marshal(p.Keyrings)
-	configChecksum := ConfigChecksum(map[string]string{
+	configData := map[string]string{
 		"advertise":  p.AdvertiseAddress,
 		"gossip":     p.GossipKey,
 		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
@@ -213,7 +213,16 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 		"region":     cluster.Spec.Topology.Region,
 		"datacenter": cluster.Spec.Topology.Datacenter,
 		"keyrings":   string(keyringsJSON),
-	})
+	}
+	if _, _, ok := TrustBundle(cluster); ok {
+		bundleChecksum, err := p.computeTrustBundleChecksum(ctx, cluster)
+		if err != nil {
+			p.Log.Error(err, "Failed to compute trust bundle checksum, using empty hash")
+			bundleChecksum = ConfigChecksum(nil)
+		}
+		configData["trust-bundle"] = bundleChecksum
+	}
+	configChecksum := ConfigChecksum(configData)
 	// Get secrets checksum for pod annotation - hash actual secret contents
 	// This ensures pods restart when referenced secrets change
 	secretsChecksum, err := p.computeSecretsChecksum(ctx, cluster)
@@ -391,6 +400,13 @@ func (p *StatefulSetPhase) buildVolumeMounts(cluster *nomadv1alpha1.NomadCluster
 		MountPath: "/nomad/tls",
 		ReadOnly:  true,
 	})
+	if _, _, ok := TrustBundle(cluster); ok {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "trust-bundle",
+			MountPath: "/etc/ssl/certs",
+			ReadOnly:  true,
+		})
+	}
 
 	return mounts
 }
@@ -422,6 +438,17 @@ func (p *StatefulSetPhase) buildVolumes(cluster *nomadv1alpha1.NomadCluster) []c
 			},
 		},
 	})
+	if name, key, ok := TrustBundle(cluster); ok {
+		volumes = append(volumes, corev1.Volume{
+			Name: "trust-bundle",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					Items:                []corev1.KeyToPath{{Key: key, Path: "ca-certificates.crt"}},
+				},
+			},
+		})
+	}
 
 	// Scratch space to pair with readOnlyRootFilesystem (neo-8xu)
 	volumes = append(volumes, corev1.Volume{
@@ -588,6 +615,10 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 		return true, "pod securityContext"
 	}
 
+	if reason := trustBundleDrift(existing.Spec.Template.Spec, desired.Spec.Template.Spec); reason != "" {
+		return true, reason
+	}
+
 	existingChecksum := existing.Spec.Template.Annotations["checksum/config"]
 	desiredChecksum := desired.Spec.Template.Annotations["checksum/config"]
 	if existingChecksum != desiredChecksum {
@@ -600,6 +631,48 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 		return true, fmt.Sprintf("checksum/secrets %s -> %s", existingSecretsChecksum, desiredSecretsChecksum)
 	}
 	return false, ""
+}
+
+func trustBundleDrift(existing, desired corev1.PodSpec) string {
+	var existingMount, desiredMount *corev1.VolumeMount
+	if len(existing.Containers) > 0 {
+		for i := range existing.Containers[0].VolumeMounts {
+			if existing.Containers[0].VolumeMounts[i].Name == "trust-bundle" {
+				existingMount = &existing.Containers[0].VolumeMounts[i]
+			}
+		}
+	}
+	if len(desired.Containers) > 0 {
+		for i := range desired.Containers[0].VolumeMounts {
+			if desired.Containers[0].VolumeMounts[i].Name == "trust-bundle" {
+				desiredMount = &desired.Containers[0].VolumeMounts[i]
+			}
+		}
+	}
+	if (existingMount == nil) != (desiredMount == nil) ||
+		(existingMount != nil && (existingMount.MountPath != desiredMount.MountPath ||
+			existingMount.ReadOnly != desiredMount.ReadOnly)) {
+		return "trust bundle mount"
+	}
+
+	var existingVolume, desiredVolume *corev1.Volume
+	for i := range existing.Volumes {
+		if existing.Volumes[i].Name == "trust-bundle" {
+			existingVolume = &existing.Volumes[i]
+		}
+	}
+	for i := range desired.Volumes {
+		if desired.Volumes[i].Name == "trust-bundle" {
+			desiredVolume = &desired.Volumes[i]
+		}
+	}
+	if (existingVolume == nil) != (desiredVolume == nil) ||
+		(existingVolume != nil && (existingVolume.ConfigMap == nil || desiredVolume.ConfigMap == nil ||
+			existingVolume.ConfigMap.Name != desiredVolume.ConfigMap.Name ||
+			!reflect.DeepEqual(existingVolume.ConfigMap.Items, desiredVolume.ConfigMap.Items))) {
+		return "trust bundle volume"
+	}
+	return ""
 }
 
 // getResourcesWithDefaults returns resource requirements with sensible defaults applied.
@@ -694,6 +767,30 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+func (p *StatefulSetPhase) computeTrustBundleChecksum(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (string, error) {
+	name, _, ok := TrustBundle(cluster)
+	if !ok {
+		return ConfigChecksum(nil), nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := p.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, cm); err != nil {
+		if errors.IsNotFound(err) {
+			return ConfigChecksum(nil), nil
+		}
+		return "", fmt.Errorf("failed to get trust bundle ConfigMap %s: %w", name, err)
+	}
+
+	data := make(map[string]string, len(cm.Data)+len(cm.BinaryData))
+	for key, value := range cm.Data {
+		data[key] = value
+	}
+	for key, value := range cm.BinaryData {
+		data[key] = string(value)
+	}
+	return ConfigChecksum(data), nil
 }
 
 // getGossipSecretName returns the gossip secret name for the cluster.
