@@ -750,13 +750,18 @@ type KeyringStatus struct {
 	// +optional
 	Retiring []string `json:"retiring,omitempty"`
 
+	// RetirementPending summarises why retiring keys cannot be removed yet.
+	// +optional
+	RetirementPending string `json:"retirementPending,omitempty"`
+
 	// TokenExpiry is when the operator-managed Vault token expires;
 	// only set when a transit entry uses auth.
 	// +optional
 	TokenExpiry *metav1.Time `json:"tokenExpiry,omitempty"`
 
-	// Phase is Ready, Introducing, Rotating, Retiring, or Degraded
-	// (Ready state machine, but Nomad reports the keyring inoperable).
+	// Phase is Ready, Introducing, Rotating, Retiring, or Degraded. Ready
+	// includes non-blocking retirement of old keys after rotation succeeds;
+	// Degraded means Nomad reports the keyring inoperable.
 	// +kubebuilder:validation:Enum=Ready;Introducing;Rotating;Retiring;Degraded
 	// +optional
 	Phase string `json:"phase,omitempty"`

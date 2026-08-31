@@ -1331,14 +1331,19 @@ spec:
                     type: array
                   phase:
                     description: |-
-                      Phase is Ready, Introducing, Rotating, Retiring, or Degraded
-                      (Ready state machine, but Nomad reports the keyring inoperable).
+                      Phase is Ready, Introducing, Rotating, Retiring, or Degraded. Ready
+                      includes non-blocking retirement of old keys after rotation succeeds;
+                      Degraded means Nomad reports the keyring inoperable.
                     enum:
                     - Ready
                     - Introducing
                     - Rotating
                     - Retiring
                     - Degraded
+                    type: string
+                  retirementPending:
+                    description: RetirementPending summarises why retiring keys cannot
+                      be removed yet.
                     type: string
                   retiring:
                     description: |-

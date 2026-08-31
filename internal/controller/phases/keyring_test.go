@@ -186,14 +186,15 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 		t.Fatal("explicit inactive aead block must be rendered during introduce")
 	}
 
-	// Reconcile 3: config delivered -> rotation fires, phase Rotating.
+	// Reconcile 3: config delivered -> rotation completes. Old-key
+	// retirement remains internal background work, so status is Ready.
 	deliverConfig(t, phase)
 	mock.EXPECT().KeyringRotateFull(context.Background(), "").Return(nil).Once()
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
-	if cluster.Status.Keyring.Phase != "Rotating" {
-		t.Fatalf("phase = %s, want Rotating", cluster.Status.Keyring.Phase)
+	if cluster.Status.Keyring.Phase != "Ready" {
+		t.Fatalf("phase = %s, want Ready after successful rotation", cluster.Status.Keyring.Phase)
 	}
 
 	// Reconcile 3b: a rekeying key means re-encryption is in flight —
@@ -204,8 +205,8 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
-	if cluster.Status.Keyring.Phase != "Rotating" {
-		t.Fatalf("phase = %s, want Rotating while rekeying", cluster.Status.Keyring.Phase)
+	if cluster.Status.Keyring.Phase != "Ready" {
+		t.Fatalf("phase = %s, want Ready while rekeying", cluster.Status.Keyring.Phase)
 	}
 
 	// Reconcile 4: one inactive key -> deleted; not done this pass.
@@ -216,8 +217,8 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
-	if cluster.Status.Keyring.Phase != "Rotating" {
-		t.Fatalf("phase = %s, want Rotating until list is clean", cluster.Status.Keyring.Phase)
+	if cluster.Status.Keyring.Phase != "Ready" {
+		t.Fatalf("phase = %s, want Ready until list is clean", cluster.Status.Keyring.Phase)
 	}
 
 	// Reconcile 5: clean list -> Retiring; aead leaves the render.
@@ -255,6 +256,61 @@ func TestKeyringEnableLifecycle(t *testing.T) {
 	}
 	if !started || !completed {
 		t.Fatalf("migration events missing: started=%v completed=%v", started, completed)
+	}
+}
+
+func TestKeyringRetirementPendingClaims(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, recorder, keys := keyringFixture(t, mock)
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	mock.EXPECT().KeyringRotateFull(context.Background(), "").Return(nil).Once()
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	drainEvents(recorder)
+
+	*keys = []*nomad.RootKey{
+		{KeyID: "old", State: "inactive"}, {KeyID: "new", State: "active"},
+	}
+	mock.EXPECT().KeyringDelete(context.Background(), "", "old").
+		Return(fmt.Errorf("root key in use, cannot delete")).Twice()
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if got := cluster.Status.Keyring; got.Phase != "Ready" || len(got.Retiring) == 0 ||
+		got.RetirementPending != "1 old key awaiting expiry of workload-identity claims" {
+		t.Fatalf("status = %+v, want Ready with retirement pending", got)
+	}
+	if events := drainEvents(recorder); len(events) != 1 ||
+		!strings.HasPrefix(events[0], "Normal KeyringRetirementPending ") {
+		t.Fatalf("events = %q, want one Normal KeyringRetirementPending event", events)
+	}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if events := drainEvents(recorder); len(events) != 0 {
+		t.Fatalf("unchanged retirement pending count emitted events: %q", events)
+	}
+
+	// A key that deletes successfully is not "awaiting expiry": with the
+	// claim released, the count must drop rather than double-count the
+	// removed key.
+	mock.EXPECT().KeyringDelete(context.Background(), "", "old").Return(nil).Once()
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if got := cluster.Status.Keyring; got.RetirementPending != "" {
+		t.Fatalf("retirementPending = %q, want empty after successful delete", got.RetirementPending)
 	}
 }
 

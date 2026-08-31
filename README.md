@@ -417,8 +417,18 @@ operator-managed cycle: render the union of old and new keyrings, roll
 the servers, rotate every root key under the new set, remove the old
 keys, retire the demoted keyrings, and roll once more.
 `status.keyring` reports `phase` (`Ready`, `Introducing`, `Rotating`,
-`Retiring`, `Degraded`), the `active` and `retiring` sets, and
-`tokenExpiry` when the operator manages a Vault token. `Degraded` means
+`Retiring`, `Degraded`), the `active` and `retiring` sets,
+`retirementPending` while old keys await removal, and `tokenExpiry`
+when the operator manages a Vault token. Once rotation under the new
+set succeeds, the phase is `Ready`; old-key removal continues in the
+background while `retiring` remains populated.
+
+On live clusters, old-key retirement follows workload-identity claim
+expiry. Identities without TTLs can defer retirement until their
+workloads churn, so set identity TTLs as the
+`server.vaults[].defaultIdentity.ttl` examples below model. The operator
+reports the remaining old-key count in `retirementPending` and emits a
+debounced Normal `KeyringRetirementPending` Event. `Degraded` means
 the state machine is settled but Nomad itself reports the keyring
 inoperable — config delivery is not initialization, so the operator
 probes Nomad's own key list and emits a `KeyringNotInitialized` Warning
@@ -1399,7 +1409,7 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.certificateAuthority.expiryTime` | CA certificate expiry |
 | `status.certificateAuthority.subject` | CA certificate subject DN |
 | `status.nomadVersion` | Nomad agent version observed via `/v1/agent/self` (e.g. `1.11.0+ent`); empty until the first successful probe |
-| `status.keyring` | Keyring set state: `phase` (`Ready`/`Introducing`/`Rotating`/`Retiring`), `active[]`, `retiring[]`, and `tokenExpiry` for operator-managed Vault tokens |
+| `status.keyring` | Keyring set state: `phase` (`Ready`/`Introducing`/`Rotating`/`Retiring`/`Degraded`), `active[]`, `retiring[]`, `retirementPending` for the old-key cleanup tail, and `tokenExpiry` for operator-managed Vault tokens |
 | `status.license.valid` | Whether the Nomad license is valid |
 | `status.license.expirationTime` | License expiry time |
 | `status.license.features` | Licensed features |
