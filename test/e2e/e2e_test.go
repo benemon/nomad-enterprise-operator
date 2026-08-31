@@ -3355,15 +3355,19 @@ spec:
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("creating the second Nomad namespace")
-			output, err = utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
-				"nomad", "namespace", "apply", "-description", "Vault workload identity e2e", "team-b"))
-			Expect(err).NotTo(HaveOccurred(), "failed to create Nomad namespace: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "exec", wiCluster+"-0", "-n", namespace, "--",
+					"nomad", "namespace", "apply", "-description", "Vault workload identity e2e", "team-b"))
+				g.Expect(err).NotTo(HaveOccurred(), "failed to create Nomad namespace: %s", out)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 			By("creating the Vault Enterprise namespace")
-			output, err = utils.Run(exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault2", "--",
-				"env", "VAULT_ADDR=http://127.0.0.1:8200", "VAULT_TOKEN=e2e-root",
-				"vault", "namespace", "create", "team-a"))
-			Expect(err).NotTo(HaveOccurred(), "failed to create Vault namespace: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "exec", "vault", "-n", "e2e-vault2", "--",
+					"env", "VAULT_ADDR=http://127.0.0.1:8200", "VAULT_TOKEN=e2e-root",
+					"sh", "-c", "vault namespace lookup team-a >/dev/null 2>&1 || vault namespace create team-a"))
+				g.Expect(err).NotTo(HaveOccurred(), "failed to create Vault namespace: %s", out)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 			jwksURL := fmt.Sprintf("https://%s-internal.%s.svc.cluster.local:4646/.well-known/jwks.json", wiCluster, namespace)
 			vaultSetups := []struct {
@@ -3380,37 +3384,35 @@ spec:
 			}
 			for _, setup := range vaultSetups {
 				By("configuring JWT workload identity in " + setup.kubeNamespace + "/" + setup.vaultNamespace)
-				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
-					"sh", "-c", "cat >/tmp/nomad-ca.pem")
-				cmd.Stdin = strings.NewReader(string(caCert))
-				output, err = utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred(), "failed to install Nomad CA in Vault pod: %s", output)
-
 				vaultEnv := []string{"VAULT_ADDR=http://127.0.0.1:8200", "VAULT_TOKEN=e2e-root"}
 				if setup.vaultNamespace != "" {
 					vaultEnv = append(vaultEnv, "VAULT_NAMESPACE="+setup.vaultNamespace)
 				}
-				args := append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
-				args = append(args, "vault", "auth", "enable", "-path=nomad-workloads", "jwt")
-				output, err = utils.Run(exec.Command("kubectl", args...))
-				Expect(err).NotTo(HaveOccurred(), "failed to enable Vault JWT auth: %s", output)
+				// File content rides exec env vars, not stdin (kubectl
+				// exec -i occasionally delivers empty streams), and every
+				// step is an idempotent script under retry — Vault fetches
+				// jwks_url at config-write time, so that step also waits
+				// out JWKS readiness on the just-started cluster.
+				vaultStep := func(desc, script string, contentEnv ...string) {
+					args := append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
+					args = append(args, contentEnv...)
+					args = append(args, "sh", "-c", script)
+					Eventually(func(g Gomega) {
+						out, err := utils.Run(exec.Command("kubectl", args...))
+						g.Expect(err).NotTo(HaveOccurred(), "%s: %s", desc, out)
+					}, 2*time.Minute, 5*time.Second).Should(Succeed(), desc)
+				}
 
-				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
-				args = append(args, "vault", "write", "auth/nomad-workloads/config",
-					"jwks_url="+jwksURL, "jwks_ca_pem=@/tmp/nomad-ca.pem")
-				output, err = utils.Run(exec.Command("kubectl", args...))
-				Expect(err).NotTo(HaveOccurred(), "failed to configure Vault JWT auth: %s", output)
+				vaultStep("enable and configure JWT auth",
+					`printf %s "$NOMAD_CA" > /tmp/nomad-ca.pem && `+
+						`(vault auth enable -path=nomad-workloads jwt || true) && `+
+						`vault write auth/nomad-workloads/config jwks_url=`+jwksURL+` jwks_ca_pem=@/tmp/nomad-ca.pem`,
+					"NOMAD_CA="+string(caCert))
 
-				policy := `path "secret/data/e2e" { capabilities = ["read"] }`
-				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
-					"sh", "-c", "cat >/tmp/nomad-policy.hcl")
-				cmd.Stdin = strings.NewReader(policy)
-				output, err = utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred(), "failed to write Vault policy file: %s", output)
-				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
-				args = append(args, "vault", "policy", "write", setup.policy, "/tmp/nomad-policy.hcl")
-				output, err = utils.Run(exec.Command("kubectl", args...))
-				Expect(err).NotTo(HaveOccurred(), "failed to write Vault policy: %s", output)
+				vaultStep("write policy",
+					`printf %s "$POLICY" > /tmp/nomad-policy.hcl && `+
+						`vault policy write `+setup.policy+` /tmp/nomad-policy.hcl`,
+					`POLICY=path "secret/data/e2e" { capabilities = ["read"] }`)
 
 				role := fmt.Sprintf(`{"role_type":"jwt","bound_audiences":["vault.io"],`+
 					`"bound_claims":{"nomad_namespace":"%s","nomad_job_id":"%s"},`+
@@ -3418,29 +3420,20 @@ spec:
 					`"token_type":"service","token_policies":["%s"],`+
 					`"token_period":"30m","token_explicit_max_ttl":0}`,
 					setup.nomadNamespace, setup.jobID, setup.policy)
-				cmd = exec.Command("kubectl", "exec", "-i", "vault", "-n", setup.kubeNamespace, "--",
-					"sh", "-c", "cat >/tmp/nomad-role.json")
-				cmd.Stdin = strings.NewReader(role)
-				output, err = utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred(), "failed to write Vault role file: %s", output)
-				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
-				args = append(args, "vault", "write", "auth/nomad-workloads/role/"+setup.role, "@/tmp/nomad-role.json")
-				output, err = utils.Run(exec.Command("kubectl", args...))
-				Expect(err).NotTo(HaveOccurred(), "failed to write Vault JWT role: %s", output)
+				vaultStep("write JWT role",
+					`printf %s "$ROLE_JSON" > /tmp/nomad-role.json && `+
+						`vault write auth/nomad-workloads/role/`+setup.role+` @/tmp/nomad-role.json`,
+					"ROLE_JSON="+role)
 
 				if setup.vaultNamespace != "" {
 					// A fresh Vault namespace has no secrets engines; dev
 					// mode mounts secret/ in the root namespace only.
-					args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
-					args = append(args, "vault", "secrets", "enable", "-path=secret", "-version=2", "kv")
-					output, err = utils.Run(exec.Command("kubectl", args...))
-					Expect(err).NotTo(HaveOccurred(), "failed to enable KV engine in Vault namespace: %s", output)
+					vaultStep("enable KV engine",
+						`vault secrets enable -path=secret -version=2 kv || vault kv list secret >/dev/null`)
 				}
 
-				args = append([]string{"exec", "vault", "-n", setup.kubeNamespace, "--", "env"}, vaultEnv...)
-				args = append(args, "vault", "kv", "put", "secret/e2e", "value="+setup.secretValue)
-				output, err = utils.Run(exec.Command("kubectl", args...))
-				Expect(err).NotTo(HaveOccurred(), "failed to write Vault test secret: %s", output)
+				vaultStep("write test secret",
+					`vault kv put secret/e2e value=`+setup.secretValue)
 			}
 		})
 
