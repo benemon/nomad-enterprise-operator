@@ -3735,9 +3735,10 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "bucket create failed: %s", out)
 			// Abort-incomplete-multipart guard; snapshot objects are
 			// single-part but the rule costs one call.
+			mpuRule := `{"Rules":[{"ID":"abort-mpu","Status":"Enabled","Filter":{},` +
+				`"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}`
 			_, _ = awsCLI("s3api", "put-bucket-lifecycle-configuration", "--bucket", ciBucket,
-				"--lifecycle-configuration",
-				`{"Rules":[{"ID":"abort-mpu","Status":"Enabled","Filter":{},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}`)
+				"--lifecycle-configuration", mpuRule)
 
 			By("building the trust bundle from the runner's CA store")
 			cmd := exec.Command("kubectl", "create", "configmap", "aws-ci-trust", "-n", namespace,
