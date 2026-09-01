@@ -1136,6 +1136,17 @@ missing Secret reports `Ready=False` with reason
 S3 and Azure, the credentials are included in `checksum/config`, so
 rotation rolls a recurring Deployment onto the new config.
 
+**Credential custody.** Because the agent reads credentials from its
+config file only, the operator embeds the values from
+`credentialsSecretRef` into the rendered `<snapshot>-snapshot-config`
+Secret. The same credentials therefore exist in two Secrets in the
+namespace: the one you manage, and the rendered artifact. Both are
+Secret-class objects — plan etcd encryption and namespace RBAC
+accordingly, and treat access to either as access to the storage
+backend. Rotation flows from your Secret; the rendered copy converges
+within one reconcile. The server configuration Secret follows the same
+custody model for the gossip key and keyring tokens.
+
 Ambient identity for S3 and GCS targets carries the same pod-identity
 caveat as [server keyrings](#keyrings-specserverkeyrings): node-level
 identities work without extra wiring, while IRSA and GKE Workload
