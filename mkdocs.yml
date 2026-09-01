@@ -1,0 +1,68 @@
+site_name: Nomad Enterprise Operator
+site_url: https://benemon.github.io/nomad-enterprise-operator/
+repo_url: https://github.com/benemon/nomad-enterprise-operator
+repo_name: benemon/nomad-enterprise-operator
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Guides:
+      - TLS and trust: guides/tls.md
+      - Keyrings: guides/keyrings.md
+      - Vault workload identity: guides/workload-identity.md
+      - ACLs: guides/acls.md
+      - Monitoring: guides/monitoring.md
+      - Sizing, placement, and scaling: guides/scaling.md
+  - Operations:
+      - Versions and upgrades: operations/versions.md
+      - Upgrade runbook: runbooks/upgrade.md
+      - Restore runbook: runbooks/restore.md
+      - Disaster recovery: runbooks/disaster-recovery.md
+  - Security:
+      - Posture and tenancy: security.md
+      - Threat model: threat-model/README.md
+  - Reference:
+      - NomadCluster: reference/nomadcluster.md
+      - NomadSnapshot: reference/nomadsnapshot.md
+      - NomadAutoscaler: reference/nomadautoscaler.md
+      - Reconciliation phases: reference/reconciliation.md
+
+validation:
+  links:
+    absolute_links: warn
+    unrecognized_links: warn
