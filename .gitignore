@@ -12,7 +12,6 @@ docs/*
 !docs/runbooks/
 # Threat model referenced from README — repo content, not scratch
 !docs/threat-model/
-CONTRIBUTING.md
 CHANGELOG.md
 .github/PULL_REQUEST_TEMPLATE.md
 *.exe
