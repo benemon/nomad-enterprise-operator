@@ -3689,6 +3689,181 @@ spec:
 		})
 	})
 
+	// Real AWS verification, gated on the scoped CI credentials
+	// (nomad-ci-user: use-only on one KMS key; S3 lifecycle within the
+	// nomad-ci-* name prefix). One credential serves both legs — the
+	// keyring and s3 secret contracts share the AWS_* key names.
+	Context("AWS cloud verification", Ordered, func() {
+		const awsCluster = "aws-ci"
+
+		awsEnv := func(name string) string { return os.Getenv(name) }
+		ciBucket := "nomad-ci-e2e-" + strings.ToLower(os.Getenv("GITHUB_RUN_ID"))
+		awsCLI := func(args ...string) (string, error) {
+			base := append([]string{"--region", awsEnv("AWS_CI_REGION")}, args...)
+			cmd := exec.Command("aws", base...)
+			cmd.Env = append(os.Environ(),
+				"AWS_ACCESS_KEY_ID="+awsEnv("AWS_CI_ACCESS_KEY_ID"),
+				"AWS_SECRET_ACCESS_KEY="+awsEnv("AWS_CI_SECRET_ACCESS_KEY"))
+			out, err := cmd.CombinedOutput()
+			return string(out), err
+		}
+
+		BeforeAll(func() {
+			if awsEnv("AWS_CI_SECRET_ACCESS_KEY") == "" || awsEnv("AWS_CI_KMS_KEY_ARN") == "" {
+				Skip("AWS CI credentials not present")
+			}
+			if _, err := exec.LookPath("aws"); err != nil {
+				Skip("aws CLI not present")
+			}
+			if os.Getenv("GITHUB_RUN_ID") == "" {
+				ciBucket = "nomad-ci-e2e-local"
+			}
+
+			By("sweeping stale CI buckets from aborted runs")
+			// Cancelled runs skip AfterAll; each run clears predecessors
+			// so strays live at most until the next credentialed run.
+			if out, err := awsCLI("s3api", "list-buckets", "--query", "Buckets[].Name", "--output", "text"); err == nil {
+				for _, b := range strings.Fields(out) {
+					if strings.HasPrefix(b, "nomad-ci-e2e-") && b != ciBucket {
+						_, _ = awsCLI("s3", "rb", "s3://"+b, "--force")
+					}
+				}
+			}
+
+			By("creating the per-run bucket")
+			out, err := awsCLI("s3", "mb", "s3://"+ciBucket)
+			Expect(err).NotTo(HaveOccurred(), "bucket create failed: %s", out)
+			// Abort-incomplete-multipart guard; snapshot objects are
+			// single-part but the rule costs one call.
+			_, _ = awsCLI("s3api", "put-bucket-lifecycle-configuration", "--bucket", ciBucket,
+				"--lifecycle-configuration",
+				`{"Rules":[{"ID":"abort-mpu","Status":"Enabled","Filter":{},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}`)
+
+			By("building the trust bundle from the runner's CA store")
+			cmd := exec.Command("kubectl", "create", "configmap", "aws-ci-trust", "-n", namespace,
+				"--from-file=ca-bundle.crt=/etc/ssl/certs/ca-certificates.crt")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create trust bundle ConfigMap: %s", output)
+
+			By("staging the scoped credential")
+			cmd = exec.Command("kubectl", "create", "secret", "generic", "aws-ci", "-n", namespace,
+				"--from-literal=AWS_ACCESS_KEY_ID="+awsEnv("AWS_CI_ACCESS_KEY_ID"),
+				"--from-literal=AWS_SECRET_ACCESS_KEY="+awsEnv("AWS_CI_SECRET_ACCESS_KEY"))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create aws credentials: %s", output)
+
+			By("creating a cluster born with the awskms keyring")
+			clusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadCluster
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  replicas: 1
+  image:
+    repository: hashicorp/nomad
+    tag: "2.0.5-ent"
+  license:
+    secretName: nomad-license
+  services:
+    external:
+      type: NodePort
+  trustBundle:
+    configMapRef:
+      name: aws-ci-trust
+  server:
+    keyrings:
+    - name: aws
+      awskms:
+        kmsKeyID: %s
+        region: %s
+        credentialsSecretRef:
+          name: aws-ci
+`, awsCluster, namespace, awsEnv("AWS_CI_KMS_KEY_ARN"), awsEnv("AWS_CI_REGION"))
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(clusterCR)
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create aws cluster: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", awsCluster, "-n", namespace,
+					"-o", "jsonpath={.status.phase}/{.status.keyring.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Running/Ready"))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		AfterAll(func() {
+			cmd := exec.Command("kubectl", "delete", "nomadsnapshot", "aws-ci-snap", "-n", namespace,
+				"--ignore-not-found", "--timeout=2m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "nomadcluster", awsCluster, "-n", namespace,
+				"--ignore-not-found", "--timeout=3m")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "secret", "aws-ci", "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "configmap", "aws-ci-trust", "-n", namespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			if awsEnv("AWS_CI_SECRET_ACCESS_KEY") != "" {
+				_, _ = awsCLI("s3", "rb", "s3://"+ciBucket, "--force")
+			}
+		})
+
+		It("wraps root keys with AWS KMS", func() {
+			By("forcing a rotation through the wrapper")
+			cmd := exec.Command("kubectl", "get", "secret", awsCluster+"-operator-management", "-n", namespace,
+				"-o", "jsonpath={.data.secret-id}")
+			encodedToken, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			token, err := base64.StdEncoding.DecodeString(encodedToken)
+			Expect(err).NotTo(HaveOccurred())
+			output, err := utils.Run(exec.Command("kubectl", "exec", awsCluster+"-0", "-n", namespace, "--",
+				"env", "NOMAD_TOKEN="+string(token), "nomad", "operator", "root", "keyring", "rotate", "-now"))
+			Expect(err).NotTo(HaveOccurred(), "rotation under the awskms wrapper failed: %s", output)
+
+			By("verifying the keyring stays Ready")
+			Consistently(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", awsCluster, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Ready"))
+			}, 30*time.Second, 10*time.Second).Should(Succeed())
+		})
+
+		It("uploads snapshots to real S3", func() {
+			snapshotCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
+kind: NomadSnapshot
+metadata:
+  name: aws-ci-snap
+  namespace: %s
+spec:
+  clusterRef:
+    name: %s
+  target:
+    s3:
+      bucket: %s
+      region: %s
+      credentialsSecretRef:
+        name: aws-ci
+`, namespace, awsCluster, ciBucket, awsEnv("AWS_CI_REGION"))
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(snapshotCR)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to create aws snapshot: %s", output)
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "nomadsnapshot", "aws-ci-snap",
+					"-n", namespace, "-o", "jsonpath={.status.phase}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).To(Equal("Succeeded"))
+			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("listing the object in the bucket")
+			out, err := awsCLI("s3api", "list-objects-v2", "--bucket", ciBucket,
+				"--query", "Contents[].Key", "--output", "text")
+			Expect(err).NotTo(HaveOccurred(), "object listing failed: %s", out)
+			Expect(out).To(ContainSubstring(".snap"), "no snapshot object found in the bucket")
+		})
+	})
+
 	// Keyring transit auth (neo-3xe P2): operator-managed Vault login
 	// via the cluster's own ServiceAccount — mint, scheduled renewal,
 	// and revocation recovery, against real kubernetes-auth TokenReview
