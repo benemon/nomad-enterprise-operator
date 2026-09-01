@@ -1,5 +1,9 @@
 # Nomad Enterprise Operator
 
+Deploy, snapshot and scale Nomad Enterprise control planes - on the
+Kubernetes cluster you already run.
+{ .neo-tagline }
+
 Running a Nomad Enterprise control plane means answering questions that
 have nothing to do with scheduling workloads: who issues and rotates the
 mTLS certificates, where the gossip key lives, how the ACL system gets

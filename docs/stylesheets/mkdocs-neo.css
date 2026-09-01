@@ -47,3 +47,11 @@
 /* Header: pine bar, green underline on active tab */
 .md-header { border-bottom: 1px solid rgba(6, 208, 146, 0.25); }
 .md-tabs__link--active, .md-nav__link--active { color: var(--md-accent-fg-color); }
+
+/* Landing-page tagline */
+.neo-tagline {
+  font-size: 1.05rem;
+  line-height: 1.5;
+  color: var(--md-default-fg-color--light);
+  margin-top: -0.4rem;
+}
