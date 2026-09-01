@@ -64,6 +64,10 @@ jobs:
           AZURE_CI_KEY_NAME: nomad-ci-keyring
           AZURE_CI_STORAGE_ACCOUNT: sanomadciorbital
           AZURE_CI_CONTAINER: nomad-ci-snapshots
+          AWS_CI_ACCESS_KEY_ID: ${{ secrets.AWS_CI_ACCESS_KEY_ID }}
+          AWS_CI_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_SECRET_ACCESS_KEY }}
+          AWS_CI_KMS_KEY_ARN: arn:aws:kms:eu-west-2:745596511782:key/0c965e8b-87b1-4def-8b71-9465798c03d6
+          AWS_CI_REGION: eu-west-2
         run: |
           go mod tidy
           # 'version upgrade' is skipped here because the upgrade-matrix
