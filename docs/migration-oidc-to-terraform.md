@@ -13,7 +13,7 @@ validation.
 The replacement is the
 [Terraform Provider for Nomad](https://registry.terraform.io/providers/hashicorp/nomad/latest),
 which manages the same Nomad-side resources declaratively and works with
-any OIDC identity provider — not just Keycloak.
+any OIDC identity provider - not just Keycloak.
 
 ## Why the change
 
@@ -165,8 +165,8 @@ kubectl patch nomadcluster <name> --type=json \
   -p '[{"op": "remove", "path": "/spec/oidc"}]'
 ```
 
-(If the field is already absent — e.g. the CR was created after the
-upgrade — this returns an error you can ignore.)
+(If the field is already absent - e.g. the CR was created after the
+upgrade - this returns an error you can ignore.)
 
 ### 5. Clean up orphaned Kubernetes resources
 
@@ -183,7 +183,7 @@ kubectl delete secret <cluster>-oidc-client --ignore-not-found
 ```
 
 The Keycloak realm is **not** deleted by removing the
-`KeycloakRealmImport` CR — delete it via the Keycloak admin console or
+`KeycloakRealmImport` CR - delete it via the Keycloak admin console or
 API if it is no longer needed.
 
 ## Field mapping reference
@@ -191,7 +191,7 @@ API if it is no longer needed.
 | Old `spec.oidc` field | Terraform equivalent |
 |---|---|
 | `oidc.enabled` | (presence of `nomad_acl_auth_method`) |
-| `oidc.keycloakRef.name` | n/a — provider talks to Nomad, not Keycloak |
+| `oidc.keycloakRef.name` | n/a - provider talks to Nomad, not Keycloak |
 | `oidc.realm` | `config.oidc_discovery_url` (realm is part of the URL) |
 | `oidc.discoveryCA.secretName`/`secretKey` | `config.discovery_ca_pem` |
 | `oidc.bindingRules[].keycloakGroup` | `nomad_acl_binding_rule.selector` |

@@ -5,7 +5,7 @@ operator-managed NomadCluster. Version changes are user-driven: edit
 `spec.image.tag` and the operator performs a rolling restart of the
 StatefulSet. The PodDisruptionBudget bounds voluntary disruption so
 quorum survives the roll, but Raft *state* compatibility across
-versions is Nomad's contract, not the operator's — which is why you
+versions is Nomad's contract, not the operator's - which is why you
 snapshot first.
 
 **The operator deliberately does not snapshot for you.** An automatic
@@ -26,7 +26,7 @@ means rebuilding cluster state by hand. A snapshot taken seconds before
 the upgrade turns that scenario into a documented restore.
 
 **2. Take a one-shot snapshot.** Apply a NomadSnapshot with no
-`schedule` (uses your normal storage target — S3/GCS/Azure/local all
+`schedule` (uses your normal storage target - S3/GCS/Azure/local all
 work; local shown for brevity):
 
 ```sh
@@ -54,7 +54,7 @@ kubectl wait nomadsnapshot/pre-upgrade -n <ns> \
 ```
 
 If it reports `Failed` instead, inspect the Job pod logs
-(`kubectl logs -n <ns> job/pre-upgrade-snapshot`) and fix the cause —
+(`kubectl logs -n <ns> job/pre-upgrade-snapshot`) and fix the cause -
 upgrading on top of a failed snapshot defeats the point.
 
 **4. Perform the upgrade.** Bump the image tag; the operator rolls the
@@ -81,7 +81,7 @@ kubectl get nomadcluster <cluster> -n <ns> -o jsonpath='{.status.nomadVersion}'
 ```
 
 **5. If it goes wrong.** Restore the pre-upgrade snapshot by following
-[restore.md](restore.md) — including its warning about operator tokens
+[restore.md](restore.md) - including its warning about operator tokens
 minted after the snapshot. If the upgrade failed at the binary level
 (pods crash-looping on the new version), first revert `spec.image.tag`
 to the previous version and let the roll settle before considering a

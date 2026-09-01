@@ -2,16 +2,16 @@
 .beads
 .bd
 .claude
-# docs/* (not docs/) so the negation below can re-include repo content;
-# a directory-level exclude would make git skip the dir without
-# considering negations inside it.
-docs/*
-# User-facing migration guide referenced from README — repo content, not scratch
-!docs/migration-oidc-to-terraform.md
-# Operational runbooks referenced from README — repo content, not scratch
-!docs/runbooks/
-# Threat model referenced from README — repo content, not scratch
-!docs/threat-model/
+# docs/ is repo content (the published docs site); only maintainer scratch is excluded
+docs/adr/
+docs/spikes/
+docs/drafts/
+docs/ci.md
+docs/release-process.md
+docs/bd-backlog-2026-06-06.md
+docs/design-review-2026-06-06.md
+docs/platform-engineer-review-2026-06-06.md
+site/
 CHANGELOG.md
 .github/PULL_REQUEST_TEMPLATE.md
 *.exe

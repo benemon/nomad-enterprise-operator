@@ -2,13 +2,13 @@
 
 Audience: a human operator restoring Raft state into an
 operator-managed NomadCluster from a snapshot taken by a NomadSnapshot
-resource. This runbook covers the operator-specific mechanics —
+resource. This runbook covers the operator-specific mechanics -
 Secrets, addresses, and reconciler behaviour. For the semantics of
 `nomad operator snapshot restore` itself, see the upstream Nomad
 documentation.
 
-A restore **replaces the cluster's entire Raft state** — jobs,
-allocations metadata, ACLs, everything — with the state at snapshot
+A restore **replaces the cluster's entire Raft state** - jobs,
+allocations metadata, ACLs, everything - with the state at snapshot
 time. Read [Operator behaviour during restore](#operator-behaviour-during-restore)
 before you start: tokens minted after the snapshot was taken will no
 longer exist after the restore.
@@ -103,7 +103,7 @@ mid-restore state.
 
 ## Restore execution example
 
-Illustrative only — the operator deliberately ships no restore Job
+Illustrative only - the operator deliberately ships no restore Job
 template; restore is a deliberate human action. From a pod inside the
 cluster (the Nomad image already has the CLI):
 
@@ -161,12 +161,12 @@ reasoning:
   scale-down. The pre-restore checks above ensure no scale-down is in
   flight.
 
-**What a restore does to operator tokens — read this.** A snapshot
+**What a restore does to operator tokens - read this.** A snapshot
 contains the ACL state at snapshot time. Restoring it deletes any
 tokens and policies created *after* the snapshot. Consequences:
 
 - The bootstrap token survives (it predates every snapshot the cluster
-  ever took) — this is one of the reasons its Secret is kept until
+  ever took) - this is one of the reasons its Secret is kept until
   cluster deletion.
 - The operator's management/status tokens and any snapshot-agent
   tokens survive only if they existed at snapshot time. If they were
@@ -181,5 +181,5 @@ tokens and policies created *after* the snapshot. Consequences:
   kubectl delete secret <snapshot>-snapshot-token -n <ns>   # per NomadSnapshot, if any
   ```
 
-  The operator-owned ACL *policies* need no action — the policy
+  The operator-owned ACL *policies* need no action - the policy
   reconciler rewrites them to desired state on the next pass.
