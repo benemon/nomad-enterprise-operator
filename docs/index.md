@@ -8,7 +8,13 @@ encryption keys, and whether last night's Raft snapshot actually reached
 the bucket. On Kubernetes, every one of those answers is usually a
 script someone wrote and hopes still works.
 
-This operator makes them declarative. A `NomadCluster` resource deploys
+This operator makes them declarative. An operator is a reconciliation
+loop: it holds a model of what ought to be true, watches what is true,
+and continuously converges the second towards the first. Where a Helm
+chart ends at API submission, this operator manages Nomad itself,
+through Kubernetes objects - the Raft membership, the encryption keys,
+the certificates, and the ACL system that accumulate state long after
+install. A `NomadCluster` resource deploys
 a production-shaped Nomad Enterprise server cluster - mTLS everywhere,
 ACLs bootstrapped, audit logging on, Pod Security `restricted` - and
 two companion resources cover the operational tail: `NomadSnapshot` for
@@ -21,7 +27,8 @@ including Dynamic Application Sizing.
     independent community project. The `nomad.hashicorp.com` API group
     used by its CRDs is a structural identifier inherited from the Nomad
     ecosystem, not an endorsement or affiliation. A Nomad Enterprise
-    license is required for the clusters it deploys.
+    license is required for the clusters it deploys. If you deploy it,
+    your support contract is the GitHub issue tracker.
 
 ## Architectural boundaries
 

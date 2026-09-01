@@ -1,5 +1,10 @@
 # ACL configuration
 
+Bootstrapping ACLs by hand ends with a root token sitting in your
+terminal history. The operator runs the bootstrap itself the moment the
+cluster is ready and seals the result into Secrets, so no human ever
+holds the token in a shell.
+
 ACLs are enabled by default (`server.acl.enabled: true`). When the StatefulSet becomes ready, the operator bootstraps the ACL system and provisions **three tokens**, each in its own Secret:
 
 | Secret | Capabilities | Used for |
