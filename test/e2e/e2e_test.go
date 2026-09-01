@@ -107,6 +107,28 @@ spec:
 	}, 90*time.Second, 5*time.Second).Should(Succeed())
 }
 
+// rotateKeyringAndVerifyReady forces a rotation through the cluster's
+// configured wrapper and asserts the keyring stays Ready — the shared
+// oracle of the cloud keyring lanes.
+func rotateKeyringAndVerifyReady(clusterName string) {
+	GinkgoHelper()
+	cmd := exec.Command("kubectl", "get", "secret", clusterName+"-operator-management", "-n", namespace,
+		"-o", "jsonpath={.data.secret-id}")
+	encodedToken, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred())
+	token, err := base64.StdEncoding.DecodeString(encodedToken)
+	Expect(err).NotTo(HaveOccurred())
+	output, err := utils.Run(exec.Command("kubectl", "exec", clusterName+"-0", "-n", namespace, "--",
+		"env", "NOMAD_TOKEN="+string(token), "nomad", "operator", "root", "keyring", "rotate", "-now"))
+	Expect(err).NotTo(HaveOccurred(), "rotation under the wrapper failed: %s", output)
+	Consistently(func(g Gomega) {
+		out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", clusterName, "-n", namespace,
+			"-o", "jsonpath={.status.keyring.phase}"))
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(out).To(Equal("Ready"))
+	}, 30*time.Second, 10*time.Second).Should(Succeed())
+}
+
 // testSnapshotName is the name of the NomadSnapshot CR used in snapshot tests
 const testSnapshotName = "test-snapshot"
 
@@ -3629,23 +3651,7 @@ spec:
 
 		It("wraps root keys with Azure Key Vault", func() {
 			By("forcing a rotation through the wrapper")
-			cmd := exec.Command("kubectl", "get", "secret", azCluster+"-operator-management", "-n", namespace,
-				"-o", "jsonpath={.data.secret-id}")
-			encodedToken, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			token, err := base64.StdEncoding.DecodeString(encodedToken)
-			Expect(err).NotTo(HaveOccurred())
-			output, err := utils.Run(exec.Command("kubectl", "exec", azCluster+"-0", "-n", namespace, "--",
-				"env", "NOMAD_TOKEN="+string(token), "nomad", "operator", "root", "keyring", "rotate", "-now"))
-			Expect(err).NotTo(HaveOccurred(), "rotation under the azure wrapper failed: %s", output)
-
-			By("verifying the keyring stays Ready")
-			Consistently(func(g Gomega) {
-				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", azCluster, "-n", namespace,
-					"-o", "jsonpath={.status.keyring.phase}"))
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(out).To(Equal("Ready"))
-			}, 30*time.Second, 10*time.Second).Should(Succeed())
+			rotateKeyringAndVerifyReady(azCluster)
 		})
 
 		It("uploads snapshots to Azure Blob Storage", func() {
@@ -3811,23 +3817,7 @@ spec:
 
 		It("wraps root keys with AWS KMS", func() {
 			By("forcing a rotation through the wrapper")
-			cmd := exec.Command("kubectl", "get", "secret", awsCluster+"-operator-management", "-n", namespace,
-				"-o", "jsonpath={.data.secret-id}")
-			encodedToken, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
-			token, err := base64.StdEncoding.DecodeString(encodedToken)
-			Expect(err).NotTo(HaveOccurred())
-			output, err := utils.Run(exec.Command("kubectl", "exec", awsCluster+"-0", "-n", namespace, "--",
-				"env", "NOMAD_TOKEN="+string(token), "nomad", "operator", "root", "keyring", "rotate", "-now"))
-			Expect(err).NotTo(HaveOccurred(), "rotation under the awskms wrapper failed: %s", output)
-
-			By("verifying the keyring stays Ready")
-			Consistently(func(g Gomega) {
-				out, err := utils.Run(exec.Command("kubectl", "get", "nomadcluster", awsCluster, "-n", namespace,
-					"-o", "jsonpath={.status.keyring.phase}"))
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(out).To(Equal("Ready"))
-			}, 30*time.Second, 10*time.Second).Should(Succeed())
+			rotateKeyringAndVerifyReady(awsCluster)
 		})
 
 		It("uploads snapshots to real S3", func() {
