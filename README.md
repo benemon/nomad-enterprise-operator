@@ -2,6 +2,11 @@
 [![Lint](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/lint.yml)
 [![Tests](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test.yml)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/neo-lockup-dark.svg">
+  <img src="docs/assets/neo-lockup.svg" width="280" height="88" alt="Nomad Enterprise Operator">
+</picture>
+
 # nomad-enterprise-operator
 
 > **Community project** - this operator is not maintained or supported by

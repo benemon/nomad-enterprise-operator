@@ -6,16 +6,20 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  logo: assets/neo-mark.svg
+  favicon: assets/neo-favicon.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: teal
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -61,6 +65,9 @@ nav:
       - NomadSnapshot: reference/nomadsnapshot.md
       - NomadAutoscaler: reference/nomadautoscaler.md
       - Reconciliation phases: reference/reconciliation.md
+
+extra_css:
+  - stylesheets/mkdocs-neo.css
 
 validation:
   links:
