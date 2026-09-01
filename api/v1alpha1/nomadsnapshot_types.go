@@ -232,9 +232,9 @@ type NomadSnapshotStatus struct {
 	// +optional
 	DeploymentName string `json:"deploymentName,omitempty"`
 
-	// ConfigMapName is the name of the snapshot agent configuration ConfigMap
+	// ConfigSecretName is the name of the snapshot agent configuration Secret
 	// +optional
-	ConfigMapName string `json:"configMapName,omitempty"`
+	ConfigSecretName string `json:"configSecretName,omitempty"`
 
 	// NomadAddress is the internal Nomad cluster address used by the snapshot agent
 	// +optional

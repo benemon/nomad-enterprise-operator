@@ -35,7 +35,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/internal/controller/phases"
@@ -65,18 +67,19 @@ type NomadSnapshotReconciler struct {
 // Deterministic names of the resources a NomadSnapshot owns (neo-08p):
 // each is built in one place so construction sites and status-write
 // sites cannot disagree.
-func snapshotJobName(s *nomadv1alpha1.NomadSnapshot) string       { return s.Name + "-snapshot" }
-func snapshotAgentName(s *nomadv1alpha1.NomadSnapshot) string     { return s.Name + "-snapshot-agent" }
-func snapshotConfigMapName(s *nomadv1alpha1.NomadSnapshot) string { return s.Name + "-snapshot-config" }
-func snapshotTokenName(s *nomadv1alpha1.NomadSnapshot) string     { return s.Name + "-snapshot-token" }
-func snapshotPVCName(s *nomadv1alpha1.NomadSnapshot) string       { return s.Name + "-snapshots" }
+func snapshotJobName(s *nomadv1alpha1.NomadSnapshot) string   { return s.Name + "-snapshot" }
+func snapshotAgentName(s *nomadv1alpha1.NomadSnapshot) string { return s.Name + "-snapshot-agent" }
+func snapshotConfigSecretName(s *nomadv1alpha1.NomadSnapshot) string {
+	return s.Name + "-snapshot-config"
+}
+func snapshotTokenName(s *nomadv1alpha1.NomadSnapshot) string { return s.Name + "-snapshot-token" }
+func snapshotPVCName(s *nomadv1alpha1.NomadSnapshot) string   { return s.Name + "-snapshots" }
 
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots/status,verbs=patch
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadsnapshots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nomad.hashicorp.com,resources=nomadclusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;delete
@@ -222,6 +225,14 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
+	storageCredentials, ready, err := r.reconcileStorageCredentials(ctx, snapshot)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !ready {
+		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
+	}
+
 	// Build Nomad address for the snapshot agent deployment
 	internalAddr := nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)
 
@@ -258,10 +269,10 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 
-	// Generate the agent config once; the ConfigMap stores it and the
+	// Generate the agent config once; the Secret stores it and the
 	// workload's pod template carries its checksum so config changes
-	// roll the agent (AC-2.7.6a).
-	agentConfig := r.generateSnapshotConfig(snapshot)
+	// (including credential rotation) roll the agent (AC-2.7.6a).
+	agentConfig := r.generateSnapshotConfig(snapshot, storageCredentials)
 	configChecksum := phases.ConfigChecksum(map[string]string{"snapshot.hcl": agentConfig})
 	// A token re-mint rewrites the Secret in place while the pod spec
 	// stays byte-identical, and env-injected Secrets are never re-read
@@ -269,9 +280,9 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// rolls the recurring agent (inert on the immutable one-shot Job).
 	secretsChecksum := phases.ConfigChecksum(map[string]string{phases.SecretKeySecretID: snapshotToken})
 
-	// Create ConfigMap with snapshot agent config
-	if err := r.reconcileConfigMap(ctx, snapshot, agentConfig); err != nil {
-		log.Error(err, "Failed to reconcile ConfigMap")
+	// Create Secret with snapshot agent config
+	if err := r.reconcileConfigSecret(ctx, snapshot, agentConfig); err != nil {
+		log.Error(err, "Failed to reconcile config Secret")
 		return ctrl.Result{}, err
 	}
 
@@ -313,7 +324,7 @@ func (r *NomadSnapshotReconciler) reconcileRecurring(
 	snapshot.Status.Phase = ""
 	snapshot.Status.JobName = ""
 	snapshot.Status.DeploymentName = deploymentName
-	snapshot.Status.ConfigMapName = snapshotConfigMapName(snapshot)
+	snapshot.Status.ConfigSecretName = snapshotConfigSecretName(snapshot)
 	snapshot.Status.NomadAddress = internalAddr
 	// Snapshots restore only to the same Nomad version: mirror what
 	// the agent is snapshotting against (empty until the cluster's
@@ -398,7 +409,7 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 	snapshot.Status.ObservedGeneration = snapshot.Generation
 	snapshot.Status.Operation = nomadv1alpha1.SnapshotOperationJob
 	snapshot.Status.JobName = jobName
-	snapshot.Status.ConfigMapName = snapshotConfigMapName(snapshot)
+	snapshot.Status.ConfigSecretName = snapshotConfigSecretName(snapshot)
 	snapshot.Status.NomadAddress = internalAddr
 	snapshot.Status.DeploymentName = ""
 	snapshot.Status.NomadVersion = cluster.Status.NomadVersion
@@ -734,30 +745,101 @@ func (r *NomadSnapshotReconciler) cleanupNomadResources(ctx context.Context, sna
 	return nil
 }
 
-// reconcileConfigMap creates or updates the snapshot agent ConfigMap
-func (r *NomadSnapshotReconciler) reconcileConfigMap(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, config string) error {
-	configMapName := snapshotConfigMapName(snapshot)
-
-	cm := &corev1.ConfigMap{
+// reconcileConfigSecret creates or updates the snapshot agent config Secret.
+func (r *NomadSnapshotReconciler) reconcileConfigSecret(ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot, config string) error {
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      configMapName,
+			Name:      snapshotConfigSecretName(snapshot),
 			Namespace: snapshot.Namespace,
 		},
 	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		cm.Data = map[string]string{
-			"snapshot.hcl": config,
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+		secret.Type = corev1.SecretTypeOpaque
+		secret.Data = map[string][]byte{
+			"snapshot.hcl": []byte(config),
 		}
-		return controllerutil.SetControllerReference(snapshot, cm, r.Scheme)
+		return controllerutil.SetControllerReference(snapshot, secret, r.Scheme)
 	})
 
 	return err
 }
 
+// readStorageCredentials validates the referenced provider Secret and returns
+// the values used by storage backends that accept credentials in config.
+func (r *NomadSnapshotReconciler) readStorageCredentials(
+	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
+) (map[string]string, string, error) {
+	var secretName string
+	var keys []string
+	switch {
+	case snapshot.Spec.Target.S3 != nil && snapshot.Spec.Target.S3.CredentialsSecretRef != nil:
+		secretName = snapshot.Spec.Target.S3.CredentialsSecretRef.Name
+		keys = []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}
+	case snapshot.Spec.Target.GCS != nil && snapshot.Spec.Target.GCS.CredentialsSecretRef != nil:
+		secretName = snapshot.Spec.Target.GCS.CredentialsSecretRef.Name
+		keys = []string{"GOOGLE_APPLICATION_CREDENTIALS"}
+	case snapshot.Spec.Target.Azure != nil && snapshot.Spec.Target.Azure.CredentialsSecretRef != nil:
+		secretName = snapshot.Spec.Target.Azure.CredentialsSecretRef.Name
+		keys = []string{"AZURE_BLOB_ACCOUNT_KEY"}
+	default:
+		return nil, "", nil
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: snapshot.Namespace}, secret); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil, "CredentialsSecretNotFound", fmt.Errorf("credentials Secret %q not found", secretName)
+		}
+		return nil, "", fmt.Errorf("get credentials Secret %q: %w", secretName, err)
+	}
+
+	credentials := make(map[string]string, len(keys))
+	for _, key := range keys {
+		value, ok := secret.Data[key]
+		if !ok || len(value) == 0 {
+			return nil, "CredentialsSecretInvalid", fmt.Errorf("credentials Secret %q has an empty or missing %q key", secretName, key)
+		}
+		credentials[key] = string(value)
+	}
+	return credentials, "", nil
+}
+
+func (r *NomadSnapshotReconciler) reconcileStorageCredentials(
+	ctx context.Context, snapshot *nomadv1alpha1.NomadSnapshot,
+) (map[string]string, bool, error) {
+	credentials, reason, err := r.readStorageCredentials(ctx, snapshot)
+	if err == nil {
+		return credentials, true, nil
+	}
+	if reason == "" {
+		return nil, false, err
+	}
+
+	logf.FromContext(ctx).Info("Waiting for snapshot storage credentials", "reason", reason, "error", err.Error())
+	patchBase := snapshot.DeepCopy()
+	previous := meta.FindStatusCondition(snapshot.Status.Conditions, "Ready")
+	alreadyReported := previous != nil && previous.Reason == reason
+	r.setCondition(snapshot, metav1.Condition{
+		Type:    "Ready",
+		Status:  metav1.ConditionFalse,
+		Reason:  reason,
+		Message: err.Error(),
+	})
+	if !alreadyReported && r.Recorder != nil {
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, reason, err.Error())
+	}
+	if err := r.Status().Patch(ctx, snapshot, client.MergeFrom(patchBase)); err != nil {
+		return nil, false, err
+	}
+	return nil, false, nil
+}
+
 // generateSnapshotConfig renders the agent HCL. Target stanzas are
 // mode-agnostic; only the interval differs ("0" = one-shot).
-func (r *NomadSnapshotReconciler) generateSnapshotConfig(snapshot *nomadv1alpha1.NomadSnapshot) string {
+func (r *NomadSnapshotReconciler) generateSnapshotConfig(
+	snapshot *nomadv1alpha1.NomadSnapshot, credentials map[string]string,
+) string {
 	var config string
 	if snapshot.Spec.Schedule == nil {
 		// One-shot: no retention pruning — a single explicit snapshot
@@ -789,12 +871,14 @@ func (r *NomadSnapshotReconciler) generateSnapshotConfig(snapshot *nomadv1alpha1
 	if snapshot.Spec.Target.S3 != nil {
 		s3 := snapshot.Spec.Target.S3
 		config += fmt.Sprintf(`
-aws_s3 {
-  bucket              = "%s"
-  region              = "%s"
-`, s3.Bucket, s3.Region)
+aws_storage {
+  access_key_id       = %q
+  secret_access_key   = %q
+  s3_region           = %q
+  s3_bucket           = %q
+`, credentials["AWS_ACCESS_KEY_ID"], credentials["AWS_SECRET_ACCESS_KEY"], s3.Region, s3.Bucket)
 		if s3.Endpoint != "" {
-			config += fmt.Sprintf(`  endpoint            = "%s"
+			config += fmt.Sprintf(`  s3_endpoint         = %q
 `, s3.Endpoint)
 		}
 		config += fmt.Sprintf(`  s3_force_path_style = %t
@@ -805,7 +889,7 @@ aws_s3 {
 	if snapshot.Spec.Target.GCS != nil {
 		gcs := snapshot.Spec.Target.GCS
 		config += fmt.Sprintf(`
-google_cloud_storage {
+google_storage {
   bucket = "%s"
 }
 `, gcs.Bucket)
@@ -817,8 +901,9 @@ google_cloud_storage {
 azure_blob_storage {
   container_name = "%s"
   account_name   = "%s"
+  account_key    = %q
 }
-`, azure.Container, azure.AccountName)
+`, azure.Container, azure.AccountName, credentials["AZURE_BLOB_ACCOUNT_KEY"])
 	}
 
 	if snapshot.Spec.Target.Local != nil {
@@ -881,7 +966,7 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 	snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster,
 	nomadAddr, configChecksum, secretsChecksum string,
 ) corev1.PodTemplateSpec {
-	configMapName := snapshotConfigMapName(snapshot)
+	configSecretName := snapshotConfigSecretName(snapshot)
 	tokenSecretName := snapshotTokenName(snapshot)
 
 	// Image defaults set via kubebuilder tags on ImageSpec; digest
@@ -960,10 +1045,8 @@ func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 				{
 					Name: "config",
 					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: configMapName,
-							},
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: configSecretName,
 						},
 					},
 				},
@@ -1064,32 +1147,9 @@ func (r *NomadSnapshotReconciler) createSnapshotJob(
 	return nil
 }
 
-// addStorageCredentials adds environment variables from credentials secrets
+// addStorageCredentials mounts the GCS credentials file used by the SDK.
 func (r *NomadSnapshotReconciler) addStorageCredentials(snapshot *nomadv1alpha1.NomadSnapshot, podSpec *corev1.PodSpec) {
 	container := &podSpec.Containers[0]
-
-	if snapshot.Spec.Target.S3 != nil && snapshot.Spec.Target.S3.CredentialsSecretRef != nil {
-		container.Env = append(container.Env,
-			corev1.EnvVar{
-				Name: "AWS_ACCESS_KEY_ID",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: *snapshot.Spec.Target.S3.CredentialsSecretRef,
-						Key:                  "AWS_ACCESS_KEY_ID",
-					},
-				},
-			},
-			corev1.EnvVar{
-				Name: "AWS_SECRET_ACCESS_KEY",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: *snapshot.Spec.Target.S3.CredentialsSecretRef,
-						Key:                  "AWS_SECRET_ACCESS_KEY",
-					},
-				},
-			},
-		)
-	}
 
 	if snapshot.Spec.Target.GCS != nil && snapshot.Spec.Target.GCS.CredentialsSecretRef != nil {
 		// Mount GCP credentials as a file
@@ -1112,17 +1172,6 @@ func (r *NomadSnapshotReconciler) addStorageCredentials(snapshot *nomadv1alpha1.
 		})
 	}
 
-	if snapshot.Spec.Target.Azure != nil && snapshot.Spec.Target.Azure.CredentialsSecretRef != nil {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name: "AZURE_BLOB_ACCOUNT_KEY",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: *snapshot.Spec.Target.Azure.CredentialsSecretRef,
-					Key:                  "AZURE_BLOB_ACCOUNT_KEY",
-				},
-			},
-		})
-	}
 }
 
 // reconcilePVC creates or updates the PVC for local snapshot storage
@@ -1206,13 +1255,66 @@ func (r *NomadSnapshotReconciler) setCondition(snapshot *nomadv1alpha1.NomadSnap
 
 // SetupWithManager sets up the controller with the Manager
 func (r *NomadSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &nomadv1alpha1.NomadSnapshot{}, snapshotCredentialSecretsIndex,
+		func(obj client.Object) []string {
+			return snapshotCredentialSecretNames(obj.(*nomadv1alpha1.NomadSnapshot))
+		}); err != nil {
+		return fmt.Errorf("failed to register field index %s: %w", snapshotCredentialSecretsIndex, err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadSnapshot{}).
-		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findSnapshotsReferencingSecret),
+		).
 		Named("nomadsnapshot").
 		Complete(r)
+}
+
+const snapshotCredentialSecretsIndex = "spec.target.credentialsSecretRef"
+
+func snapshotCredentialSecretNames(snapshot *nomadv1alpha1.NomadSnapshot) []string {
+	switch {
+	case snapshot.Spec.Target.S3 != nil && snapshot.Spec.Target.S3.CredentialsSecretRef != nil:
+		return []string{snapshot.Spec.Target.S3.CredentialsSecretRef.Name}
+	case snapshot.Spec.Target.GCS != nil && snapshot.Spec.Target.GCS.CredentialsSecretRef != nil:
+		return []string{snapshot.Spec.Target.GCS.CredentialsSecretRef.Name}
+	case snapshot.Spec.Target.Azure != nil && snapshot.Spec.Target.Azure.CredentialsSecretRef != nil:
+		return []string{snapshot.Spec.Target.Azure.CredentialsSecretRef.Name}
+	default:
+		return nil
+	}
+}
+
+func (r *NomadSnapshotReconciler) findSnapshotsReferencingSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	for _, ref := range secret.GetOwnerReferences() {
+		if ref.Kind == "NomadSnapshot" {
+			return nil
+		}
+	}
+
+	snapshots := &nomadv1alpha1.NomadSnapshotList{}
+	if err := r.List(ctx, snapshots,
+		client.InNamespace(secret.Namespace),
+		client.MatchingFields{snapshotCredentialSecretsIndex: secret.Name},
+	); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(snapshots.Items))
+	for _, snapshot := range snapshots.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Name: snapshot.Name, Namespace: snapshot.Namespace,
+		}})
+	}
+	return requests
 }

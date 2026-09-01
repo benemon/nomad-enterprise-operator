@@ -77,6 +77,11 @@ jobs:
     secrets:
       NOMAD_LICENSE: ${{ secrets.NOMAD_LICENSE }}
       VAULT_LICENSE: ${{ secrets.VAULT_LICENSE }}
+      AZURE_CI_CLIENT_ID: ${{ secrets.AZURE_CI_CLIENT_ID }}
+      AZURE_CI_CLIENT_SECRET: ${{ secrets.AZURE_CI_CLIENT_SECRET }}
+      AZURE_CI_STORAGE_KEY: ${{ secrets.AZURE_CI_STORAGE_KEY }}
+      AWS_CI_ACCESS_KEY_ID: ${{ secrets.AWS_CI_ACCESS_KEY_ID }}
+      AWS_CI_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_SECRET_ACCESS_KEY }}
 
   release:
     needs: test-e2e

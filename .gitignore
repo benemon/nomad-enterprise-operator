@@ -51,3 +51,4 @@ go.work
 # kube-burner run outputs (the durable record is the GHA artifact)
 test/load/kube-burner/collected-metrics/
 test/load/kube-burner/kube-burner-*.log
+.local-*

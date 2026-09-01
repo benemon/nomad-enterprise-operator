@@ -67,7 +67,10 @@ func newSnapshotReconciler(objs ...client.Object) (*NomadSnapshotReconciler, *re
 	// Plain Go tests can run before the envtest suite's BeforeSuite
 	// registers the CRD types; AddToScheme is idempotent.
 	_ = nomadv1alpha1.AddToScheme(scheme.Scheme)
-	builder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+	builder := fake.NewClientBuilder().WithScheme(scheme.Scheme).
+		WithIndex(&nomadv1alpha1.NomadSnapshot{}, snapshotCredentialSecretsIndex, func(obj client.Object) []string {
+			return snapshotCredentialSecretNames(obj.(*nomadv1alpha1.NomadSnapshot))
+		})
 	for _, o := range objs {
 		builder = builder.WithObjects(o)
 		if snap, ok := o.(*nomadv1alpha1.NomadSnapshot); ok {
@@ -279,14 +282,14 @@ func TestSnapshotConfigTargetAgnostic(t *testing.T) {
 	recurring := newOneShotSnapshot("cfg")
 	recurring.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "1h", Retain: 24}
 
-	oneShotCfg := r.generateSnapshotConfig(oneShot)
-	recurringCfg := r.generateSnapshotConfig(recurring)
+	oneShotCfg := r.generateSnapshotConfig(oneShot, nil)
+	recurringCfg := r.generateSnapshotConfig(recurring, nil)
 
 	if !strings.Contains(oneShotCfg, `interval = "0"`) {
 		t.Errorf("one-shot config missing interval=0:\n%s", oneShotCfg)
 	}
-	oneShotTarget := oneShotCfg[strings.Index(oneShotCfg, "aws_s3"):]
-	recurringTarget := recurringCfg[strings.Index(recurringCfg, "aws_s3"):]
+	oneShotTarget := oneShotCfg[strings.Index(oneShotCfg, "aws_storage"):]
+	recurringTarget := recurringCfg[strings.Index(recurringCfg, "aws_storage"):]
 	if oneShotTarget != recurringTarget {
 		t.Errorf("target stanzas differ across modes:\none-shot:\n%s\nrecurring:\n%s", oneShotTarget, recurringTarget)
 	}
@@ -297,8 +300,227 @@ func TestSnapshotConfigTargetAgnostic(t *testing.T) {
 	changed.Spec.Schedule = recurring.Spec.Schedule
 	changed.Spec.Target.S3.Bucket = "other-bucket"
 	if phases.ConfigChecksum(map[string]string{"snapshot.hcl": recurringCfg}) ==
-		phases.ConfigChecksum(map[string]string{"snapshot.hcl": r.generateSnapshotConfig(changed)}) {
+		phases.ConfigChecksum(map[string]string{"snapshot.hcl": r.generateSnapshotConfig(changed, nil)}) {
 		t.Error("config checksum unchanged after spec.target edit — Deployment would not roll (AC-2.7.6a)")
+	}
+}
+
+func TestSnapshotConfigSecretContainsProviderCredentials(t *testing.T) {
+	cases := []struct {
+		name       string
+		target     nomadv1alpha1.SnapshotTarget
+		secretData map[string][]byte
+		want       []string
+	}{
+		{
+			name: "S3",
+			target: nomadv1alpha1.SnapshotTarget{S3: &nomadv1alpha1.SnapshotS3Config{
+				Bucket: "snapshots", Region: "eu-west-1",
+				CredentialsSecretRef: &corev1.LocalObjectReference{Name: "s3-creds"},
+			}},
+			secretData: map[string][]byte{
+				"AWS_ACCESS_KEY_ID":     []byte("access-id"),
+				"AWS_SECRET_ACCESS_KEY": []byte("secret-key"),
+			},
+			want: []string{
+				`access_key_id       = "access-id"`,
+				`secret_access_key   = "secret-key"`,
+			},
+		},
+		{
+			name: "Azure",
+			target: nomadv1alpha1.SnapshotTarget{Azure: &nomadv1alpha1.SnapshotAzureConfig{
+				Container: "snapshots", AccountName: "storageacct",
+				CredentialsSecretRef: &corev1.LocalObjectReference{Name: "azure-creds"},
+			}},
+			secretData: map[string][]byte{"AZURE_BLOB_ACCOUNT_KEY": []byte("account-key")},
+			want:       []string{`account_key    = "account-key"`},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := newOneShotSnapshot("render-" + strings.ToLower(tc.name))
+			snap.Spec.Target = tc.target
+			secretName := snapshotCredentialSecretNames(snap)[0]
+			credentialsSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: snap.Namespace},
+				Data:       tc.secretData,
+			}
+			r, _ := newSnapshotReconciler(snap, credentialsSecret)
+
+			credentials, reason, err := r.readStorageCredentials(context.Background(), snap)
+			if err != nil || reason != "" {
+				t.Fatalf("readStorageCredentials() = reason %q, error %v", reason, err)
+			}
+			config := r.generateSnapshotConfig(snap, credentials)
+			for _, want := range tc.want {
+				if !strings.Contains(config, want) {
+					t.Errorf("rendered config missing %q:\n%s", want, config)
+				}
+			}
+
+			if err := r.reconcileConfigSecret(context.Background(), snap, config); err != nil {
+				t.Fatalf("reconcileConfigSecret() error = %v", err)
+			}
+			configSecret := &corev1.Secret{}
+			key := types.NamespacedName{Name: snap.Name + "-snapshot-config", Namespace: snap.Namespace}
+			if err := r.Get(context.Background(), key, configSecret); err != nil {
+				t.Fatalf("config Secret not created: %v", err)
+			}
+			if got := string(configSecret.Data["snapshot.hcl"]); got != config {
+				t.Errorf("config Secret data differs from rendered config:\ngot:\n%s\nwant:\n%s", got, config)
+			}
+			configMap := &corev1.ConfigMap{}
+			if err := r.Get(context.Background(), key, configMap); !errors.IsNotFound(err) {
+				t.Fatalf("snapshot config must not be stored in a ConfigMap; Get error = %v", err)
+			}
+
+			template := r.buildAgentPodTemplate(snap, newTestCluster(snap.Namespace, "test-cluster"), "https://addr:4646", "c", "s")
+			var configVolume *corev1.VolumeSource
+			for i := range template.Spec.Volumes {
+				if template.Spec.Volumes[i].Name == "config" {
+					configVolume = &template.Spec.Volumes[i].VolumeSource
+				}
+			}
+			if configVolume == nil || configVolume.Secret == nil || configVolume.Secret.SecretName != key.Name {
+				t.Errorf("config volume = %+v, want Secret %q", configVolume, key.Name)
+			}
+		})
+	}
+}
+
+func TestSnapshotCredentialRotationChangesConfigChecksum(t *testing.T) {
+	snap := newOneShotSnapshot("rotate-creds")
+	snap.Spec.Target.S3.CredentialsSecretRef = &corev1.LocalObjectReference{Name: "s3-creds"}
+	credentialsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "s3-creds", Namespace: snap.Namespace},
+		Data: map[string][]byte{
+			"AWS_ACCESS_KEY_ID":     []byte("access-id"),
+			"AWS_SECRET_ACCESS_KEY": []byte("first-secret"),
+		},
+	}
+	r, _ := newSnapshotReconciler(snap, credentialsSecret)
+
+	credentials, reason, err := r.readStorageCredentials(context.Background(), snap)
+	if err != nil || reason != "" {
+		t.Fatalf("first readStorageCredentials() = reason %q, error %v", reason, err)
+	}
+	firstConfig := r.generateSnapshotConfig(snap, credentials)
+	firstChecksum := phases.ConfigChecksum(map[string]string{"snapshot.hcl": firstConfig})
+
+	credentialsSecret.Data["AWS_SECRET_ACCESS_KEY"] = []byte("rotated-secret")
+	if err := r.Update(context.Background(), credentialsSecret); err != nil {
+		t.Fatalf("update credentials Secret: %v", err)
+	}
+	credentials, reason, err = r.readStorageCredentials(context.Background(), snap)
+	if err != nil || reason != "" {
+		t.Fatalf("second readStorageCredentials() = reason %q, error %v", reason, err)
+	}
+	secondConfig := r.generateSnapshotConfig(snap, credentials)
+	secondChecksum := phases.ConfigChecksum(map[string]string{"snapshot.hcl": secondConfig})
+	if firstChecksum == secondChecksum {
+		t.Fatal("config checksum unchanged after credential rotation")
+	}
+}
+
+func TestSnapshotCredentialSecretFailureCondition(t *testing.T) {
+	cases := []struct {
+		name       string
+		secretData map[string][]byte
+		wantReason string
+	}{
+		{name: "missing", wantReason: "CredentialsSecretNotFound"},
+		{name: "missing key", secretData: map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("access-id")}, wantReason: "CredentialsSecretInvalid"},
+		{name: "empty key", secretData: map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("access-id"), "AWS_SECRET_ACCESS_KEY": nil}, wantReason: "CredentialsSecretInvalid"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := newOneShotSnapshot("bad-creds-" + strings.ReplaceAll(tc.name, " ", "-"))
+			snap.Finalizers = []string{snapshotFinalizer}
+			snap.Spec.Target.S3.CredentialsSecretRef = &corev1.LocalObjectReference{Name: "s3-creds"}
+			cluster := newTestCluster(snap.Namespace, "test-cluster")
+			cluster.Status.ACLBootstrapped = true
+			managementSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-operator-management", Namespace: snap.Namespace},
+				Data:       map[string][]byte{phases.SecretKeySecretID: []byte("mgmt-token")},
+			}
+			objects := []client.Object{snap, cluster, managementSecret}
+			if tc.secretData != nil {
+				objects = append(objects, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "s3-creds", Namespace: snap.Namespace},
+					Data:       tc.secretData,
+				})
+			}
+			r, recorder := newSnapshotReconciler(objects...)
+
+			request := reconcile.Request{NamespacedName: types.NamespacedName{
+				Name: snap.Name, Namespace: snap.Namespace,
+			}}
+			result, err := r.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if result.RequeueAfter != snapshotRequeueDefault {
+				t.Errorf("RequeueAfter = %s, want %s", result.RequeueAfter, snapshotRequeueDefault)
+			}
+			fetched := &nomadv1alpha1.NomadSnapshot{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: snap.Name, Namespace: snap.Namespace}, fetched); err != nil {
+				t.Fatal(err)
+			}
+			if len(fetched.Status.Conditions) != 1 || fetched.Status.Conditions[0].Reason != tc.wantReason || fetched.Status.Conditions[0].Status != metav1.ConditionFalse {
+				t.Errorf("Ready condition = %+v, want False/%s", fetched.Status.Conditions, tc.wantReason)
+			}
+
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatalf("second Reconcile() error = %v", err)
+			}
+			events := 0
+			for {
+				select {
+				case event := <-recorder.Events:
+					if strings.Contains(event, tc.wantReason) {
+						events++
+					}
+				default:
+					if events != 1 {
+						t.Errorf("%s events = %d, want exactly 1", tc.wantReason, events)
+					}
+					return
+				}
+			}
+		})
+	}
+}
+
+func TestFindSnapshotsReferencingSecret(t *testing.T) {
+	s3 := newOneShotSnapshot("s3-user")
+	s3.Spec.Target.S3.CredentialsSecretRef = &corev1.LocalObjectReference{Name: "shared-creds"}
+	gcs := newOneShotSnapshot("gcs-user")
+	gcs.Spec.Target = nomadv1alpha1.SnapshotTarget{GCS: &nomadv1alpha1.SnapshotGCSConfig{
+		Bucket: "bucket", CredentialsSecretRef: &corev1.LocalObjectReference{Name: "gcs-creds"},
+	}}
+	azure := newOneShotSnapshot("azure-user")
+	azure.Spec.Target = nomadv1alpha1.SnapshotTarget{Azure: &nomadv1alpha1.SnapshotAzureConfig{
+		Container: "container", AccountName: "account",
+		CredentialsSecretRef: &corev1.LocalObjectReference{Name: "shared-creds"},
+	}}
+	r, _ := newSnapshotReconciler(s3, gcs, azure)
+
+	shared := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "shared-creds", Namespace: "snap-ns"}}
+	if got := len(r.findSnapshotsReferencingSecret(context.Background(), shared)); got != 2 {
+		t.Errorf("shared Secret mapped to %d snapshots, want 2", got)
+	}
+	unrelated := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "snap-ns"}}
+	if got := len(r.findSnapshotsReferencingSecret(context.Background(), unrelated)); got != 0 {
+		t.Errorf("unrelated Secret mapped to %d snapshots, want 0", got)
+	}
+	shared.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "nomad.hashicorp.com/v1alpha1", Kind: "NomadSnapshot", Name: s3.Name, UID: "uid",
+	}}
+	if got := len(r.findSnapshotsReferencingSecret(context.Background(), shared)); got != 0 {
+		t.Errorf("owned Secret mapped to %d snapshots, want 0", got)
 	}
 }
 
@@ -427,11 +649,11 @@ func TestSnapshotTargetPodWiring(t *testing.T) {
 		wantMounts []string
 	}{
 		{
-			name: "S3 with credentials gets AWS env pair",
+			name: "S3 with credentials adds no AWS env",
 			target: nomadv1alpha1.SnapshotTarget{S3: &nomadv1alpha1.SnapshotS3Config{
 				Bucket: "b", Region: "eu-west-1", CredentialsSecretRef: credRef,
 			}},
-			wantEnv: []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"},
+			wantNoEnv: []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"},
 		},
 		{
 			name: "S3 without credentials (IRSA) adds no AWS env",
@@ -456,11 +678,11 @@ func TestSnapshotTargetPodWiring(t *testing.T) {
 			wantNoEnv: []string{"GOOGLE_APPLICATION_CREDENTIALS"},
 		},
 		{
-			name: "Azure with credentials gets account key env",
+			name: "Azure with credentials adds no account key env",
 			target: nomadv1alpha1.SnapshotTarget{Azure: &nomadv1alpha1.SnapshotAzureConfig{
 				Container: "c", AccountName: "acct", CredentialsSecretRef: credRef,
 			}},
-			wantEnv: []string{"AZURE_BLOB_ACCOUNT_KEY"},
+			wantNoEnv: []string{"AZURE_BLOB_ACCOUNT_KEY"},
 		},
 		{
 			name: "local target mounts the snapshot PVC at the configured path",

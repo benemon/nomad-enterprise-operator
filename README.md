@@ -353,7 +353,14 @@ On OpenShift, leave `spec.trustBundle` unset. When
 `spec.openshift.enabled: true`, the operator creates
 `<cluster>-trust-bundle` with
 `config.openshift.io/inject-trusted-cabundle: "true"`; the OpenShift
-network operator injects the platform trust bundle. On other platforms,
+network operator injects the platform trust bundle. Note that the
+injected bundle carries public roots and proxy CAs, not the OpenShift
+service CA — endpoints presenting service-serving certificates (for
+example an in-cluster S3-compatible `.svc` endpoint as a snapshot
+target) will fail verification. If you need the full chain, render your
+own bundle (for example the injected bundle concatenated with your
+namespace's `openshift-service-ca.crt`) and reference it as a custom
+ConfigMap like any other bundle. On other platforms,
 reference a ConfigMap containing your CA bundle, or bake CA roots into a
 custom operand image. Changing bundle content changes the server pod
 checksum and rolls the StatefulSet.
@@ -417,8 +424,18 @@ operator-managed cycle: render the union of old and new keyrings, roll
 the servers, rotate every root key under the new set, remove the old
 keys, retire the demoted keyrings, and roll once more.
 `status.keyring` reports `phase` (`Ready`, `Introducing`, `Rotating`,
-`Retiring`, `Degraded`), the `active` and `retiring` sets, and
-`tokenExpiry` when the operator manages a Vault token. `Degraded` means
+`Retiring`, `Degraded`), the `active` and `retiring` sets,
+`retirementPending` while old keys await removal, and `tokenExpiry`
+when the operator manages a Vault token. Once rotation under the new
+set succeeds, the phase is `Ready`; old-key removal continues in the
+background while `retiring` remains populated.
+
+On live clusters, old-key retirement follows workload-identity claim
+expiry. Identities without TTLs can defer retirement until their
+workloads churn, so set identity TTLs as the
+`server.vaults[].defaultIdentity.ttl` examples below model. The operator
+reports the remaining old-key count in `retirementPending` and emits a
+debounced Normal `KeyringRetirementPending` Event. `Degraded` means
 the state machine is settled but Nomad itself reports the keyring
 inoperable — config delivery is not initialization, so the operator
 probes Nomad's own key list and emits a `KeyringNotInitialized` Warning
@@ -1037,7 +1054,10 @@ across modes.
 Changing `spec.target` or `spec.schedule` on a recurring NomadSnapshot
 updates the agent config and rolls the Deployment automatically — the
 pod template carries a `checksum/config` annotation, so the agent
-always runs the current config. A failed one-shot Job sets the
+always runs the current config. The rendered config is stored in the
+`<snapshot>-snapshot-config` Secret because S3 and Azure credentials are
+part of the provider stanza. Its name is reported in
+`status.configSecretName`. A failed one-shot Job sets the
 `Degraded` condition and emits a `SnapshotDegraded` Warning Event.
 
 **Restore compatibility.** Snapshots restore only to the same Nomad
@@ -1099,6 +1119,22 @@ Exactly one target must be specified.
 | `container` | `string` | | Azure container name |
 | `accountName` | `string` | | Storage account name |
 | `credentialsSecretRef.name` | `string` | | Secret with `AZURE_BLOB_ACCOUNT_KEY` |
+
+Credential delivery is provider-specific because the snapshot agent's
+backends expose different authentication surfaces:
+
+| Provider | Settings and credential delivery |
+|----------|----------------------------------|
+| S3 | `bucket`, `region`, endpoint settings, `access_key_id`, and `secret_access_key` are rendered together in `aws_storage`. When `credentialsSecretRef` is omitted, the AWS SDK uses ambient identity. |
+| Azure Blob | `account_name`, `account_key`, and `container_name` are rendered together in `azure_blob_storage`. The agent does not read an Azure account-key environment variable. |
+| GCS | Agent-imposed exception: `google_storage` accepts only `bucket`. A referenced service-account key remains mounted as a file with `GOOGLE_APPLICATION_CREDENTIALS`; when omitted, Application Default Credentials use ambient identity. |
+
+The operator reads referenced credential Secrets before rendering. A
+missing Secret reports `Ready=False` with reason
+`CredentialsSecretNotFound`; an absent or empty required key reports
+`CredentialsSecretInvalid`. Secret changes enqueue reconciliation. For
+S3 and Azure, the credentials are included in `checksum/config`, so
+rotation rolls a recurring Deployment onto the new config.
 
 Ambient identity for S3 and GCS targets carries the same pod-identity
 caveat as [server keyrings](#keyrings-specserverkeyrings): node-level
@@ -1399,7 +1435,7 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.certificateAuthority.expiryTime` | CA certificate expiry |
 | `status.certificateAuthority.subject` | CA certificate subject DN |
 | `status.nomadVersion` | Nomad agent version observed via `/v1/agent/self` (e.g. `1.11.0+ent`); empty until the first successful probe |
-| `status.keyring` | Keyring set state: `phase` (`Ready`/`Introducing`/`Rotating`/`Retiring`), `active[]`, `retiring[]`, and `tokenExpiry` for operator-managed Vault tokens |
+| `status.keyring` | Keyring set state: `phase` (`Ready`/`Introducing`/`Rotating`/`Retiring`/`Degraded`), `active[]`, `retiring[]`, `retirementPending` for the old-key cleanup tail, and `tokenExpiry` for operator-managed Vault tokens |
 | `status.license.valid` | Whether the Nomad license is valid |
 | `status.license.expirationTime` | License expiry time |
 | `status.license.features` | Licensed features |
@@ -1427,6 +1463,8 @@ sub-field keeps its last-known value).
 | `AutopilotUnhealthy` | Raft autopilot reports unhealthy — see `status.autopilot` |
 | `LicenseSecretNotFound` | `spec.license.secretName` references a Secret that does not exist — create it; the operator re-reconciles the moment it appears |
 | `TrustBundleConfigMapNotFound` | `spec.trustBundle.configMapRef.name` references a ConfigMap that does not exist |
+| `CredentialsSecretNotFound` | A NomadSnapshot target references a Secret that does not exist |
+| `CredentialsSecretInvalid` | A NomadSnapshot target's credential Secret is missing a required key or contains an empty value |
 | `LicenseSecretInvalid` | The license Secret exists but is missing the `license` key |
 | `CAExpired` | The CA certificate has expired; TLS handshakes fail cluster-wide — see `status.certificateAuthority`. Takes precedence over `WaitingForReplicas` so the cascading pod failures are attributed to their cause |
 | `PhaseFailed` | A reconcile phase errored; the message names the phase |
