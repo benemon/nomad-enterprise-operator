@@ -97,9 +97,11 @@ kubectl get nomadcluster <cluster> -n <ns> -o jsonpath='{.status.scaleDown}'
 ```
 
 Also pause any recurring NomadSnapshot agents targeting this cluster
-(delete the NomadSnapshot or scale its `<snapshot>-snapshot-agent`
-Deployment to zero) so a scheduled snapshot doesn't capture
-mid-restore state.
+by deleting the NomadSnapshot resource, so a scheduled snapshot doesn't
+capture mid-restore state. Deleting the CR is the only reliable pause:
+the reconciler pins the agent Deployment to one replica, so scaling it
+to zero is reverted on the next reconcile. The storage artifacts are
+retained; recreate the NomadSnapshot after the restore.
 
 ## Restore execution example
 
@@ -109,7 +111,7 @@ cluster (the Nomad image already has the CLI):
 
 ```sh
 kubectl run nomad-restore -n <ns> --rm -it --restart=Never \
-  --image=<same image as the cluster, e.g. hashicorp/nomad-enterprise:2.0.0-ent> \
+  --image=<same image as the cluster, e.g. hashicorp/nomad:2.0.5-ent> \
   --overrides='{"spec":{"volumes":[{"name":"tls","secret":{"secretName":"<cluster>-tls"}}],
     "containers":[{"name":"nomad-restore","image":"<image>","stdin":true,"tty":true,
     "command":["sh"],
