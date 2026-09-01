@@ -1145,7 +1145,9 @@ Secret-class objects — plan etcd encryption and namespace RBAC
 accordingly, and treat access to either as access to the storage
 backend. Rotation flows from your Secret; the rendered copy converges
 within one reconcile. The server configuration Secret follows the same
-custody model for the gossip key and keyring tokens.
+custody model for the gossip key and keyring tokens. The full trust
+boundary and threat inventory is in the
+[threat model](docs/threat-model/README.md).
 
 Ambient identity for S3 and GCS targets carries the same pod-identity
 caveat as [server keyrings](#keyrings-specserverkeyrings): node-level
