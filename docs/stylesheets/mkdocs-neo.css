@@ -1,0 +1,49 @@
+/* Nomad Enterprise Operator - docs colour scheme
+ * Drop into docs/stylesheets/ and register in mkdocs.yml:
+ *   extra_css: [stylesheets/mkdocs-neo.css]
+ * Logo + favicon (copy neo-mark.svg + neo-favicon.svg into docs/assets/):
+ *   theme:
+ *     logo: assets/neo-mark.svg
+ *     favicon: assets/neo-favicon.svg
+ */
+:root {
+  --neo-green: #06d092;      /* brand green - accents, dark-mode links */
+  --neo-green-deep: #007a52; /* accessible green - light-mode links */
+  --neo-pine: #0a1b14;       /* header + dark surfaces */
+  --neo-ink: #0c0c0e;        /* headings */
+  --neo-mist: #edf7f2;       /* tinted surfaces (admonitions, code hints) */
+}
+
+/* Light */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #0a1b14;
+  --md-primary-fg-color--light: #1c3b2d;
+  --md-primary-fg-color--dark: #06110c;
+  --md-accent-fg-color: #007a52;
+  --md-typeset-a-color: #007a52;
+  --md-default-fg-color--light: #3b3d45;
+  --md-code-hl-color: rgba(6, 208, 146, 0.18);
+  --md-footer-bg-color: #0a1b14;
+  --md-footer-bg-color--dark: #06110c;
+}
+[data-md-color-scheme="default"] .md-typeset h1,
+[data-md-color-scheme="default"] .md-typeset h2 { color: #0c0c0e; }
+
+/* Dark */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0a1b14;
+  --md-primary-fg-color--light: #1c3b2d;
+  --md-primary-fg-color--dark: #06110c;
+  --md-accent-fg-color: #06d092;
+  --md-typeset-a-color: #3fdfa9;
+  --md-default-bg-color: #0f1a15;
+  --md-default-fg-color: rgba(232, 242, 236, 0.87);
+  --md-default-fg-color--light: rgba(232, 242, 236, 0.62);
+  --md-code-bg-color: #13221b;
+  --md-code-hl-color: rgba(6, 208, 146, 0.15);
+  --md-footer-bg-color: #06110c;
+}
+
+/* Header: pine bar, green underline on active tab */
+.md-header { border-bottom: 1px solid rgba(6, 208, 146, 0.25); }
+.md-tabs__link--active, .md-nav__link--active { color: var(--md-accent-fg-color); }
