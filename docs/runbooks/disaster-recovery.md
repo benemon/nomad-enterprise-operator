@@ -107,11 +107,11 @@ into a fresh cluster.
 2. Wait for `Ready`, then copy the snapshot artifact to a server pod
    and restore:
 
-```sh
-kubectl cp ./nomad.snap nomad-0:/tmp/nomad.snap
-kubectl exec nomad-0 -- env NOMAD_TOKEN=$MGMT_TOKEN \
-  nomad operator snapshot restore /tmp/nomad.snap
-```
+    ```sh
+    kubectl cp ./nomad.snap nomad-0:/tmp/nomad.snap
+    kubectl exec nomad-0 -- env NOMAD_TOKEN=$MGMT_TOKEN \
+      nomad operator snapshot restore /tmp/nomad.snap
+    ```
 
 3. **The restore replaces ACL state.** The restored Raft data contains
    the *source* cluster's ACL tokens and policies; the new cluster's

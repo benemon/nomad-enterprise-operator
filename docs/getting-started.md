@@ -24,55 +24,55 @@ All images are published to quay.io:
 
 1. Create a CatalogSource to make the operator available in OperatorHub:
 
-```yaml
-apiVersion: operators.coreos.com/v1alpha1
-kind: CatalogSource
-metadata:
-  name: nomad-enterprise-operator-catalog
-  namespace: openshift-marketplace
-spec:
-  sourceType: grpc
-  image: quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v<version>
-  displayName: Nomad Enterprise Operator
-  publisher: benemon
-  updateStrategy:
-    registryPoll:
-      interval: 30m
-```
+    ```yaml
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: CatalogSource
+    metadata:
+      name: nomad-enterprise-operator-catalog
+      namespace: openshift-marketplace
+    spec:
+      sourceType: grpc
+      image: quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v<version>
+      displayName: Nomad Enterprise Operator
+      publisher: benemon
+      updateStrategy:
+        registryPoll:
+          interval: 30m
+    ```
 
 2. Create a namespace and OperatorGroup for the operator:
 
-```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: nomad-enterprise-operator-system
----
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: nomad-enterprise-operator
-  namespace: nomad-enterprise-operator-system
-spec:
-  targetNamespaces:
-    - nomad-enterprise-operator-system
-```
+    ```yaml
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: nomad-enterprise-operator-system
+    ---
+    apiVersion: operators.coreos.com/v1
+    kind: OperatorGroup
+    metadata:
+      name: nomad-enterprise-operator
+      namespace: nomad-enterprise-operator-system
+    spec:
+      targetNamespaces:
+        - nomad-enterprise-operator-system
+    ```
 
 3. Create a Subscription to install the operator:
 
-```yaml
-apiVersion: operators.coreos.com/v1alpha1
-kind: Subscription
-metadata:
-  name: nomad-enterprise-operator
-  namespace: nomad-enterprise-operator-system
-spec:
-  channel: alpha
-  name: nomad-enterprise-operator
-  source: nomad-enterprise-operator-catalog
-  sourceNamespace: openshift-marketplace
-  installPlanApproval: Automatic
-```
+    ```yaml
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: Subscription
+    metadata:
+      name: nomad-enterprise-operator
+      namespace: nomad-enterprise-operator-system
+    spec:
+      channel: alpha
+      name: nomad-enterprise-operator
+      source: nomad-enterprise-operator-catalog
+      sourceNamespace: openshift-marketplace
+      installPlanApproval: Automatic
+    ```
 
 Alternatively, once the CatalogSource is created, the operator appears in
 the OpenShift console under **OperatorHub** and can be installed from the UI.
