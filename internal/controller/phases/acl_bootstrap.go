@@ -42,42 +42,6 @@ const SecretKeyAccessorID = "accessor-id"
 // every write site.
 const operatorStatusPolicyDescription = "Operator day-2 status API access (operator:read, agent:read)"
 
-// The operator formerly created this anonymous read policy at
-// bootstrap; the desired state is now absence. The exact text is the
-// ownership marker: reconcileOperatorPolicies deletes the policy only
-// when the observed content matches it verbatim, so an anonymous
-// policy with any other content is user-authored and left alone.
-const (
-	legacyAnonymousPolicyName        = "anonymous"
-	legacyAnonymousPolicyDescription = "Allow anonymous read access for cluster visibility"
-	legacyAnonymousPolicyRules       = `
-namespace "default" {
-  policy       = "read"
-  capabilities = ["list-jobs", "read-job"]
-}
-
-agent {
-  policy = "read"
-}
-
-operator {
-  policy = "read"
-}
-
-quota {
-  policy = "read"
-}
-
-node {
-  policy = "read"
-}
-
-host_volume "*" {
-  policy = "read"
-}
-`
-)
-
 // OperatorManagementSecretName returns the deterministic Secret/token
 // name — the durable truth for deletion cleanup; the status field is
 // cache only. No matching policy: the token is management-type.
@@ -329,9 +293,7 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 }
 
 // reconcileOperatorPolicies writes each operator-owned policy only
-// when missing or drifted; manual edits revert next reconcile. The
-// legacy anonymous policy reconciles to absence, guarded by the
-// exact-text ownership marker.
+// when missing or drifted; manual edits revert next reconcile.
 func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.NomadCluster, token string) error {
 	desired := []nomad.ACLPolicyResult{
 		{
@@ -358,17 +320,6 @@ func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.Nom
 				return err
 			}
 			p.Log.Info("Reconciled operator ACL policy", "policy", want.Name, "created", observed == nil)
-		}
-
-		observed, err := nomadClient.GetACLPolicy(token, legacyAnonymousPolicyName)
-		if err != nil {
-			return err
-		}
-		if observed != nil && observed.Description == legacyAnonymousPolicyDescription && observed.Rules == legacyAnonymousPolicyRules {
-			if err := nomadClient.DeleteACLPolicy(token, legacyAnonymousPolicyName); err != nil {
-				return err
-			}
-			p.Log.Info("Deleted legacy operator-owned anonymous ACL policy", "policy", legacyAnonymousPolicyName)
 		}
 		return nil
 	})

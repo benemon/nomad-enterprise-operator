@@ -220,17 +220,11 @@ func TestACLBootstrapPhase_OperatorStatusTokenIdempotent(t *testing.T) {
 }
 
 // TestObservedStateDiff_NoWriteWhenMatches: policies write only when
-// missing or drifted, and the legacy anonymous policy is deleted only
-// on an exact content match. The mock fails on unexpected calls, so
-// the steady-state pass having no write expectation IS the assertion.
+// missing or drifted. The mock fails on unexpected calls, so the
+// steady-state pass having no write expectation IS the assertion.
 func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 	const managementToken = "mgmt-secret-id"
 
-	legacyAnonymous := &nomad.ACLPolicyResult{
-		Name:        legacyAnonymousPolicyName,
-		Description: legacyAnonymousPolicyDescription,
-		Rules:       legacyAnonymousPolicyRules,
-	}
 	statusDesired := &nomad.ACLPolicyResult{
 		Name:        testOperatorStatusName,
 		Description: "Operator day-2 status API access (operator:read, agent:read)",
@@ -286,43 +280,32 @@ func TestObservedStateDiff_NoWriteWhenMatches(t *testing.T) {
 		},
 	})
 
-	// Invocation 1: status policy missing, no anonymous policy — the
-	// status policy is created, nothing is deleted.
+	// Invocation 1: status policy missing — created.
 	mockNomad.EXPECT().GetACLPolicy(managementToken, statusDesired.Name).Return(nil, nil).Once()
 	mockNomad.EXPECT().CreateACLPolicy(managementToken, statusDesired.Name, statusDesired.Description, statusDesired.Rules).Return(nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(managementToken, legacyAnonymous.Name).Return(nil, nil).Once()
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() invocation 1 error = %v", result.Error)
 	}
 
-	// Invocation 2 (AC-2.5.1): status observed matches desired — no
-	// write. The legacy anonymous policy is present verbatim — deleted.
+	// Invocation 2 (AC-2.5.1): observed matches desired — GET only,
+	// zero writes. No CreateACLPolicy expectation is registered, so any
+	// write call fails the test.
 	mockNomad.EXPECT().GetACLPolicy(managementToken, statusDesired.Name).Return(statusDesired, nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(managementToken, legacyAnonymous.Name).Return(legacyAnonymous, nil).Once()
-	mockNomad.EXPECT().DeleteACLPolicy(managementToken, legacyAnonymous.Name).Return(nil).Once()
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() invocation 2 error = %v", result.Error)
 	}
 
 	// Invocation 3 (AC-2.5.2 / AC-2.5.3): the status policy was
-	// manually edited between reconciles — written back to desired. An
-	// anonymous policy with user-authored content is left alone: no
-	// delete expectation is registered, so a delete call fails the test.
+	// manually edited between reconciles — written back to desired.
 	edited := &nomad.ACLPolicyResult{
 		Name:        statusDesired.Name,
 		Description: statusDesired.Description,
 		Rules:       `operator { policy = "write" }`,
 	}
-	userAnonymous := &nomad.ACLPolicyResult{
-		Name:        legacyAnonymous.Name,
-		Description: "cluster visibility for dashboards",
-		Rules:       `node { policy = "read" }`,
-	}
 	mockNomad.EXPECT().GetACLPolicy(managementToken, statusDesired.Name).Return(edited, nil).Once()
 	mockNomad.EXPECT().CreateACLPolicy(managementToken, statusDesired.Name, statusDesired.Description, statusDesired.Rules).Return(nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(managementToken, legacyAnonymous.Name).Return(userAnonymous, nil).Once()
 
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("Execute() invocation 3 error = %v", result.Error)
@@ -441,11 +424,8 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 		Run(func(_, _ string) { step("token:mgmt") }).
 		Return(&nomad.ACLTokenResult{AccessorID: "mgmt-acc", SecretID: mgmtToken, Type: "management"}, nil).Once()
 
-	// C2 policy reconciliation and status-token creation: management auth
-	// only. A fresh bootstrap has no anonymous policy — GET misses,
-	// nothing is deleted.
+	// C2 policy reconciliation and status-token creation: management auth only.
 	mockNomad.EXPECT().GetACLPolicy(mgmtToken, statusName).Return(nil, nil).Once()
-	mockNomad.EXPECT().GetACLPolicy(mgmtToken, legacyAnonymousPolicyName).Return(nil, nil).Once()
 	// Status policy is written by C2's reconcile (miss) and upserted
 	// again by ensureOperatorStatusToken's own creation path.
 	mockNomad.EXPECT().CreateACLPolicy(mgmtToken, statusName, "Operator day-2 status API access (operator:read, agent:read)", nomad.OperatorStatusPolicyRules).
@@ -501,12 +481,11 @@ func TestBootstrapMintsManagementTokenFirst(t *testing.T) {
 	}
 }
 
-// TestC2WritesUseManagementToken covers C4 (neo-ikf) / AC-2.4.5: C2's
-// post-bootstrap writes — the drift-revert upsert and the legacy
-// anonymous-policy delete — authenticate with the MANAGEMENT token,
-// never the bootstrap token. The mock has no expectation for any
-// bootstrap-token write, so regressing to bootstrap auth fails the
-// test.
+// TestC2WritesUseManagementToken covers C4 (neo-ikf) / AC-2.4.5: when
+// C2's observed-state diff finds drift post-bootstrap, the resulting
+// write authenticates with the MANAGEMENT token, never the bootstrap
+// token. The mock has no expectation for any bootstrap-token write, so
+// regressing to bootstrap auth fails the test.
 func TestC2WritesUseManagementToken(t *testing.T) {
 	const managementToken = "mgmt-secret-id"
 	const mgmtName = "test-cluster-operator-management"
@@ -537,19 +516,11 @@ func TestC2WritesUseManagementToken(t *testing.T) {
 		Description: "Operator day-2 status API access (operator:read, agent:read)",
 		Rules:       `operator { policy = "write" }`,
 	}
-	legacyAnonymous := &nomad.ACLPolicyResult{
-		Name:        legacyAnonymousPolicyName,
-		Description: legacyAnonymousPolicyDescription,
-		Rules:       legacyAnonymousPolicyRules,
-	}
 
 	mockNomad := mocks.NewMockNomadAPI(t)
 	// The drift-revert write MUST carry the management token (AC-2.4.5).
 	mockNomad.EXPECT().GetACLPolicy(managementToken, testOperatorStatusName).Return(drifted, nil).Once()
 	mockNomad.EXPECT().CreateACLPolicy(managementToken, testOperatorStatusName, drifted.Description, nomad.OperatorStatusPolicyRules).Return(nil).Once()
-	// So must the legacy anonymous-policy delete.
-	mockNomad.EXPECT().GetACLPolicy(managementToken, legacyAnonymousPolicyName).Return(legacyAnonymous, nil).Once()
-	mockNomad.EXPECT().DeleteACLPolicy(managementToken, legacyAnonymousPolicyName).Return(nil).Once()
 
 	phase := NewACLBootstrapPhase(&PhaseContext{
 		Client: fakeClient,
