@@ -93,8 +93,7 @@ from retained PVCs requires Nomad's manual outage-recovery procedure
 (`peers.json` - see Nomad's outage recovery documentation), performed
 against the crash-looping pods' current IPs and node IDs. Where a
 snapshot exists, prefer Scenario 4: it is simpler and validated
-end-to-end. Automatic operator-driven recovery for retained state is
-tracked as future work.
+end-to-end.
 
 ## Scenario 4: Deletion with reclaimPolicy: Delete - restore from snapshot
 
