@@ -500,35 +500,6 @@ agent {
 }
 `
 
-// AnonymousPolicyRules is the recommended anonymous policy for basic cluster visibility.
-// This provides read-only access to common resources for unauthenticated requests.
-const AnonymousPolicyRules = `
-namespace "default" {
-  policy       = "read"
-  capabilities = ["list-jobs", "read-job"]
-}
-
-agent {
-  policy = "read"
-}
-
-operator {
-  policy = "read"
-}
-
-quota {
-  policy = "read"
-}
-
-node {
-  policy = "read"
-}
-
-host_volume "*" {
-  policy = "read"
-}
-`
-
 // InternalServiceAddress returns the internal K8s service address for a Nomad cluster.
 // This address is only resolvable from within the Kubernetes cluster.
 func InternalServiceAddress(clusterName, namespace string, tlsEnabled bool) string {
