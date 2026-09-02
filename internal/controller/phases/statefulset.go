@@ -109,6 +109,16 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// Build environment variables
 	env := p.buildEnvVars(cluster)
 
+	// EXPERIMENT (neo-ddk): soft-limit the Go runtime at 90% of the
+	// container memory limit so RSS is reclaimed before the OOM killer
+	// fires. Bare integer = bytes.
+	resources := getResourcesWithDefaults(cluster.Spec.Resources)
+	memLimit := resources.Limits[corev1.ResourceMemory]
+	env = append(env, corev1.EnvVar{
+		Name:  "GOMEMLIMIT",
+		Value: strconv.FormatInt(memLimit.Value()/10*9, 10),
+	})
+
 	// Build volume mounts
 	volumeMounts := p.buildVolumeMounts(cluster)
 
@@ -176,7 +186,7 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 					TimeoutSeconds:      3,
 					FailureThreshold:    2,
 				},
-				Resources:       getResourcesWithDefaults(cluster.Spec.Resources),
+				Resources:       resources,
 				VolumeMounts:    volumeMounts,
 				SecurityContext: ContainerSecurityContext(),
 			},
