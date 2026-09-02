@@ -4442,6 +4442,20 @@ spec:
 `
 
 		BeforeAll(func() {
+			// A crash-looping server mid-migration is only explicable
+			// from its PREVIOUS container's output, which the standard
+			// failure dump does not carry (neo-agg).
+			DeferCleanup(func() {
+				for _, pod := range []string{krA + "-0", krB + "-0"} {
+					out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous",
+						"pod/"+pod, "-n", namespace))
+					_, _ = fmt.Fprintf(GinkgoWriter, "%s previous container logs:\n%s\n", pod, out)
+					out, _ = utils.Run(exec.Command("kubectl", "logs", "--tail=40",
+						"pod/"+pod, "-n", namespace))
+					_, _ = fmt.Fprintf(GinkgoWriter, "%s current container logs:\n%s\n", pod, out)
+				}
+			})
+
 			// Vault dev lives in its own UNLABELLED namespace: the
 			// operator namespace enforces restricted PSS, which the
 			// Vault image's entrypoint (root, IPC_LOCK) does not meet.
