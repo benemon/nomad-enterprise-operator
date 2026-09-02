@@ -72,4 +72,43 @@ that no longer exists can be deleted (the token it holds died with the
 cluster). The operator does not scan for orphans itself - that would
 require a periodic cluster-wide sweep, which is out of scope.
 
+## Operator RBAC
+
+The threat model's primary mitigation is that no bindings exist beyond
+the bundled ClusterRole, which presumes the bundled role is minimal.
+Every permission in the generated role
+([config/rbac/role.yaml](https://github.com/benemon/nomad-enterprise-operator/blob/main/config/rbac/role.yaml))
+is justified below by the controller and call site that uses it.
+
+Two structural rules explain verbs that no single call site names:
+`get;list;watch` travel together because every read goes through the
+controller-runtime cache, and any cached `get` starts an informer that
+lists and watches; owned resources are removed by Kubernetes garbage
+collection through ownerReferences, so `delete` appears only where the
+operator deletes an object explicitly.
+
+| Resource | Verbs | Used by |
+|----------|-------|---------|
+| `configmaps` | create, update, delete + reads | Cluster controller: OpenShift trust bundle and CA bundle ConfigMaps, keyring state ConfigMap. Autoscaler controller: agent configuration. `delete`: the cluster controller reaps the legacy rendered-config ConfigMap once the StatefulSet is fully rolled onto the Secret-backed config. |
+| `secrets` | create, update, delete + reads | Cluster controller: TLS certificates, gossip key, rendered server config, ACL token Secrets. Snapshot and autoscaler controllers: agent config and token Secrets. `delete`: the deletion finalizer removes the bootstrap-token Secret explicitly (it has no ownerReference - see above). `watch` also drives rolling restarts when referenced user Secrets change. |
+| `services` | create, update + reads | Cluster controller: internal, external, and headless Services. Autoscaler controller: agent metrics Service. |
+| `serviceaccounts` | create + reads | Cluster controller: the per-cluster ServiceAccount the Nomad pods run as. Owned, so never updated or deleted by the operator. |
+| `serviceaccounts/token` | create | Cluster controller: TokenRequest minting the ephemeral audience-bound JWT for Vault keyring authentication. |
+| `pods` | reads | Cluster controller: pod readiness before ACL bootstrap, roll-completion tracking. |
+| `persistentvolumeclaims` | create, update, delete + reads | Snapshot controller: snapshot storage PVC. `delete`: the cluster deletion finalizer removes the server data PVCs. |
+| `events` | create, patch | The Event recorder on all three controllers; `patch` is how the recorder folds repeats into an event series. |
+| `apps/statefulsets` | create, update, patch, delete + reads | Cluster controller: the server StatefulSet; `patch` for scale-down replica steps; `delete` by the deletion finalizer ahead of PVC cleanup. |
+| `apps/deployments` | create, update, delete + reads | Autoscaler controller: agent Deployment. Snapshot controller: periodic snapshot runner Deployment; `delete` removes the stale runner when the schedule moves between one-shot and periodic. |
+| `batch/jobs` | create, delete + reads | Snapshot controller: one-shot snapshot Jobs. Jobs are immutable, so there is no `update` - re-runs delete and recreate. |
+| `monitoring.coreos.com/servicemonitors` | create, update + reads | Cluster and autoscaler controllers. Removed only by garbage collection, so no `delete`. |
+| `monitoring.coreos.com/prometheusrules` | create, update, delete + reads | Cluster and autoscaler controllers. `delete` because the rule follows `prometheusRulesEnabled` both ways - toggling off deletes it. |
+| `policy/poddisruptionbudgets` | create, update, delete + reads | Cluster and autoscaler controllers; `delete` when replicas drop below the point where a PDB is meaningful. |
+| `rbac/roles` | create, update + reads | Cluster controller: per-cluster Role granting the Nomad pods read access to their ConfigMaps, Secrets, and pods; `update` reverts manual edits. |
+| `rbac/rolebindings` | create + reads | Cluster controller: binds the per-cluster ServiceAccount to that Role. RoleRef is immutable, so there is no `update`. |
+| `route.openshift.io/routes` | create, update + reads | Cluster controller: the UI Route. |
+| `route.openshift.io/routes/custom-host` | create, update | Required to set `spec.host` when the CR configures an explicit Route host. |
+| `nomad.hashicorp.com` CRs | update + reads | The controllers' own resources; `update` adds and removes finalizers. The snapshot controller also reads the target NomadCluster. |
+| `nomad.hashicorp.com` CRs `/status` | patch | Status writes ride MergeFrom patches. |
+| `nomad.hashicorp.com` CRs `/finalizers` | update | Required by the OwnerReferencesPermissionEnforcement admission plugin (on by default on OpenShift) for setting `blockOwnerDeletion` on owned objects. |
+
 
