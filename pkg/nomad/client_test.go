@@ -562,24 +562,6 @@ func TestErrAlreadyBootstrapped(t *testing.T) {
 	}
 }
 
-func TestAnonymousPolicyRules(t *testing.T) {
-	// Verify the anonymous policy contains expected sections
-	expectedSections := []string{
-		"namespace",
-		"agent",
-		"operator",
-		"quota",
-		"node",
-		"host_volume",
-	}
-
-	for _, section := range expectedSections {
-		if !strings.Contains(AnonymousPolicyRules, section) {
-			t.Errorf("AnonymousPolicyRules missing expected section: %s", section)
-		}
-	}
-}
-
 // newACLTestServer fakes the Nomad API routes the ACL and status client
 // methods hit, so each method's request formation and response mapping is
 // exercised through the real SDK plumbing.

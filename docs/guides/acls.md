@@ -17,12 +17,18 @@ The principle is separation per concern: the bootstrap token is
 effectively sealed after minting the management token; writes ride the
 management token (dedicated, independently revocable and rotatable -
 delete its Secret to force a re-mint); reads ride the least-privilege
-status token. The operator also keeps
-the two operator-owned policies (`anonymous` and
-`<cluster>-operator-status`) in their desired state on every
-reconcile - manual edits to them are reverted. The management
+status token. The operator also keeps the operator-owned
+`<cluster>-operator-status` policy in its desired state on every
+reconcile - manual edits to it are reverted. The management
 credential has no policy: it is a management-type token, because Nomad
 has no ACL-write policy grammar.
+
+Anonymous requests are denied. The operator creates no anonymous
+policy, so operand clusters keep Nomad's default deny-all posture for
+tokenless requests, and the web UI (including access via the OpenShift
+Route) requires a token login. Admins who want tokenless read
+visibility can create their own `anonymous` policy - the operator
+leaves it alone.
 
 On cluster deletion, the finalizer revokes the management and status
 tokens and deletes their policies from Nomad (authenticating with the

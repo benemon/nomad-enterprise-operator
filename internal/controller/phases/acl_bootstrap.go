@@ -37,13 +37,45 @@ import (
 // ID is stored in Kubernetes Secrets owned by this operator.
 const SecretKeyAccessorID = "accessor-id"
 
-// Operator-owned ACL policy names and descriptions. The description is
-// part of the desired state compared by reconcileOperatorPolicies, so
-// it must be defined once and shared by every write site.
+// operatorStatusPolicyDescription is part of the desired state compared
+// by reconcileOperatorPolicies, so it must be defined once and shared by
+// every write site.
+const operatorStatusPolicyDescription = "Operator day-2 status API access (operator:read, agent:read)"
+
+// The operator formerly created this anonymous read policy at
+// bootstrap; the desired state is now absence. The exact text is the
+// ownership marker: reconcileOperatorPolicies deletes the policy only
+// when the observed content matches it verbatim, so an anonymous
+// policy with any other content is user-authored and left alone.
 const (
-	anonymousPolicyName             = "anonymous"
-	anonymousPolicyDescription      = "Allow anonymous read access for cluster visibility"
-	operatorStatusPolicyDescription = "Operator day-2 status API access (operator:read, agent:read)"
+	legacyAnonymousPolicyName        = "anonymous"
+	legacyAnonymousPolicyDescription = "Allow anonymous read access for cluster visibility"
+	legacyAnonymousPolicyRules       = `
+namespace "default" {
+  policy       = "read"
+  capabilities = ["list-jobs", "read-job"]
+}
+
+agent {
+  policy = "read"
+}
+
+operator {
+  policy = "read"
+}
+
+quota {
+  policy = "read"
+}
+
+node {
+  policy = "read"
+}
+
+host_volume "*" {
+  policy = "read"
+}
+`
 )
 
 // OperatorManagementSecretName returns the deterministic Secret/token
@@ -181,9 +213,8 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 		return OK()
 	}
 
-	// Create the operator-owned policies (anonymous for basic cluster
-	// visibility; operator-status ahead of its token below). First
-	// reconcile after bootstrap, so the GETs miss and the policies are
+	// Create the operator-status policy ahead of its token below. First
+	// reconcile after bootstrap, so the GET misses and the policy is
 	// written.
 	if err := p.reconcileOperatorPolicies(cluster, managementToken); err != nil {
 		p.Log.Error(err, "Failed to create operator ACL policies, continuing with bootstrap")
@@ -298,14 +329,11 @@ func (p *ACLBootstrapPhase) storeBootstrapToken(ctx context.Context, cluster *no
 }
 
 // reconcileOperatorPolicies writes each operator-owned policy only
-// when missing or drifted; manual edits revert next reconcile.
+// when missing or drifted; manual edits revert next reconcile. The
+// legacy anonymous policy reconciles to absence, guarded by the
+// exact-text ownership marker.
 func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.NomadCluster, token string) error {
 	desired := []nomad.ACLPolicyResult{
-		{
-			Name:        anonymousPolicyName,
-			Description: anonymousPolicyDescription,
-			Rules:       nomad.AnonymousPolicyRules,
-		},
 		{
 			Name:        OperatorStatusName(cluster.Name),
 			Description: operatorStatusPolicyDescription,
@@ -330,6 +358,17 @@ func (p *ACLBootstrapPhase) reconcileOperatorPolicies(cluster *nomadv1alpha1.Nom
 				return err
 			}
 			p.Log.Info("Reconciled operator ACL policy", "policy", want.Name, "created", observed == nil)
+		}
+
+		observed, err := nomadClient.GetACLPolicy(token, legacyAnonymousPolicyName)
+		if err != nil {
+			return err
+		}
+		if observed != nil && observed.Description == legacyAnonymousPolicyDescription && observed.Rules == legacyAnonymousPolicyRules {
+			if err := nomadClient.DeleteACLPolicy(token, legacyAnonymousPolicyName); err != nil {
+				return err
+			}
+			p.Log.Info("Deleted legacy operator-owned anonymous ACL policy", "policy", legacyAnonymousPolicyName)
 		}
 		return nil
 	})
