@@ -73,10 +73,65 @@ automatically; the declarative equivalent ships at
 | `nomad_operator_scale_down_in_progress` | Gauge | `cluster`, `namespace` | 1 while a Raft scale-down operation is running, else 0 |
 | `nomad_operator_nomad_version_info` | Gauge | `cluster`, `namespace`, `version` | Constant 1; the observed Nomad server version is carried as a label. The previous series is deleted on version change so each cluster exposes a single version label |
 
-**Cardinality budget:** the operator is designed for ≤200 NomadClusters
-per operator instance. Beyond that, the per-cluster label on
-`nomad_operator_phase_duration_seconds` produces histogram cardinality
-you should size your Prometheus storage for. Multi-instance operator
-deployments (sharded by namespace) are not currently supported.
+A Grafana dashboard covering these metrics plus the controller-runtime
+reconcile, workqueue, and process series ships at
+[`config/grafana/operator-dashboard.json`](https://github.com/benemon/nomad-enterprise-operator/blob/main/config/grafana/operator-dashboard.json) -
+import it and point the datasource variable at the Prometheus that
+scrapes the operator.
+
+
+## Capacity
+
+**Cardinality budget:** the operator supports ≤200 NomadClusters per
+operator instance. Multi-instance operator deployments (sharded by
+namespace or otherwise) are not supported: run exactly one operator
+per Kubernetes cluster and treat 200 NomadClusters as the ceiling for
+that instance.
+
+Measured monitoring cost per operand cluster (1-replica cluster, Nomad
+2.0.5-ent, the operator ServiceMonitor at its 30s cadence):
+
+| Quantity | Idle cluster | Under dispatch churn (175 clients, ~9 dispatch/s) |
+|----------|-------------|--------------------------------------------------|
+| Stored series per cluster | 234 | 618 |
+| `/v1/metrics` scrape payload | ~240 KiB | ~2.6 MiB |
+
+Under dispatch churn ~96% of the samples the endpoint exposes are
+per-dispatch-child series; the shipped `metricRelabelings` rule drops
+them at scrape, which is why stored series stay in the hundreds while
+the payload grows tenfold. The payload is still transferred and parsed
+on every scrape, so the binding cost at fleet scale is scrape
+bandwidth and ingest parsing, not TSDB cardinality: 200 clusters under
+sustained dispatch churn present ~17 MiB/s of scrape payload to
+Prometheus, while stored series stay in the 47k (idle) to 124k
+(churning) range - comfortable for a single mid-size Prometheus.
+
+The operator's own metrics add ~176 series per cluster, dominated by
+the `nomad_operator_phase_duration_seconds` histogram (phases x
+buckets); at 200 clusters that is ~35k series.
+
+**Retention sizing:** at the 30s cadence each cluster writes 2,880
+samples per series per day; at ~1.5 bytes per compressed sample the
+TSDB cost is roughly
+
+```
+bytes ≈ clusters × series_per_cluster × 2880 × 1.5 × retention_days
+```
+
+or ~1 MiB per idle cluster per day (234 series) and ~2.7 MiB per
+churning cluster per day (618 series). A 200-cluster fleet with 30-day
+retention sizes to ~6-16 GiB of TSDB, before Prometheus overheads.
+
+**Operator control-plane cost** (measured on a 10-cluster fleet,
+kind on an 8-core/8 GiB Docker VM): converging 10 simultaneously
+created clusters takes ~76s end to end; reconcile p50 is ~35ms with
+p99 spiking to ~40s during ACL bootstrap (the reconcile blocks on
+first Nomad API availability); workqueue depth peaks at 3 with p99
+queue wait ~9s during the burst and returns to zero at steady state.
+Steady-state cost at 10 clusters is ~0.5% of one core and ~68 MiB RSS.
+The scaling constraint during create bursts is long ACL-bootstrap
+reconciles serialized over the controller's 4 concurrent workers -
+queue wait grows with the number of clusters bootstrapping at the same
+moment, not with fleet size at rest.
 
 

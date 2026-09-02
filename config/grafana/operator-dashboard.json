@@ -1,0 +1,221 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "type": "datasource",
+      "pluginId": "prometheus"
+    }
+  ],
+  "title": "Nomad Enterprise Operator",
+  "uid": "nomad-enterprise-operator",
+  "tags": ["nomad", "operator"],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Fleet size (NomadClusters observed)",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "count(nomad_operator_nomad_version_info)", "legendFormat": "clusters"}
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Workqueue depth (nomadcluster)",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "workqueue_depth{name=\"nomadcluster\"}", "legendFormat": "depth"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 20}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "ACL bootstrap failures (1h rate)",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(increase(nomad_operator_acl_bootstrap_failures_total[1h]))", "legendFormat": "failures"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Scale-downs in progress",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum(nomad_operator_scale_down_in_progress)", "legendFormat": "active"}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Soonest cert expiry (days)",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "(min(nomad_operator_cert_expiry_timestamp_seconds) - time()) / 86400", "legendFormat": "days"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 14},
+              {"color": "green", "value": 30}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Soonest license expiry (days)",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "(min(nomad_operator_license_expiry_timestamp_seconds) - time()) / 86400", "legendFormat": "days"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 14},
+              {"color": "green", "value": 30}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Reconcile rate by result (nomadcluster)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (result) (rate(controller_runtime_reconcile_total{controller=\"nomadcluster\"}[5m]))", "legendFormat": "{{result}}"}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Reconcile latency p50 / p99 (nomadcluster)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{controller=\"nomadcluster\"}[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{controller=\"nomadcluster\"}[5m])))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Phase duration p99 by phase",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (phase, le) (rate(nomad_operator_phase_duration_seconds_bucket[5m])))", "legendFormat": "{{phase}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Watch/event intake vs work rate (workqueue adds, nomadcluster)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(workqueue_adds_total{name=\"nomadcluster\"}[5m])", "legendFormat": "adds/s"},
+        {"expr": "workqueue_depth{name=\"nomadcluster\"}", "legendFormat": "depth"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Workqueue wait p99 (enqueue to pickup)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{name=\"nomadcluster\"}[5m])))", "legendFormat": "p99 wait"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Nomad API requests by method and outcome",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (method, outcome) (rate(nomad_operator_nomad_api_requests_total[5m]))", "legendFormat": "{{method}} {{outcome}}"}
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Operator RSS and CPU",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "process_resident_memory_bytes{job=~\".*controller-manager.*\", namespace=\"nomad-enterprise-operator-system\"}", "legendFormat": "RSS"},
+        {"expr": "rate(process_cpu_seconds_total{job=~\".*controller-manager.*\", namespace=\"nomad-enterprise-operator-system\"}[5m])", "legendFormat": "CPU cores"}
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
