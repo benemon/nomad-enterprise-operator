@@ -1,0 +1,50 @@
+name: Operand contract
+
+# Decode gate: every server.hcl and snapshot.hcl shape the operator can
+# render must load in the real operand image — validated with `nomad
+# config validate` and the snapshot agent's storage banner. Catches
+# renamed or misspelled stanzas (aws_s3 vs aws_storage) that otherwise
+# surface only at operand boot. Credential-free: nothing here needs a
+# license, a cloud account, or a running server, so it runs on fork PRs.
+#
+# The image under test is the operator's own operand default, extracted
+# from the CRD defaults so bumping the default nomad-ent version retests
+# the contract automatically.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  operand-contract:
+    name: Operand contract (rendered-config decode)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve operand default image from CRD defaults
+        id: operand
+        run: |
+          repo=$(grep -o 'kubebuilder:default="hashicorp/nomad"' api/v1alpha1/nomadcluster_types.go | cut -d'"' -f2)
+          tag=$(grep -o 'kubebuilder:default="[0-9][^"]*-ent"' api/v1alpha1/nomadcluster_types.go | cut -d'"' -f2)
+          test -n "$repo" && test -n "$tag"
+          echo "image=${repo}:${tag}" >> "$GITHUB_OUTPUT"
+          echo "Operand under test: ${repo}:${tag}"
+
+      - name: Decode rendered configs with the operand image
+        env:
+          OPERAND_IMAGE: ${{ steps.operand.outputs.image }}
+        run: |
+          docker pull -q "$OPERAND_IMAGE"
+          go test -tags operandcontract -run TestOperandContract -v \
+            ./internal/controller/phases/ ./internal/controller/
