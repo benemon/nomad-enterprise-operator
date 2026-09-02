@@ -715,3 +715,37 @@ func TestGOMEMLIMITTracksMemoryLimit(t *testing.T) {
 		t.Errorf("1Gi-limit GOMEMLIMIT = %s, want %s", got, want)
 	}
 }
+
+// Existing installs predate the GOMEMLIMIT env var; needsUpdate must
+// report the missing entry as drift so the addition converges on
+// operator upgrade, and must not report drift once converged.
+func TestNeedsUpdateContainerEnv(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	desired := phase.buildStatefulSet(context.Background(), newTestCluster("ns", "env"))
+
+	converged := desired.DeepCopy()
+	if update, reason := phase.needsUpdate(converged, desired); update {
+		t.Errorf("identical env reported as drift: %s", reason)
+	}
+
+	stale := desired.DeepCopy()
+	env := stale.Spec.Template.Spec.Containers[0].Env
+	trimmed := env[:0]
+	for _, e := range env {
+		if e.Name != "GOMEMLIMIT" {
+			trimmed = append(trimmed, e)
+		}
+	}
+	stale.Spec.Template.Spec.Containers[0].Env = trimmed
+	update, reason := phase.needsUpdate(stale, desired)
+	if !update {
+		t.Fatal("a missing env var must be reported as drift")
+	}
+	if reason != "container env" {
+		t.Errorf("unexpected drift reason %q", reason)
+	}
+}

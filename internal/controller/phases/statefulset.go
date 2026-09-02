@@ -619,6 +619,14 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 			desired.Spec.Template.Spec.Containers[0].SecurityContext) {
 			return true, "container securityContext"
 		}
+		// Every env entry is operator-rendered with explicit values, so
+		// DeepEqual cannot loop on API-server defaulting. Without this,
+		// an added or changed env var (e.g. GOMEMLIMIT) never reaches a
+		// live StatefulSet.
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Env,
+			desired.Spec.Template.Spec.Containers[0].Env) {
+			return true, "container env"
+		}
 	}
 
 	// Both contexts are operator-rendered with every field set, so a
