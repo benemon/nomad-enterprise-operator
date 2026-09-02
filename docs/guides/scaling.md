@@ -30,6 +30,16 @@ spec:
     # storageClassName: <a class meeting the IOPS/throughput floor>
 ```
 
+The operator sets `GOMEMLIMIT` on the server containers to 90% of the
+effective memory limit, so the Go runtime reclaims memory as usage
+approaches the container ceiling instead of running into the OOM
+killer with a healthy heap. The value tracks `resources.limits.memory`
+(including the default when resources are unset); there is no knob.
+The remaining 10% is headroom for memory outside the runtime's
+control, so a server whose genuinely live state exceeds the limit
+still fails - the soft limit buys degradation instead of a cliff, not
+unbounded capacity.
+
 Storage IOPS and throughput are properties of the storageClass and
 invisible to the operator - validating them is a user responsibility.
 The operator alerts on the *symptom* instead: `NomadRaftCommitSlow`

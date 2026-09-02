@@ -30,6 +30,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -674,5 +675,43 @@ func TestNeedsUpdate_CommandDrift(t *testing.T) {
 	update, reason := phase.needsUpdate(existing, desired)
 	if !update || reason != "container command" {
 		t.Errorf("update=%v reason=%q, want update=true reason=%q", update, reason, "container command")
+	}
+}
+
+// GOMEMLIMIT is derived from the effective memory limit (neo-ddk): the
+// Go GC cannot see the cgroup ceiling, so the operator sets the soft
+// limit at 90% of limits.memory in bytes — for the default 2Gi limit
+// and for an explicit override alike.
+func TestGOMEMLIMITTracksMemoryLimit(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+
+	gomemlimit := func(cluster *nomadv1alpha1.NomadCluster) string {
+		t.Helper()
+		sts := phase.buildStatefulSet(context.Background(), cluster)
+		for _, e := range sts.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == "GOMEMLIMIT" {
+				return e.Value
+			}
+		}
+		t.Fatal("GOMEMLIMIT env var missing from the server container")
+		return ""
+	}
+
+	// Default resources: 2Gi limit -> 90% in bytes.
+	if got, want := gomemlimit(newTestCluster("ns", "defaults")), "1932735276"; got != want {
+		t.Errorf("default-limit GOMEMLIMIT = %s, want %s", got, want)
+	}
+
+	// Explicit limit: 1Gi -> 90% in bytes.
+	custom := newTestCluster("ns", "custom")
+	custom.Spec.Resources.Limits = corev1.ResourceList{
+		corev1.ResourceMemory: resource.MustParse("1Gi"),
+	}
+	if got, want := gomemlimit(custom), "966367638"; got != want {
+		t.Errorf("1Gi-limit GOMEMLIMIT = %s, want %s", got, want)
 	}
 }

@@ -109,9 +109,13 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// Build environment variables
 	env := p.buildEnvVars(cluster)
 
-	// EXPERIMENT (neo-ddk): soft-limit the Go runtime at 90% of the
-	// container memory limit so RSS is reclaimed before the OOM killer
-	// fires. Bare integer = bytes.
+	// GOMEMLIMIT at 90% of the container memory limit: the Go GC paces
+	// itself off heap growth and cannot see the cgroup ceiling, so RSS
+	// (heap + retained + off-heap) otherwise walks into the OOM killer
+	// with a healthy heap (neo-ddk matched sweeps). The soft limit makes
+	// the runtime reclaim as RSS approaches it; the 10% headroom covers
+	// what the runtime does not own (raft BoltDB mmap). Bare integer =
+	// bytes.
 	resources := getResourcesWithDefaults(cluster.Spec.Resources)
 	memLimit := resources.Limits[corev1.ResourceMemory]
 	env = append(env, corev1.EnvVar{
