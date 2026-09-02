@@ -38,7 +38,9 @@ description.
 
 - Unit and envtest coverage includes negative cases.
 - Behaviour with a runtime surface gets e2e coverage on kind, or an
-  explicit written reason why not.
+  explicit written reason why not. Three classes are e2e-only signals,
+  because envtest structurally cannot see them: status-write paths,
+  log format, and status field renames.
 - A guard (validation, RBAC aggregation, a CI gate) is done only when
   breaking it makes a named test fail.
 - Verify effects, not statuses. A phase field saying `Succeeded` is a
