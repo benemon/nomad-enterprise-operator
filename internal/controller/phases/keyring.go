@@ -220,10 +220,23 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 	}
 
 	p.publish(cluster, state, tokens, cloudArgs)
+	p.settleRevisit(state.Phase, tokenRequeue)
+	return OK()
+}
+
+// settleRevisit applies the terminal requeue policy. Migration phases
+// advance on observed state (rolls completing, config delivery); watch
+// events cover most transitions, but a missed one otherwise waits for
+// the 5m resync — seen live as a disable stuck in Retiring minutes
+// after its pod recovered (neo-agg). Poll while any migration is in
+// flight; a sooner token-renewal deadline still wins.
+func (p *KeyringPhase) settleRevisit(phase string, tokenRequeue time.Duration) {
 	if tokenRequeue > 0 {
 		p.RevisitAfter = tokenRequeue
 	}
-	return OK()
+	if phase != keyringPhaseReady && (p.RevisitAfter == 0 || p.RevisitAfter > 15*time.Second) {
+		p.RevisitAfter = 15 * time.Second
+	}
 }
 
 // publish exposes the render set and the pod-wiring entry union on the

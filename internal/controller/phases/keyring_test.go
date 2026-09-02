@@ -336,6 +336,11 @@ func TestKeyringDisableLifecycle(t *testing.T) {
 	if cluster.Status.Keyring.Phase != "Introducing" {
 		t.Fatalf("phase = %s", cluster.Status.Keyring.Phase)
 	}
+	// Migration phases poll: a missed watch event must cost 15s, not
+	// the 5m resync (neo-agg).
+	if phase.RevisitAfter == 0 || phase.RevisitAfter > 15*time.Second {
+		t.Fatalf("mid-migration RevisitAfter = %v, want <=15s and nonzero", phase.RevisitAfter)
+	}
 	var aeadActive, transitInactive bool
 	for _, b := range phase.Keyrings {
 		if b.Type == "aead" && b.Active {
@@ -373,11 +378,16 @@ func TestKeyringDisableLifecycle(t *testing.T) {
 		t.Fatalf("expected single active aead block after disable, got %+v", phase.Keyrings)
 	}
 	deliverConfig(t, phase)
+	phase.RevisitAfter = 0
 	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
 		t.Fatal(result.Error)
 	}
 	if got := cluster.Status.Keyring; got.Phase != "Ready" || got.Active[0] != "aead" {
 		t.Fatalf("final = %+v", got)
+	}
+	// Steady state must not keep the 15s migration poll spinning.
+	if phase.RevisitAfter != 0 {
+		t.Fatalf("steady-state RevisitAfter = %v, want 0", phase.RevisitAfter)
 	}
 }
 
