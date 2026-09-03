@@ -2329,22 +2329,26 @@ spec:
       enabled: true
 `, scaleDownClusterName, namespace)
 
-		BeforeAll(func() {
-			// A rejoin pod stalling on readiness is only explicable from
-			// its container output, which the standard failure dump does
-			// not carry (neo-vk7).
-			DeferCleanup(func() {
-				for i := 0; i < 3; i++ {
-					pod := fmt.Sprintf("%s-%d", scaleDownClusterName, i)
-					out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous",
-						"pod/"+pod, "-n", namespace))
-					_, _ = fmt.Fprintf(GinkgoWriter, "%s previous container logs:\n%s\n", pod, out)
-					out, _ = utils.Run(exec.Command("kubectl", "logs", "--tail=60",
-						"pod/"+pod, "-n", namespace))
-					_, _ = fmt.Fprintf(GinkgoWriter, "%s current container logs:\n%s\n", pod, out)
-				}
-			})
+		// A rejoin pod stalling on readiness is only explicable from
+		// its container output, which the standard failure dump does
+		// not carry (neo-vk7). JustAfterEach fires at the moment of
+		// failure, before any teardown.
+		JustAfterEach(func() {
+			if !CurrentSpecReport().Failed() {
+				return
+			}
+			for i := 0; i < 3; i++ {
+				pod := fmt.Sprintf("%s-%d", scaleDownClusterName, i)
+				out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous",
+					"pod/"+pod, "-n", namespace))
+				_, _ = fmt.Fprintf(GinkgoWriter, "%s previous container logs:\n%s\n", pod, out)
+				out, _ = utils.Run(exec.Command("kubectl", "logs", "--tail=60",
+					"pod/"+pod, "-n", namespace))
+				_, _ = fmt.Fprintf(GinkgoWriter, "%s current container logs:\n%s\n", pod, out)
+			}
+		})
 
+		BeforeAll(func() {
 			By("applying the 3-replica NomadCluster CR")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(scaleDownClusterCR)
@@ -4451,21 +4455,25 @@ spec:
               name: keyring-vault-token
 `
 
-		BeforeAll(func() {
-			// A crash-looping server mid-migration is only explicable
-			// from its PREVIOUS container's output, which the standard
-			// failure dump does not carry (neo-agg).
-			DeferCleanup(func() {
-				for _, pod := range []string{krA + "-0", krB + "-0"} {
-					out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous",
-						"pod/"+pod, "-n", namespace))
-					_, _ = fmt.Fprintf(GinkgoWriter, "%s previous container logs:\n%s\n", pod, out)
-					out, _ = utils.Run(exec.Command("kubectl", "logs", "--tail=40",
-						"pod/"+pod, "-n", namespace))
-					_, _ = fmt.Fprintf(GinkgoWriter, "%s current container logs:\n%s\n", pod, out)
-				}
-			})
+		// A crash-looping server mid-migration is only explicable
+		// from its PREVIOUS container's output, which the standard
+		// failure dump does not carry (neo-agg). JustAfterEach fires at
+		// the moment of failure, before any teardown.
+		JustAfterEach(func() {
+			if !CurrentSpecReport().Failed() {
+				return
+			}
+			for _, pod := range []string{krA + "-0", krB + "-0"} {
+				out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous",
+					"pod/"+pod, "-n", namespace))
+				_, _ = fmt.Fprintf(GinkgoWriter, "%s previous container logs:\n%s\n", pod, out)
+				out, _ = utils.Run(exec.Command("kubectl", "logs", "--tail=40",
+					"pod/"+pod, "-n", namespace))
+				_, _ = fmt.Fprintf(GinkgoWriter, "%s current container logs:\n%s\n", pod, out)
+			}
+		})
 
+		BeforeAll(func() {
 			// Vault dev lives in its own UNLABELLED namespace: the
 			// operator namespace enforces restricted PSS, which the
 			// Vault image's entrypoint (root, IPC_LOCK) does not meet.
