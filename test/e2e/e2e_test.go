@@ -1146,10 +1146,8 @@ data:
 			Expect(output).To(Equal("1"), "should have 1 voter")
 
 			By("verifying leader address is populated")
-			// A6 (neo-tuo): the field was renamed from leaderID to
-			// leaderAddress because it actually stores the leader's
-			// host:port (RPC address), not the Raft server ID. For the
-			// server ID, see status.autopilot.servers[].id.
+			// leaderAddress stores host:port (RPC address); the Raft
+			// server ID is status.autopilot.servers[].id (neo-tuo).
 			cmd = exec.Command("kubectl", "get", "nomadcluster", testClusterName, "-n", namespace,
 				"-o", "jsonpath={.status.leaderAddress}")
 			output, err = utils.Run(cmd)
@@ -2460,10 +2458,7 @@ spec:
 	})
 
 	// NomadAutoscaler lifecycle (neo-2um.2): the full CR journey
-	// against a real licensed cluster — the pre-bootstrap gate, the
-	// agent resource set and rendered HCL, the HA scale round-trip
-	// (PDB + anti-affinity + high_availability block), the DAS config
-	// toggle, and finalizer cleanup verified on the Nomad API side.
+	// against a real licensed cluster.
 	Context("NomadAutoscaler lifecycle", Ordered, func() {
 		const asCluster = "as-cluster"
 		const asName = "as-agent"
@@ -2944,12 +2939,6 @@ spec:
 		})
 	})
 
-	// Keyring HA pair (neo-4q2): two transit keyrings on two INDEPENDENT
-	// Vault clusters, each with its own credential — every listed
-	// keyring wraps new keys, ANY ONE reachable Vault unwraps them.
-	// Proves per-entry credentials (inline token rendering), HA
-	// expansion across Vaults, and decrypt-any-one-alive under total
-	// Vault-cluster loss. Slow lane: skipped on the PR lane.
 	// Multi-namespace fleet (neo-6xm.8): one operator instance reconciles
 	// NomadClusters living in namespaces it does not inhabit, each tenant
 	// bringing its own dependency artifacts (license Secret). The same
@@ -3051,6 +3040,12 @@ spec:
 		})
 	})
 
+	// Keyring HA pair (neo-4q2): two transit keyrings on two INDEPENDENT
+	// Vault clusters, each with its own credential — every listed
+	// keyring wraps new keys, ANY ONE reachable Vault unwraps them.
+	// Proves per-entry credentials (inline token rendering), HA
+	// expansion across Vaults, and decrypt-any-one-alive under total
+	// Vault-cluster loss. Slow lane: skipped on the PR lane.
 	Context("Keyring HA pair (neo-4q2)", Ordered, func() {
 		const krHA = "keyring-ha"
 

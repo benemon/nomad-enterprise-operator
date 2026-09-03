@@ -19,12 +19,9 @@ package nomad
 import "context"
 
 // NomadAPI is the subset of *Client methods used by the operator's
-// controllers and phases. It exists so call sites can depend on an interface
-// (and be unit tested via a generated mock) instead of the concrete *Client.
+// controllers and phases.
 //
-// Only methods actually invoked from internal/ are included. Adding a method
-// here without a current caller is forbidden by the project's code quality
-// rules.
+// Only methods actually invoked from internal/ are included.
 type NomadAPI interface {
 	// ACL bootstrap and tokens
 	BootstrapACL() (*ACLBootstrapResult, error)
@@ -62,12 +59,14 @@ type NomadAPI interface {
 	// management token.
 	RaftRemovePeer(ctx context.Context, token, id string) error
 
-	// KeyringList returns root keys with states; KeyringRotateFull
-	// rotates immediately with full re-encryption; KeyringDelete
-	// removes a key (refused while referenced). Management token
-	// required when ACLs are enabled.
+	// Keyring lifecycle — all three need a management token when ACLs
+	// are enabled.
+
+	// KeyringList returns root keys with states.
 	KeyringList(ctx context.Context, token string) ([]*RootKey, error)
+	// KeyringRotateFull rotates immediately with full re-encryption.
 	KeyringRotateFull(ctx context.Context, token string) error
+	// KeyringDelete removes a key (refused while referenced).
 	KeyringDelete(ctx context.Context, token, keyID string) error
 }
 

@@ -706,8 +706,7 @@ func TestKeyringStateLossSteadyState(t *testing.T) {
 // the retiring entries — their blocks leave the render immediately, so
 // keys wrapped only by them become undecryptable. The runbook's
 // Scenario 5 warns operators never to delete the state CM while
-// status.keyring.phase != Ready; this test makes the semantics visible,
-// it does not bless them.
+// status.keyring.phase != Ready.
 func TestKeyringStateLossMidMigration(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
 	phase, cluster, _, _ := keyringFixture(t, mock)

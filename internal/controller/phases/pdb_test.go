@@ -149,8 +149,7 @@ func TestPDBShape(t *testing.T) {
 
 // TestPDB_RecreatedOnDeletion covers AC-2.3.2 — when the PDB is
 // removed out-of-band, the next reconcile recreates it with the
-// expected shape. With the fake client we simulate the out-of-band
-// delete by running Execute twice with a Delete between them.
+// expected shape.
 func TestPDB_RecreatedOnDeletion(t *testing.T) {
 	cluster := newTestCluster("test-ns", "test-cluster")
 	cluster.Spec.Replicas = 3

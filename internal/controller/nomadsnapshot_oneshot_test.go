@@ -604,9 +604,7 @@ func TestEnsureSnapshotTokenWithMock(t *testing.T) {
 }
 
 // TestManagedByLabelConsistency pins neo-e3y: the operator stamps ONE
-// managed-by identity across both controllers' resources. No migration
-// path for the old value — this is a pre-release operator with no users
-// (see bd memory no-migration-code-brand-new-operator).
+// managed-by identity across both controllers' resources.
 func TestManagedByLabelConsistency(t *testing.T) {
 	snap := newOneShotSnapshot("labels")
 	cluster := newTestCluster("snap-ns", "test-cluster")
@@ -782,8 +780,7 @@ func TestSnapshotPVCReconcile(t *testing.T) {
 // neo-6rw: cross-namespace clusterRef is rejected at admission (the
 // agent pod cannot mount the cluster's TLS Secret across namespaces),
 // so the controller assumes same-namespace; the CEL rejection itself
-// is covered in admission_invariants_test.go. The former neo-tih
-// cross-namespace lookup spec was removed with the contract.
+// is covered in admission_invariants_test.go.
 
 // neo-87a: a token re-mint rewrites the Secret in place, so only the
 // pod-template secrets checksum carries the change into the recurring
@@ -1011,11 +1008,6 @@ func TestSnapshotEmptyManagementSecretID(t *testing.T) {
 	t.Fatal("Ready condition not set on the empty secret-id branch")
 }
 
-// TestNextScheduledProjection covers neo-c2f / AC-2.7.9: recurring mode
-// projects status.nextScheduled forward one interval when unset or
-// lapsed, does NOT advance it while still in the future (the
-// once-per-interval churn bound), leaves it unset on an unparseable
-// interval, and one-shot mode clears it.
 // TestRecurringVersionMirror: the recurring path mirrors the cluster's
 // Nomad version into status — the same-version restore check for
 // agent-taken snapshots the operator cannot individually observe.
@@ -1043,6 +1035,11 @@ func TestRecurringVersionMirror(t *testing.T) {
 	}
 }
 
+// TestNextScheduledProjection covers neo-c2f / AC-2.7.9: recurring mode
+// projects status.nextScheduled forward one interval when unset or
+// lapsed, does NOT advance it while still in the future (the
+// once-per-interval churn bound), leaves it unset on an unparseable
+// interval, and one-shot mode clears it.
 func TestNextScheduledProjection(t *testing.T) {
 	newRecurring := func(name, interval string) (*NomadSnapshotReconciler, *nomadv1alpha1.NomadSnapshot, *nomadv1alpha1.NomadCluster) {
 		snap := newOneShotSnapshot(name)

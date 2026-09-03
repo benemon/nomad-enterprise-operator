@@ -312,9 +312,7 @@ func TestScaleDown_RemovesHighestOrdinalFirst(t *testing.T) {
 
 // TestScaleDown_ResumeIdempotency covers AC-2.3.7 — on operator
 // restart with status.scaleDown.removedPeers already populated, the
-// loop never re-removes a peer that is already recorded. Simulates
-// the post-crash resume by seeding the status with id-4 and asserting
-// the next cycle removes id-3 (not id-4 again).
+// loop never re-removes a peer that is already recorded.
 func TestScaleDown_ResumeIdempotency(t *testing.T) {
 	f := newScaleDownFixture(t, 5, 3)
 
@@ -370,7 +368,7 @@ func TestScaleDown_NoOpWhenAlreadyAtTarget(t *testing.T) {
 }
 
 // TestScaleDown_DefersWhenVerificationShowsPeerStillPresent covers
-// the narrow but important case where RaftRemovePeer returns success
+// the case where RaftRemovePeer returns success
 // but the peer is still in the configuration on re-list. The phase
 // must NOT record the removal in status (otherwise the resume loop
 // would skip a peer that is still in Raft).

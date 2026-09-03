@@ -1,6 +1,6 @@
 // coverage-gate parses a `go tool cover -func` report on stdin (or from
 // the file supplied as the first argument) and enforces per-package
-// coverage thresholds as documented in CONTRIBUTING.md §1.5:
+// coverage thresholds; this file is the thresholds' authority:
 //
 //	pkg/...                            ≥ 75%
 //	internal/controller/phases/...     ≥ 65%
@@ -10,18 +10,12 @@
 //
 //	cmd/...
 //	api/v1alpha1/zz_generated.deepcopy.go
+//	pkg/nomad/mocks/...
 //
 // Exits 0 if every threshold holds, 1 otherwise, printing a per-package
-// summary and the first failing rule. Used by `.github/workflows/test.yml`.
-//
-// The input format is the standard `go tool cover -func` output, one
-// statement per line of the form:
-//
-//	<file>:<startLine>.<startCol>,<endLine>.<endCol>     <statements>    <coveragePct>%
-//
-// followed by a `total:` summary line which we ignore — we compute
-// per-package totals ourselves so a high-coverage package can't mask a
-// low-coverage one.
+// summary and every failing rule. Per-package totals are computed here
+// so a high-coverage package can't mask a low-coverage one. Used by
+// `.github/workflows/test.yml`.
 package main
 
 import (
@@ -147,7 +141,7 @@ func main() {
 	if failed {
 		fmt.Println()
 		fmt.Println("Coverage gate FAILED. Raise tests or, if the regression is " +
-			"justified, update CONTRIBUTING.md §1.5 in the same PR.")
+			"justified, update the thresholds in hack/coverage-gate/main.go in the same PR.")
 		os.Exit(1)
 	}
 }
@@ -175,10 +169,8 @@ func parse(r io.Reader) (map[string]*pkgStat, error) {
 		if line == "" || strings.HasPrefix(line, "total:") {
 			continue
 		}
-		// `go tool cover -func` outputs both the per-statement detail (the
-		// format the doc comment describes) and a per-function summary of
-		// the form `<file>:<line>:\t<func>\t<pct>%`. We only want the
-		// per-function lines; they are the ones the standard tool emits.
+		// Only per-function lines of the form `<file>:<line>:\t<func>\t<pct>%`
+		// are consumed.
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
 			continue

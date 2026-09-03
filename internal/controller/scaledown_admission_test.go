@@ -125,9 +125,7 @@ var _ = Describe("Scale-down admission rules (D2c)", func() {
 
 	// Initial creation is exempt from the transition rule — neither
 	// rule references self.spec without comparing to oldSelf, so CREATE
-	// with any valid replica count is accepted. This is what lets the
-	// existing 1-replica test fixtures and the design's "single-instance
-	// development cluster" flow keep working.
+	// with any valid replica count is accepted.
 	It("accepts initial creation with replicas=1", func() {
 		cluster := newTestCluster(namespace, "create-one-replica")
 		cluster.Spec.Replicas = 1

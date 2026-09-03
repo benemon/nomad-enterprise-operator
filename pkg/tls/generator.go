@@ -208,12 +208,9 @@ func ParseCertificate(certPEM []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(block.Bytes)
 }
 
-// ValidateCertificate checks that a certificate:
-// - Is not expired
-// - Is not expiring within the given warning window
-// - Contains all of the required DNS SANs
-// - Contains all of the required IP SANs
-// Returns an error describing any validation failure.
+// ValidateCertificate rejects expired certificates, certificates
+// inside the warning window, and certificates missing a required DNS
+// or IP SAN.
 func ValidateCertificate(
 	certPEM []byte, requiredDNSSANs []string, requiredIPSANs []net.IP, warningWindow time.Duration,
 ) error {
