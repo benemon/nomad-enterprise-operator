@@ -23,9 +23,7 @@ import (
 )
 
 // TestEventRecorderInjectedOnNomadClusterReconciler verifies that constructing
-// a NomadClusterReconciler with a Recorder leaves the field non-nil. This is
-// the wiring check that downstream issues (B6, C5, C9, D3) depend on before
-// they begin emitting their own Events.
+// a NomadClusterReconciler with a Recorder leaves the field non-nil.
 func TestEventRecorderInjectedOnNomadClusterReconciler(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	r := &NomadClusterReconciler{Recorder: recorder}

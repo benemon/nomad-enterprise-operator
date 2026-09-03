@@ -417,10 +417,8 @@ type LicenseResult struct {
 	Features        []string
 }
 
-// AgentSelfResult holds the fields the operator currently extracts from
-// /v1/agent/self. Only Version is populated for C7; the struct shape
-// matches the sibling result types so future agent fields can be added
-// without changing call-site signatures.
+// AgentSelfResult holds the fields the operator extracts from
+// /v1/agent/self.
 type AgentSelfResult struct {
 	Version string
 }

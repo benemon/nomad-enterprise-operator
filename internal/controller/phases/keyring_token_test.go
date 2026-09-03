@@ -260,8 +260,8 @@ func TestKeyringTokenReviewerDenied(t *testing.T) {
 	result := phase.Execute(context.Background(), cluster)
 	// Login failure is tolerated (the chain must keep flowing — a hard
 	// error here once blocked the spec update that would fix the
-	// failing entry), but the reviewer-denied diagnosis must survive
-	// into the surfaced degraded cause.
+	// failing entry), but the diagnosis must survive into the surfaced
+	// degraded cause.
 	if result.Error != nil || result.Requeue {
 		t.Fatalf("login failure must not stop the chain, got %+v", result)
 	}
