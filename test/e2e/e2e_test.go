@@ -2330,6 +2330,21 @@ spec:
 `, scaleDownClusterName, namespace)
 
 		BeforeAll(func() {
+			// A rejoin pod stalling on readiness is only explicable from
+			// its container output, which the standard failure dump does
+			// not carry (neo-vk7).
+			DeferCleanup(func() {
+				for i := 0; i < 3; i++ {
+					pod := fmt.Sprintf("%s-%d", scaleDownClusterName, i)
+					out, _ := utils.Run(exec.Command("kubectl", "logs", "--tail=60", "--previous",
+						"pod/"+pod, "-n", namespace))
+					_, _ = fmt.Fprintf(GinkgoWriter, "%s previous container logs:\n%s\n", pod, out)
+					out, _ = utils.Run(exec.Command("kubectl", "logs", "--tail=60",
+						"pod/"+pod, "-n", namespace))
+					_, _ = fmt.Fprintf(GinkgoWriter, "%s current container logs:\n%s\n", pod, out)
+				}
+			})
+
 			By("applying the 3-replica NomadCluster CR")
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(scaleDownClusterCR)
