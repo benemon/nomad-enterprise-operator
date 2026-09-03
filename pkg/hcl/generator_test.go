@@ -247,9 +247,7 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 		{"received-GET filter", `filter "OperationReceived GETs" {`},
 		{"received stage", `stages     = ["OperationReceived"]`},
 		{"GET operation", `operations = ["GET"]`},
-		{"health-check filter", `filter "health checks" {`},
-		{"agent health endpoint", `"/v1/agent/health"`},
-		{"leader endpoint", `"/v1/status/leader"`},
+		{"delivery default", `delivery_guarantee = "enforced"`},
 	}
 
 	for _, a := range assertions {
@@ -281,11 +279,30 @@ func TestGenerator_Generate_AuditDisabledNoFilters(t *testing.T) {
 		"audit {",
 		`filter "default"`,
 		`filter "OperationReceived GETs"`,
-		`filter "health checks"`,
 	} {
 		if strings.Contains(hcl, block) {
 			t.Errorf("audit disabled: %q must not render", block)
 		}
+	}
+}
+
+func TestGenerator_Generate_AuditDeliveryGuaranteeBestEffort(t *testing.T) {
+	cluster := &nomadv1alpha1.NomadCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Namespace: "nomad"},
+		Spec: nomadv1alpha1.NomadClusterSpec{
+			Replicas: 3,
+			Server: nomadv1alpha1.ServerSpec{Audit: nomadv1alpha1.AuditSpec{
+				Enabled:           ptr.To(true),
+				DeliveryGuarantee: "best-effort",
+			}},
+		},
+	}
+	hcl, err := NewGenerator(cluster, "10.0.0.100", "key").Generate()
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if !strings.Contains(hcl, `delivery_guarantee = "best-effort"`) {
+		t.Error("Generate() must render the configured delivery_guarantee")
 	}
 }
 

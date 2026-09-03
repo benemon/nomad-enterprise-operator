@@ -122,6 +122,15 @@ type autopilotData struct {
 	ServerStabilizationTime string
 }
 
+// AuditDeliveryGuarantee returns the configured guarantee, defaulting
+// to enforced when the field predates the CRD default.
+func AuditDeliveryGuarantee(cluster *nomadv1alpha1.NomadCluster) string {
+	if g := cluster.Spec.Server.Audit.DeliveryGuarantee; g != "" {
+		return g
+	}
+	return "enforced"
+}
+
 func (g *Generator) buildTemplateData() templateData {
 	cluster := g.cluster
 
@@ -159,10 +168,11 @@ func (g *Generator) buildTemplateData() templateData {
 		VerifyHTTPSClient:    false,
 		AuditEnabled:         cluster.Spec.Server.Audit.IsEnabled(),
 		// Audit shape is operator-owned per ADR 0003 ("Fields dropped
-		// in v1"): enforced delivery (best-effort is a footgun), JSON
-		// only, 24h rotation × 15 files (~15 days). Users needing
-		// different log shipping use a sidecar, not rotation tuning.
-		AuditDeliveryGuarantee: "enforced",
+		// in v1"): JSON only, 24h rotation × 15 files (~15 days).
+		// Users needing different log shipping use a sidecar, not
+		// rotation tuning. Delivery is the one user lever: enforced by
+		// default, best-effort opt-in via spec.server.audit.
+		AuditDeliveryGuarantee: AuditDeliveryGuarantee(cluster),
 		AuditFormat:            "json",
 		AuditRotateDur:         "24h",
 		AuditRotateMax:         15,
@@ -296,13 +306,6 @@ audit {
     stages     = ["OperationReceived"]
     operations = ["GET"]
   }
-  filter "health checks" {
-    type       = "HTTPEvent"
-    endpoints  = ["/v1/agent/health", "/v1/status/leader"]
-    stages     = ["*"]
-    operations = ["*"]
-  }
-
   sink "file" {
     type               = "file"
     format             = "{{ .AuditFormat }}"

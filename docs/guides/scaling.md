@@ -47,9 +47,13 @@ fires when commit latency indicates the floor is not being met.
 
 ## Pod placement
 
-Pod anti-affinity is operator-owned: preferred scheduling,
-weight 100, `kubernetes.io/hostname` topology, applied when
-`replicas >= 3`. For multi-zone distribution use the standard
+Pod anti-affinity is operator-owned: preferred scheduling, weight 100,
+`kubernetes.io/hostname` topology, applied at every replica count
+(preferred scheduling is inert with nothing to avoid). The pod template
+never varies with `spec.replicas`, so scale operations do not restart
+surviving servers - a restart would change the survivor's IP behind its
+Raft ID, and a lone voter cannot repair its own stale address entry.
+For multi-zone distribution use the standard
 `spec.topologySpreadConstraints` field.
 
 

@@ -344,6 +344,17 @@ spec:
                   audit:
                     description: Audit logging configuration
                     properties:
+                      deliveryGuarantee:
+                        default: enforced
+                        description: |-
+                          DeliveryGuarantee controls audit event delivery. enforced blocks
+                          the API response until the event is persisted (fails closed);
+                          best-effort keeps serving when the sink cannot keep up (fails
+                          open). Audit shape is otherwise operator-owned.
+                        enum:
+                        - enforced
+                        - best-effort
+                        type: string
                       enabled:
                         default: true
                         description: |-

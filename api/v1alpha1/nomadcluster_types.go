@@ -627,6 +627,15 @@ type AuditSpec struct {
 	// StorageClassName for the audit PVC (uses cluster default if empty)
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// DeliveryGuarantee controls audit event delivery. enforced blocks
+	// the API response until the event is persisted (fails closed);
+	// best-effort keeps serving when the sink cannot keep up (fails
+	// open). Audit shape is otherwise operator-owned.
+	// +kubebuilder:validation:Enum=enforced;best-effort
+	// +kubebuilder:default=enforced
+	// +optional
+	DeliveryGuarantee string `json:"deliveryGuarantee,omitempty"`
 }
 
 // IsEnabled resolves the tri-state pointer: nil (unset) follows the

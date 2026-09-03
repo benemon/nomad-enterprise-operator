@@ -19,6 +19,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -266,6 +267,19 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	if checksumThree != checksumOne {
 		t.Errorf("checksum/config drifted across replica counts: %q (N=3) vs %q (N=1) — scale operations must not trigger pod restarts (AC-2.3.4f)",
 			checksumThree, checksumOne)
+	}
+
+	// The whole template, not just the checksum, must be
+	// replica-invariant: any variance (the affinity gate was one,
+	// neo-tma) rolling-restarts a lone survivor, whose IP change
+	// behind its Raft ID strands the cluster at one voter on the
+	// next scale-up.
+	if !reflect.DeepEqual(stsThree.Spec.Template, stsOne.Spec.Template) {
+		t.Errorf("pod template varies with replica count:\nN=3: %+v\nN=1: %+v",
+			stsThree.Spec.Template, stsOne.Spec.Template)
+	}
+	if stsOne.Spec.Template.Spec.Affinity == nil {
+		t.Error("operator anti-affinity must be present at every replica count")
 	}
 }
 

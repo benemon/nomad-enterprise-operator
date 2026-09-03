@@ -27,6 +27,7 @@ import (
 	"strconv"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -202,11 +203,14 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 
 	// Pod anti-affinity is operator-owned per ADR 0003: preferred
 	// (required is a footgun on small clusters), weight 100, hostname
-	// topology, applied at replicas >= 3. Multi-zone spreading uses the
-	// user-facing spec.topologySpreadConstraints instead.
-	if replicas >= 3 {
-		podSpec.Affinity = buildOperatorAffinity(cluster)
-	}
+	// topology. Applied at every replica count: preferred scheduling is
+	// inert with nothing to avoid, and gating it on replicas makes the
+	// pod template vary with scale — the resulting rolling restart of a
+	// lone survivor changes its IP behind its Raft ID, and a
+	// single-voter leader cannot repair its own stale address entry
+	// (neo-tma). Multi-zone spreading uses the user-facing
+	// spec.topologySpreadConstraints instead.
+	podSpec.Affinity = buildOperatorAffinity(cluster)
 
 	// Add topology spread constraints
 	if len(cluster.Spec.TopologySpreadConstraints) > 0 {
@@ -219,14 +223,15 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// replica change.
 	keyringsJSON, _ := json.Marshal(p.Keyrings)
 	configData := map[string]string{
-		"advertise":  p.AdvertiseAddress,
-		"gossip":     p.GossipKey,
-		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
-		"tls":        "true",
-		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.IsEnabled()),
-		"region":     cluster.Spec.Topology.Region,
-		"datacenter": cluster.Spec.Topology.Datacenter,
-		"keyrings":   string(keyringsJSON),
+		"advertise":      p.AdvertiseAddress,
+		"gossip":         p.GossipKey,
+		"acl":            strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
+		"tls":            "true",
+		"audit":          strconv.FormatBool(cluster.Spec.Server.Audit.IsEnabled()),
+		"audit-delivery": hcl.AuditDeliveryGuarantee(cluster),
+		"region":         cluster.Spec.Topology.Region,
+		"datacenter":     cluster.Spec.Topology.Datacenter,
+		"keyrings":       string(keyringsJSON),
 	}
 	if _, _, ok := TrustBundle(cluster); ok {
 		bundleChecksum, err := p.computeTrustBundleChecksum(ctx, cluster)

@@ -60,9 +60,12 @@ Autopilot is operator-owned and not configurable:
 
 ## Audit (`spec.server.audit`)
 
-Delivery guarantee (`enforced`), format (`json`), and rotation
-(`24h` × 15 files) are operator-owned. Ship logs with a
-sidecar if you need different retention.
+Format (`json`) and rotation (`24h` × 15 files) are operator-owned.
+Ship logs with a sidecar if you need different retention. Delivery is
+the one user lever: `enforced` (the default) blocks API responses until
+the event is persisted - fails closed - while `best-effort` keeps
+serving when the sink cannot keep up - fails open. Leave it enforced
+unless your storage demonstrably cannot sustain the audit write rate.
 
 Two [audit filters](https://developer.hashicorp.com/nomad/docs/configuration/audit)
 ship by default: the `/v1/metrics` endpoint and the `OperationReceived`
@@ -82,6 +85,7 @@ scale-down along with its data PVC.
 | `server.audit.enabled` | `bool` | `true` | Enable audit logging. Auto-creates a dedicated audit PVC (independent of `spec.persistence`); requires `server.audit.size` |
 | `server.audit.size` | `string` | `5Gi` | Audit volume size |
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
+| `server.audit.deliveryGuarantee` | `string` | `enforced` | `enforced` or `best-effort` audit event delivery |
 
 ## Garbage Collection (`spec.server.gc`)
 
