@@ -401,8 +401,6 @@ spec:
                       entries, so any one surviving KMS can unwrap (HA). Omitted = the
                       default aead keyring, whose KEK rides Raft IN CLEARTEXT — meaning
                       snapshots (including NomadSnapshot uploads) contain key material.
-                      The operator manages migration between keyring sets, including
-                      enable, disable, and provider changes, with no quorum impact.
                     items:
                       description: |-
                         KeyringEntry names one KMS keyring. Exactly one provider block must
@@ -445,9 +443,8 @@ spec:
                           - kmsKeyID
                           type: object
                         azurekeyvault:
-                          description: |-
-                            AzureKeyVaultKeyring wraps root keys with Azure Key Vault.
-                            resource "managedhsm.azure.net" selects a Managed HSM vault.
+                          description: AzureKeyVaultKeyring wraps root keys with Azure
+                            Key Vault.
                           properties:
                             credentialsSecretRef:
                               description: |-
@@ -777,8 +774,7 @@ spec:
                         description: |-
                           CA optionally specifies a user-provided Certificate Authority for
                           certificate issuance. If not specified, the operator generates and
-                          manages a self-signed CA. Providing a CA allows certificates to chain
-                          to your organisation's trusted root.
+                          manages a self-signed CA.
                         properties:
                           secretKeys:
                             default: {}

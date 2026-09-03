@@ -32,7 +32,8 @@ type NomadSnapshotSpec struct {
 
 	// Schedule, when set, runs a recurring snapshot-agent Deployment;
 	// when omitted, a one-shot Job. Adding or removing it switches
-	// modes — blocked while a one-shot Job is running (CEL).
+	// modes — blocked while a one-shot Job is running (CEL); recurring
+	// mode never blocks.
 	// +optional
 	Schedule *SnapshotSchedule `json:"schedule,omitempty"`
 
@@ -261,18 +262,13 @@ type SnapshotInfo struct {
 	// +optional
 	Error string `json:"error,omitempty"`
 
-	// NomadVersion the artifact was taken at. Snapshots restore only
-	// to the same Nomad version; this is the per-artifact record of
-	// it, frozen at Job completion (one-shot mode).
+	// NomadVersion the artifact was taken at, frozen at Job completion
+	// (one-shot mode).
 	// +optional
 	NomadVersion string `json:"nomadVersion,omitempty"`
 }
 
 // NomadSnapshot is the Schema for the nomadsnapshots API.
-//
-// The XValidation rule below blocks a mode switch (adding/removing
-// spec.schedule) while a one-shot Job is running; recurring mode is
-// never blocked.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
