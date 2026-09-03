@@ -16,8 +16,7 @@ limitations under the License.
 
 // Package discovery answers "is this CRD installed on the cluster?" for
 // optional integrations (Prometheus Operator ServiceMonitors, OpenShift
-// Routes). Shared by the monitoring and route phases (B4) and the
-// operator's own metrics ServiceMonitor (F4).
+// Routes).
 package discovery
 
 import (
@@ -26,9 +25,10 @@ import (
 )
 
 // HasGVK reports whether the cluster's RESTMapper can resolve the given
-// GroupVersionKind — i.e. whether the backing CRD (or built-in type) is
-// installed. The manager's mapper is dynamic, so CRDs installed after
-// operator start are picked up on subsequent reconciles without a restart.
+// GroupVersionKind.
+//
+// The manager's mapper is dynamic, so CRDs installed after operator
+// start are picked up on subsequent reconciles without a restart.
 func HasGVK(mapper meta.RESTMapper, gvk schema.GroupVersionKind) bool {
 	_, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	return err == nil

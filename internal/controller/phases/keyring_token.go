@@ -65,11 +65,9 @@ type vaultAuthResult struct {
 }
 
 // VaultLoginFunc performs a JWT login against a Vault auth mount.
-// Injectable for tests; the default is vaultLogin.
 type VaultLoginFunc func(ctx context.Context, cfg VaultCallConfig, mount, role, jwt string) (*vaultAuthResult, error)
 
 // VaultRenewFunc renews the given token against Vault.
-// Injectable for tests; the default is vaultRenewSelf.
 type VaultRenewFunc func(ctx context.Context, cfg VaultCallConfig, token string) (*vaultAuthResult, error)
 
 // VaultCallConfig carries the connection parameters shared by login and
@@ -241,9 +239,7 @@ func (p *KeyringPhase) resolveCloudArgs(ctx context.Context, cluster *nomadv1alp
 
 // ensureVaultTokens resolves every transit entry's token: method=token
 // reads the user's Secret (user-owned lifecycle); login methods run the
-// per-entry mint/renew/re-mint machinery. Returns the resolved token
-// values (rendered inline into the keyring blocks), the earliest
-// renewal revisit, and the first error.
+// per-entry mint/renew/re-mint machinery.
 func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap) (map[string]string, time.Duration, []string) {
 	tokens := map[string]string{}
 	var revisit time.Duration
@@ -281,10 +277,9 @@ func (p *KeyringPhase) ensureVaultTokens(ctx context.Context, cluster *nomadv1al
 	return tokens, revisit, failures
 }
 
-// ensureManagedToken runs one entry's lifecycle: mint when absent or
-// stale-config, renew inside the renewal window, re-mint when renewal
-// fails. The minted token's canonical store is the multi-key managed
-// Secret <cluster>-keyring-token (key = entry name).
+// ensureManagedToken runs one entry's token lifecycle. The minted
+// token's canonical store is the multi-key managed Secret
+// <cluster>-keyring-token (key = entry name).
 func (p *KeyringPhase) ensureManagedToken(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap, entry *nomadv1alpha1.KeyringEntry) (string, time.Duration, PhaseResult) {
 	auth := entry.Transit.Auth
 

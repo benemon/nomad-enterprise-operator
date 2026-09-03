@@ -37,12 +37,11 @@ import (
 )
 
 // KeyringPhase reconciles the cluster's keyring set: which KMS
-// providers wrap Nomad's root keys. Migration between sets (enable,
-// disable, provider change, HA expand/contract) is a three-step cycle:
-// introduce (render union, roll), rotate (full rotation + old-key
-// removal), retire (drop demoted blocks, final roll). State lives in
-// the <cluster>-keyring-state ConfigMap so a restarted operator
-// resumes mid-migration; status.keyring mirrors it for users.
+// providers wrap Nomad's root keys.
+//
+// Migration state lives in the <cluster>-keyring-state ConfigMap so a
+// restarted operator resumes mid-migration; status.keyring mirrors it
+// for users.
 type KeyringPhase struct {
 	*PhaseContext
 
@@ -224,12 +223,10 @@ func (p *KeyringPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nomad
 	return OK()
 }
 
-// settleRevisit applies the terminal requeue policy. Migration phases
-// advance on observed state (rolls completing, config delivery); watch
-// events cover most transitions, but a missed one otherwise waits for
-// the 5m resync — seen live as a disable stuck in Retiring minutes
-// after its pod recovered (neo-agg). Poll while any migration is in
-// flight; a sooner token-renewal deadline still wins.
+// settleRevisit applies the terminal requeue policy: poll while any
+// migration is in flight — a missed watch event otherwise waits for
+// the 5m resync (neo-agg, a disable stuck in Retiring minutes after
+// its pod recovered). A sooner token-renewal deadline still wins.
 func (p *KeyringPhase) settleRevisit(phase string, tokenRequeue time.Duration) {
 	if tokenRequeue > 0 {
 		p.RevisitAfter = tokenRequeue

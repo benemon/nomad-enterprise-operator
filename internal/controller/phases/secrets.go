@@ -84,8 +84,7 @@ func (p *SecretsPhase) handleLicenseSecret(ctx context.Context, cluster *nomadv1
 		if errors.IsNotFound(err) {
 			// neo-0zq: dedicated reason (replacing the abandoned C6f
 			// admission rule) so kubectl names the missing Secret
-			// instead of a generic PhaseFailed. The D5 Secret watch
-			// re-reconciles the moment it appears.
+			// instead of a generic PhaseFailed.
 			return ErrorWithReason(fmt.Errorf("license secret %q not found", cluster.Spec.License.SecretName),
 				"LicenseSecretNotFound",
 				fmt.Sprintf("License secret %q not found - create it with your Nomad Enterprise license", cluster.Spec.License.SecretName))

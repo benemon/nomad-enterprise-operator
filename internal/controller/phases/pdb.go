@@ -50,10 +50,9 @@ func (p *PDBPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadClus
 	name := types.NamespacedName{Name: cluster.Name, Namespace: cluster.Namespace}
 
 	if cluster.Spec.Replicas < 3 {
-		// A single replica (the only sub-3 value the enum allows) — no PDB
-		// needed. Delete any existing PDB to handle scale-down from a
-		// previously larger replica count; ignore NotFound so the
-		// phase is a no-op when the PDB was never created.
+		// A single replica (the only sub-3 value the enum allows) — no
+		// PDB; an existing one is from a previously larger replica
+		// count.
 		existing := &policyv1.PodDisruptionBudget{}
 		if err := p.Client.Get(ctx, name, existing); err != nil {
 			if errors.IsNotFound(err) {

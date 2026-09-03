@@ -311,8 +311,7 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // updateAgentStatus observes the agent Deployment and writes the
-// status block: resource names, replica counts, the Ready condition,
-// and the Degraded condition with its once-per-transition Warning.
+// status block.
 func (r *NomadAutoscalerReconciler) updateAgentStatus(
 	ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler, internalAddr string,
 ) (ctrl.Result, error) {
@@ -347,19 +346,17 @@ func (r *NomadAutoscalerReconciler) updateAgentStatus(
 		})
 	}
 
-	// Degraded tracks agent health beyond the Ready snapshot: replica
-	// loss that outlasts the grace window, or a rollout the Deployment
-	// controller has given up on (surge keeps the old ReplicaSet — and
-	// Ready=True — while the new template never becomes available).
-	// Warning Event once per transition, same as the snapshot controller.
+	// Degraded covers replica loss that outlasts the grace window, and
+	// a rollout the Deployment controller has given up on (surge keeps
+	// the old ReplicaSet — and Ready=True — while the new template
+	// never becomes available).
 	requeueAfter := 5 * time.Minute
 	wasDegraded := meta.IsStatusConditionTrue(autoscaler.Status.Conditions, "Degraded")
 	degradedReason, degradedMessage := "", ""
 	// A stuck rollout is evaluated first: it degrades regardless of the
-	// replica-count grace window. Were the order reversed, a replica
-	// loss during a stuck rollout would reset Available's transition
-	// time, land in the grace window, and CLEAR Degraded while the
-	// incident worsened — then re-fire a duplicate Warning.
+	// replica-count grace window, which would otherwise clear Degraded
+	// mid-incident when a replica loss resets Available's transition
+	// time.
 	switch {
 	case deployFound && deploymentRolloutStuck(deploy):
 		degradedReason = "RolloutStuck"
@@ -507,10 +504,9 @@ func (r *NomadAutoscalerReconciler) autoscalerNomadClient(ctx context.Context, c
 }
 
 // buildAutoscalerPolicyRules renders the agent's ACL policy from the
-// spec: scale on each granted namespace, node read (per the documented
-// autoscaler policy), the recommendations capability when Dynamic
-// Application Sizing is enabled, and write on the per-instance HA lock
-// variable when replicas > 1.
+// spec. The recommendations capability appears only when Dynamic
+// Application Sizing is enabled; the HA lock grant only when
+// replicas > 1.
 func buildAutoscalerPolicyRules(a *nomadv1alpha1.NomadAutoscaler) string {
 	var b strings.Builder
 
@@ -862,10 +858,9 @@ func autoscalerAgentLabels(autoscaler *nomadv1alpha1.NomadAutoscaler) map[string
 	}
 }
 
-// autoscalerImageRef builds the image reference; digest pinning takes
-// precedence over tag, same contract as phases.ImageRef. Repository
-// and tag are apiserver-defaulted (default={} on spec.image), never
-// empty here.
+// autoscalerImageRef follows the phases.ImageRef contract: digest
+// pinning takes precedence over tag. Repository and tag are
+// apiserver-defaulted (default={} on spec.image), never empty here.
 func autoscalerImageRef(a *nomadv1alpha1.NomadAutoscaler) string {
 	if a.Spec.Image.Digest != "" {
 		return a.Spec.Image.Repository + "@" + a.Spec.Image.Digest
@@ -1237,10 +1232,9 @@ func (r *NomadAutoscalerReconciler) setCondition(autoscaler *nomadv1alpha1.Nomad
 	meta.SetStatusCondition(&autoscaler.Status.Conditions, condition)
 }
 
-// SetupWithManager sets up the controller with the Manager.
-// ServiceMonitor is deliberately not in Owns: the CRD may be absent
-// and the watch would fail at startup — same reasoning as the cluster
-// monitoring phase.
+// SetupWithManager registers the controller. ServiceMonitor is
+// deliberately not in Owns: the CRD may be absent and the watch would
+// fail at startup — same reasoning as the cluster monitoring phase.
 func (r *NomadAutoscalerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nomadv1alpha1.NomadAutoscaler{}).

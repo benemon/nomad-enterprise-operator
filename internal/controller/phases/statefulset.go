@@ -620,9 +620,9 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 			return true, "container securityContext"
 		}
 		// Every env entry is operator-rendered with explicit values, so
-		// DeepEqual cannot loop on API-server defaulting. Without this,
-		// an added or changed env var (e.g. GOMEMLIMIT) never reaches a
-		// live StatefulSet.
+		// DeepEqual cannot loop on API-server defaulting; the comparison
+		// is what carries env additions (e.g. GOMEMLIMIT) to live
+		// StatefulSets.
 		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers[0].Env,
 			desired.Spec.Template.Spec.Containers[0].Env) {
 			return true, "container env"
@@ -630,9 +630,9 @@ func (p *StatefulSetPhase) needsUpdate(existing, desired *appsv1.StatefulSet) (b
 	}
 
 	// Both contexts are operator-rendered with every field set, so a
-	// full comparison cannot loop on API-server defaulting. Without
-	// this, toggling spec.openshift.enabled never reaches a live
-	// StatefulSet and SCC-rejected pods stay rejected (neo-8nc).
+	// full comparison cannot loop on API-server defaulting; it carries
+	// the spec.openshift.enabled toggle to live StatefulSets, where
+	// SCC-rejected pods otherwise stay rejected (neo-8nc).
 	if !reflect.DeepEqual(existing.Spec.Template.Spec.SecurityContext, desired.Spec.Template.Spec.SecurityContext) {
 		return true, "pod securityContext"
 	}
@@ -697,8 +697,8 @@ func trustBundleDrift(existing, desired corev1.PodSpec) string {
 	return ""
 }
 
-// getResourcesWithDefaults returns resource requirements with sensible defaults applied.
-// Defaults: requests: cpu=250m, memory=512Mi; limits: cpu=2, memory=2Gi
+// getResourcesWithDefaults fills unset fields: requests 250m/512Mi,
+// limits 2/2Gi.
 func getResourcesWithDefaults(resources corev1.ResourceRequirements) corev1.ResourceRequirements {
 	result := resources.DeepCopy()
 

@@ -52,17 +52,14 @@ func (p *ServiceAccountPhase) Execute(ctx context.Context, cluster *nomadv1alpha
 		},
 	}
 
-	// Set owner reference
 	if err := controllerutil.SetControllerReference(cluster, sa, p.Scheme); err != nil {
 		return Error(err, "Failed to set owner reference on ServiceAccount")
 	}
 
-	// Check if exists
 	existing := &corev1.ServiceAccount{}
 	err := p.Client.Get(ctx, types.NamespacedName{Name: sa.Name, Namespace: sa.Namespace}, existing)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			// Create
 			p.Log.Info("Creating ServiceAccount", "name", sa.Name)
 			if err := p.Client.Create(ctx, sa); err != nil {
 				return Error(err, "Failed to create ServiceAccount")
@@ -72,6 +69,6 @@ func (p *ServiceAccountPhase) Execute(ctx context.Context, cluster *nomadv1alpha
 		return Error(err, "Failed to get ServiceAccount")
 	}
 
-	// Already exists, nothing to update for ServiceAccount
+	// Nothing to update for an existing ServiceAccount.
 	return OK()
 }

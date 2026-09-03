@@ -51,6 +51,7 @@ const (
 )
 
 // NomadSnapshotReconciler reconciles a NomadSnapshot object.
+//
 // Ensure idiom: this controller uses controllerutil.CreateOrUpdate; the
 // cluster phases hand-roll Get-then-write. Match the file you edit.
 type NomadSnapshotReconciler struct {
@@ -185,10 +186,10 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: snapshotRequeueDefault}, nil
 	}
 
-	// Get the cluster's management token (C4 / neo-pfx): the bootstrap
-	// token is sealed after minting it, so snapshot-agent policy/token
-	// creation authenticates with the management token. The
-	// Secret appears one reconcile after ACL bootstrap — wait for it.
+	// C4 / neo-pfx: the bootstrap token is sealed after minting the
+	// management token, so snapshot-agent policy/token creation
+	// authenticates with the management token. Its Secret appears one
+	// reconcile after ACL bootstrap — wait for it.
 	managementSecretName := phases.OperatorManagementSecretName(cluster.Name)
 	managementSecret := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{
@@ -556,10 +557,9 @@ func (r *NomadSnapshotReconciler) runNomadWithFallback(ctx context.Context, clus
 	return fn(nomadClient)
 }
 
-// snapshotNomadClient creates a Nomad client for snapshot controller operations.
-// Since verify_https_client is off, only the CA cert is needed for TLS verification.
-// The production path carries the D4b request counter like every other
-// operator Nomad client; tests inject via NomadClientFactory.
+// snapshotNomadClient builds the controller's Nomad client. With
+// verify_https_client off, only the CA cert is needed for TLS
+// verification.
 func (r *NomadSnapshotReconciler) snapshotNomadClient(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, address string) (nomad.NomadAPI, error) {
 	cfg := nomad.ClientConfig{
 		Address:    address,
@@ -949,7 +949,7 @@ func (r *NomadSnapshotReconciler) reconcileTokenSecret(ctx context.Context, snap
 // snapshotAgentLabels returns the selector labels for the snapshot
 // agent workload (shared by the Deployment and Job pod templates).
 // managed-by matches phases.GetLabels — one operator, one identity
-// (neo-e3y); a test pins the two helpers to the same value.
+// (neo-e3y).
 func snapshotAgentLabels(snapshot *nomadv1alpha1.NomadSnapshot) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "nomad-snapshot-agent",
@@ -959,9 +959,8 @@ func snapshotAgentLabels(snapshot *nomadv1alpha1.NomadSnapshot) map[string]strin
 }
 
 // buildAgentPodTemplate builds the snapshot agent pod template used by
-// BOTH modes (AC-2.7.4: consistent target handling across modes). The
-// config checksum annotation makes spec-derived config changes roll the
-// recurring Deployment (AC-2.7.6a); it is inert on the immutable Job.
+// BOTH modes (AC-2.7.4). The config checksum annotation (AC-2.7.6a) is
+// inert on the immutable Job.
 func (r *NomadSnapshotReconciler) buildAgentPodTemplate(
 	snapshot *nomadv1alpha1.NomadSnapshot, cluster *nomadv1alpha1.NomadCluster,
 	nomadAddr, configChecksum, secretsChecksum string,

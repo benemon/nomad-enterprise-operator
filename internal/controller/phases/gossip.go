@@ -47,13 +47,11 @@ func (p *GossipPhase) Name() string {
 
 // Execute ensures a gossip encryption key exists, either from an external secret or auto-generated.
 func (p *GossipPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	// If user provided external secret name, use it (VSO, sealed-secrets, etc.)
 	// The key within the Secret is operator-owned (ADR 0003): "gossip-key".
 	if cluster.Spec.Gossip.SecretName != "" {
 		return p.readExternalSecret(ctx, cluster, gossipSecretKey)
 	}
 
-	// Otherwise, check for operator-managed secret
 	return p.ensureOperatorManagedSecret(ctx, cluster, gossipSecretKey)
 }
 
@@ -87,7 +85,6 @@ func (p *GossipPhase) readExternalSecret(ctx context.Context, cluster *nomadv1al
 func (p *GossipPhase) ensureOperatorManagedSecret(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secretKey string) PhaseResult {
 	secretName := GossipSecretName(cluster)
 
-	// Check if operator-managed secret already exists (preserve across upgrades)
 	existing := &corev1.Secret{}
 	err := p.Client.Get(ctx, types.NamespacedName{
 		Name:      secretName,
@@ -95,7 +92,6 @@ func (p *GossipPhase) ensureOperatorManagedSecret(ctx context.Context, cluster *
 	}, existing)
 
 	if err == nil {
-		// Secret exists - read and use existing key
 		gossipKey, ok := existing.Data[secretKey]
 		if !ok {
 			return Error(fmt.Errorf("key %q not found in operator-managed gossip secret", secretKey),
@@ -110,7 +106,6 @@ func (p *GossipPhase) ensureOperatorManagedSecret(ctx context.Context, cluster *
 		return Error(err, "Failed to check for operator-managed gossip secret")
 	}
 
-	// First deploy - generate new gossip key
 	gossipKey, err := generateGossipKey()
 	if err != nil {
 		return Error(err, "Failed to generate gossip key")
@@ -128,7 +123,6 @@ func (p *GossipPhase) ensureOperatorManagedSecret(ctx context.Context, cluster *
 		},
 	}
 
-	// Set owner reference so it's cleaned up with the cluster
 	if err := controllerutil.SetControllerReference(cluster, secret, p.Scheme); err != nil {
 		return Error(err, "Failed to set owner reference on gossip secret")
 	}

@@ -149,9 +149,8 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	peers, err := nomadClient.RaftListPeers(ctx, token)
 	if err != nil {
 		// AC-2.3.8a: on mid-op leader loss, pause silently — status is
-		// preserved, the next reconcile will retry and resume per
-		// AC-2.3.7's resume logic. Other transient errors get the same
-		// treatment (OK + log) so the reconciler keeps moving.
+		// preserved and the next reconcile resumes per AC-2.3.7. Other
+		// transient errors get the same treatment.
 		if isNoLeaderError(err) {
 			p.Log.Info("ScaleDown: leader lost mid-operation; silently pausing (AC-2.3.8a)", "error", err)
 		} else {
@@ -176,9 +175,7 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		"removedSoFar", len(cluster.Status.ScaleDown.RemovedPeers), "gap", gap)
 
 	if err := nomadClient.RaftRemovePeer(ctx, token, candidate.ID); err != nil {
-		// AC-2.3.8a: leader loss between the list and the remove is a
-		// transient Raft election. Pause silently — status.scaleDown
-		// is not cleared, the next reconcile resumes per AC-2.3.7.
+		// Same AC-2.3.8a pause as above.
 		if isNoLeaderError(err) {
 			p.Log.Info("ScaleDown: leader lost during RaftRemovePeer; silently pausing (AC-2.3.8a)",
 				"error", err, "id", candidate.ID)
@@ -312,12 +309,6 @@ func (p *ScaleDownPhase) newNomadClientForScaleDown(
 	return p.NewNomadClient(cfg)
 }
 
-// nodeNameToOrdinal maps a server's node name (the only per-replica
-// field — Address is the shared advertise IP) to its pod ordinal.
-// Unrecognised input errors; it is never silently ordinal 0.
-//
-// Recognised: <cluster>-<int> and <cluster>-<int>.<region>.
-// Rejected: empty, "(unknown)", foreign prefixes, non-integer ordinals.
 // acceptDegradedQuorumAnnotation is the opt-in signal users set on
 // the NomadCluster CR to authorise a scale-down below the 3-replica
 // quorum floor (AC-2.3.5 / 2.3.6). Enforced by ScaleDownPhase because
@@ -351,6 +342,9 @@ func isNoLeaderError(err error) bool {
 	return false
 }
 
+// nodeNameToOrdinal maps a server's node name (the only per-replica
+// field — Address is the shared advertise IP) to its pod ordinal.
+// Unrecognised input errors; it is never silently ordinal 0.
 func nodeNameToOrdinal(nodeName, clusterName string) (int, error) {
 	if nodeName == "" {
 		return 0, fmt.Errorf("peer node name is empty")
