@@ -133,7 +133,6 @@ func RequeueWithReason(after time.Duration, reason, message string) PhaseResult 
 	}
 }
 
-// Error returns a failed result.
 // ErrorWithReason returns an error result carrying a specific Ready
 // reason (e.g. "LicenseSecretNotFound") instead of the generic
 // PhaseFailed — for failures with a user-actionable cause (neo-0zq).
@@ -143,6 +142,7 @@ func ErrorWithReason(err error, reason, message string) PhaseResult {
 	return r
 }
 
+// Error returns a failed result.
 func Error(err error, message string) PhaseResult {
 	return PhaseResult{
 		Error:   err,
@@ -258,8 +258,6 @@ func ContainerSecurityContext() *corev1.SecurityContext {
 
 // TimedExecute runs the phase and observes its wall-clock duration on
 // the nomad_operator_phase_duration_seconds histogram (D4a / AC-8.1.1).
-// The controller's phase loop calls this instead of Execute directly so
-// every phase is measured, including failing ones.
 func TimedExecute(ctx context.Context, phase Phase, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
 	start := time.Now()
 	result := phase.Execute(ctx, cluster)
@@ -388,8 +386,7 @@ func (pc *PhaseContext) NewNomadClient(cfg nomad.ClientConfig) (nomad.NomadAPI, 
 
 // runNomadWithFallback runs fn against the internal Service address,
 // retrying once via the LoadBalancer address on a network error.
-// fn must be idempotent. Deliberately unused by executeBootstrap,
-// createNomadClient, and best-effort cleanup, whose shapes differ.
+// fn must be idempotent.
 func (pc *PhaseContext) runNomadWithFallback(cluster *nomadv1alpha1.NomadCluster, timeout time.Duration, token string, fn func(nomad.NomadAPI) error) error {
 	cfg := pc.BuildClientConfig(timeout, token)
 	cfg.Address = nomad.InternalServiceAddress(cluster.Name, cluster.Namespace, true)

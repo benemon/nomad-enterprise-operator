@@ -86,10 +86,9 @@ func ensureScrapeTokenSecret(ctx context.Context, c client.Client, namespace, se
 // EnsureOperatorServiceMonitor creates (or converges) a
 // ServiceMonitor scraping the operator's own :8443/metrics endpoint
 // (AC-F4.4), plus the token Secret its authorization references.
+//
 // Gated on Prometheus Operator CRD availability via the shared
 // discovery helper — on clusters without the CRDs it is a clean no-op.
-// The static equivalent ships at config/prometheus/operator-monitor.yaml,
-// serving GitOps flows that prefer declarative installation.
 func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespace, serviceAccount string) error {
 	if !discovery.HasGVK(c.RESTMapper(), serviceMonitorGVK) {
 		return nil
@@ -126,11 +125,7 @@ func EnsureOperatorServiceMonitor(ctx context.Context, c client.Client, namespac
 				HTTPConfigWithProxyAndTLSFiles: monitoringv1.HTTPConfigWithProxyAndTLSFiles{
 					HTTPConfigWithTLSFiles: monitoringv1.HTTPConfigWithTLSFiles{
 						// Secret-backed authorization, never a file
-						// path: OpenShift user-workload monitoring
-						// rejects bearerTokenFile. The scraping
-						// identity is the operator's own SA, which the
-						// bundled metrics-reader binding authorizes
-						// through kube-rbac-proxy.
+						// path — see scrapeTokenSecret.
 						HTTPConfigWithoutTLS: monitoringv1.HTTPConfigWithoutTLS{
 							Authorization: &monitoringv1.SafeAuthorization{
 								Credentials: &corev1.SecretKeySelector{

@@ -45,12 +45,10 @@ func (p *RBACPhase) Name() string {
 
 // Execute creates or updates RBAC resources for Nomad pods.
 func (p *RBACPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) PhaseResult {
-	// Create Role
 	if result := p.ensureRole(ctx, cluster); result.Error != nil || result.Requeue {
 		return result
 	}
 
-	// Create RoleBinding
 	if result := p.ensureRoleBinding(ctx, cluster); result.Error != nil || result.Requeue {
 		return result
 	}
@@ -101,7 +99,6 @@ func (p *RBACPhase) ensureRole(ctx context.Context, cluster *nomadv1alpha1.Nomad
 		return Error(err, "Failed to get Role")
 	}
 
-	// Update if rules changed
 	if !rulesEqual(existing.Rules, role.Rules) {
 		existing.Rules = role.Rules
 		p.Log.Info("Updating Role", "name", role.Name)

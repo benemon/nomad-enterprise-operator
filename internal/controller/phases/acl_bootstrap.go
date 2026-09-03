@@ -169,8 +169,7 @@ func (p *ACLBootstrapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.
 
 	// C4 (AC-2.4.4): mint the dedicated management token — the only
 	// write the bootstrap token performs. Everything below authenticates
-	// with the management token. On failure, the already-bootstrapped
-	// branch retries on the next reconcile.
+	// with the management token.
 	managementToken, err := p.ensureOperatorManagementToken(ctx, cluster, result.SecretID)
 	if err != nil {
 		p.Log.Error(err, "Failed to create operator management token; deferring dependent ACL setup to next reconcile")

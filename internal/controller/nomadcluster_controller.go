@@ -588,9 +588,6 @@ func caExpired(cluster *nomadv1alpha1.NomadCluster) bool {
 // when another status field changed, or on the half-requeue heartbeat —
 // idle clusters still show liveness without per-loop status writes.
 func (r *NomadClusterReconciler) maybeAdvanceLastReconcileTime(cluster *nomadv1alpha1.NomadCluster, snapshot *nomadv1alpha1.NomadClusterStatus) {
-	// Compute "did anything other than lastReconcileTime change". Cheapest
-	// way to compare is to copy the current and the snapshot, zero out the
-	// LastReconcileTime field on both, and DeepEqual.
 	a := cluster.Status.DeepCopy()
 	b := snapshot.DeepCopy()
 	a.LastReconcileTime = nil
@@ -605,10 +602,8 @@ func (r *NomadClusterReconciler) maybeAdvanceLastReconcileTime(cluster *nomadv1a
 		now := metav1.Now()
 		cluster.Status.LastReconcileTime = &now
 	}
-	// else: leave cluster.Status.LastReconcileTime as the snapshot value.
-	// The caller still issues Status().Patch with client.MergeFrom(patchBase);
-	// when no Status fields changed at all, the merge patch is empty and the
-	// server-side write is a no-op.
+	// The caller's unconditional Status().Patch stays a server-side
+	// no-op when nothing changed: an empty merge patch writes nothing.
 }
 
 // updateStatefulSetStatus mirrors the StatefulSet replica counters into
@@ -640,13 +635,13 @@ func (r *NomadClusterReconciler) updateACLBootstrapStatus(ctx context.Context, c
 	}
 }
 
-// secretRefIndexes maps field-index keys to Secret-reference
-// extractors. Shared by SetupWithManager and fake-client tests so the
-// two cannot drift.
 // keyringSecretsIndex is the multi-valued field index over every
 // Secret the keyring entries reference.
 const keyringSecretsIndex = "spec.server.keyrings.secrets"
 
+// secretRefIndexes maps field-index keys to Secret-reference
+// extractors. Shared by SetupWithManager and fake-client tests so the
+// two cannot drift.
 var secretRefIndexes = map[string]func(*nomadv1alpha1.NomadCluster) string{
 	"spec.license.secretName": func(c *nomadv1alpha1.NomadCluster) string {
 		return c.Spec.License.SecretName

@@ -203,11 +203,9 @@ func (p *ServicesPhase) ensureService(ctx context.Context, cluster *nomadv1alpha
 		return Error(err, "Failed to get Service "+svc.Name)
 	}
 
-	// Reconcile the CR-owned surface. Spec fields are authoritative —
-	// a removed CR field clears the Service field (a stale
-	// loadBalancerIP makes MetalLB reject the allocation). Annotations
-	// go through applied-key bookkeeping so removed CR annotations are
-	// pruned without touching annotations other controllers own.
+	// Spec fields are authoritative — a removed CR field clears the
+	// Service field (a stale loadBalancerIP makes MetalLB reject the
+	// allocation). Annotations go through appliedAnnotationsKey.
 	changed := false
 	if existing.Spec.Type != svc.Spec.Type {
 		existing.Spec.Type = svc.Spec.Type

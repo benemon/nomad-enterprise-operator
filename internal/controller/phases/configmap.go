@@ -94,10 +94,8 @@ func (p *ConfigMapPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 
 	// Auto-remediate: Update if content changed (handles config drift)
 	if !bytes.Equal(existing.Data[serverConfigKey], secret.Data[serverConfigKey]) {
-		// Diagnostic for neo-8oy: surface which key drifted so future
-		// regressions are visible without a separate debug cycle. The
-		// dump is bounded to ~1KB excerpts to keep the operator log
-		// readable on large rendered configs.
+		// Diagnostic for neo-8oy. The dump is bounded to ~1KB excerpts
+		// to keep the operator log readable on large rendered configs.
 		drift := configMapDriftSummary(
 			map[string]string{serverConfigKey: string(existing.Data[serverConfigKey])},
 			map[string]string{serverConfigKey: serverHCL})
@@ -201,11 +199,8 @@ func (p *ConfigMapPhase) reapLegacyConfigMap(ctx context.Context, cluster *nomad
 	return OK()
 }
 
-// configMapDriftSummary returns a structured comparison of two CM
-// data maps, naming the keys that differ and showing the position of
-// the first byte mismatch in each shared key. Used by the
-// auto-remediation log so operators can see what drifted without
-// having to extract both versions out of band.
+// configMapDriftSummary names the keys that differ between two CM
+// data maps and the position of the first byte mismatch in each.
 func configMapDriftSummary(existing, desired map[string]string) map[string]string {
 	out := map[string]string{}
 	keys := map[string]bool{}
@@ -260,9 +255,7 @@ func snippet(s string, around int) string {
 }
 
 // ConfigChecksum returns a hash of the ConfigMap content for pod annotations.
-// Keys are sorted to ensure deterministic output across reconciliations.
 func ConfigChecksum(data map[string]string) string {
-	// Sort keys for deterministic hashing
 	keys := make([]string, 0, len(data))
 	for k := range data {
 		keys = append(keys, k)

@@ -198,10 +198,9 @@ func (p *CertificatePhase) ensureGeneratedCA(ctx context.Context, cluster *nomad
 	return OK(), ca, ca.CACertPEM
 }
 
-// rotateCAIfDue drives CA rotation: introduce next CA at the renewal
-// deadline, promote it once every pod trusts it, drop the previous CA
-// when it expires. All state lives in the Secret's keys, so a restarted
-// operator resumes where it left off. Never called for user CAs.
+// rotateCAIfDue drives CA rotation. All state lives in the Secret's
+// keys, so a restarted operator resumes where it left off. Never
+// called for user CAs.
 func (p *CertificatePhase) rotateCAIfDue(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, secret *corev1.Secret) PhaseResult {
 	activeCert, err := tlspkg.ParseCertificate(secret.Data[caSecretCertKey])
 	if err != nil {
@@ -284,8 +283,7 @@ func caTrustUnion(secret *corev1.Secret) []byte {
 
 // statefulSetFullyRolled reports whether every pod is running the
 // current pod template — the gate between rotation phases A and B.
-// Conservative on any doubt: a missing StatefulSet, stale observation,
-// or in-flight roll all return false and rotation simply waits.
+// Conservative on any doubt: rotation simply waits.
 func (p *CertificatePhase) statefulSetFullyRolled(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) bool {
 	return statefulSetFullyRolled(ctx, p.Client, cluster)
 }
