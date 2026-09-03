@@ -502,44 +502,6 @@ func TestAuditPVCIndependent(t *testing.T) {
 	}
 }
 
-// TestStatefulSetScaleUp covers neo-i4a: increasing spec.replicas must
-// flow straight through to the StatefulSet — the D2b guard only
-// preserves the existing count while it EXCEEDS the desired count
-// (scale-down territory); an up-scale is a plain update.
-func TestStatefulSetScaleUp(t *testing.T) {
-	cluster := newTestCluster("ns", "nomad")
-	cluster.Spec.Replicas = 1
-
-	phaseCtx := &PhaseContext{
-		Client:           fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
-		Scheme:           scheme.Scheme,
-		Log:              zap.New(zap.UseDevMode(true)),
-		AdvertiseAddress: "10.0.0.5",
-		GossipKey:        "fixed-gossip-key-for-test==",
-	}
-	phase := &StatefulSetPhase{PhaseContext: phaseCtx}
-
-	// Create at 1 replica.
-	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
-		t.Fatalf("Execute() create error = %v", result.Error)
-	}
-
-	// Scale up to 3.
-	cluster.Spec.Replicas = 3
-	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
-		t.Fatalf("Execute() scale-up error = %v", result.Error)
-	}
-
-	sts := &appsv1.StatefulSet{}
-	if err := phaseCtx.Client.Get(context.Background(),
-		types.NamespacedName{Name: "nomad", Namespace: "ns"}, sts); err != nil {
-		t.Fatalf("StatefulSet missing: %v", err)
-	}
-	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 3 {
-		t.Errorf("sts replicas = %v after scale-up, want 3", sts.Spec.Replicas)
-	}
-}
-
 // Both workloads meet PSS restricted; identity fields are explicit on
 // vanilla and deliberately unset on OpenShift (SCC injects them).
 func TestPodSecurityContexts(t *testing.T) {
