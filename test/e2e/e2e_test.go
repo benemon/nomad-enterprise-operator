@@ -5084,6 +5084,20 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
+			By("waiting for the operator to apply the target image to the StatefulSet")
+			// Convergence below (ready==3, revisions equal) is
+			// indistinguishable from a roll that has not started, so a
+			// poll racing the operator's reconcile declares victory on
+			// the old image. Gate on the roll having begun first.
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.containers[0].image}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("hashicorp/nomad:"+toTag),
+					"operator has not applied the target image yet")
+			}, 2*time.Minute, 2*time.Second).Should(Succeed())
+
 			By("rolling through the upgrade with the quorum floor asserted at every poll")
 			// The structural no-quorum-loss guarantee: with 3 replicas
 			// and PDB/rolling-update pacing, at most one server is ever
