@@ -45,10 +45,6 @@ spec:
         description: |-
           NomadSnapshot is the Schema for the nomadsnapshots API.
 
-          The XValidation rule below blocks a mode switch (adding/removing
-          spec.schedule) while a one-shot Job is running; recurring mode is
-          never blocked.
-
           spec.clusterRef is immutable: retargeting would orphan the old
           cluster's ACL policy and token (status.tokenAccessorID is only
           checked against the new cluster). Delete and recreate to retarget —
@@ -162,7 +158,8 @@ spec:
                 description: |-
                   Schedule, when set, runs a recurring snapshot-agent Deployment;
                   when omitted, a one-shot Job. Adding or removing it switches
-                  modes — blocked while a one-shot Job is running (CEL).
+                  modes — blocked while a one-shot Job is running (CEL); recurring
+                  mode never blocks.
                 properties:
                   interval:
                     default: 1h
@@ -429,9 +426,8 @@ spec:
                     type: string
                   nomadVersion:
                     description: |-
-                      NomadVersion the artifact was taken at. Snapshots restore only
-                      to the same Nomad version; this is the per-artifact record of
-                      it, frozen at Job completion (one-shot mode).
+                      NomadVersion the artifact was taken at, frozen at Job completion
+                      (one-shot mode).
                     type: string
                   status:
                     description: Status of the snapshot (Success, Failed)

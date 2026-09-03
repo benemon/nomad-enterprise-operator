@@ -223,8 +223,7 @@ type RouteSpec struct {
 // RouteTLSSpec defines TLS configuration for the OpenShift Route.
 // The Route always uses reencrypt termination with HTTP→HTTPS redirect.
 // The operator automatically populates DestinationCACertificate from the
-// Nomad CA. Optionally, a custom external-facing certificate can be
-// provided instead of using the platform wildcard certificate.
+// Nomad CA.
 type RouteTLSSpec struct {
 	// CertificateSecretName is the name of a Secret containing a custom
 	// TLS certificate for the external-facing side of the Route.
@@ -301,8 +300,6 @@ type ServerSpec struct {
 	// entries, so any one surviving KMS can unwrap (HA). Omitted = the
 	// default aead keyring, whose KEK rides Raft IN CLEARTEXT — meaning
 	// snapshots (including NomadSnapshot uploads) contain key material.
-	// The operator manages migration between keyring sets, including
-	// enable, disable, and provider changes, with no quorum impact.
 	// +listType=map
 	// +listMapKey=name
 	// +kubebuilder:validation:MaxItems=8
@@ -399,7 +396,6 @@ type AWSKMSKeyring struct {
 }
 
 // AzureKeyVaultKeyring wraps root keys with Azure Key Vault.
-// resource "managedhsm.azure.net" selects a Managed HSM vault.
 type AzureKeyVaultKeyring struct {
 	// +kubebuilder:validation:MinLength=1
 	VaultName string `json:"vaultName"`
@@ -481,16 +477,10 @@ type TransitKeyring struct {
 }
 
 // TransitAuth is the transit keyring's Vault credential configuration.
-// Exactly one per-method block is set, agreeing with method:
-//
-//	token:      a long-lived user-minted Vault token (no login call;
-//	            user-owned lifecycle). Our extension beyond VSO.
-//	kubernetes: TokenReview-validated login — either a user-minted
-//	            long-lived ServiceAccount token (secretRef) or the
-//	            DEFAULT ephemeral operator-minted TokenRequest token
-//	            (single-use, never stored; the VSO pattern).
-//	jwt:        JWKS/OIDC-validated login with the same two
-//	            ServiceAccount token sources.
+// Exactly one per-method block is set, agreeing with method: token (a
+// user-minted Vault token, no login call), kubernetes
+// (TokenReview-validated login), or jwt (JWKS/OIDC-validated login).
+// The two login methods share the same ServiceAccount token sources.
 type TransitAuth struct {
 	// Method declares the credential vector explicitly.
 	// +kubebuilder:validation:Enum=token;kubernetes;jwt
@@ -579,14 +569,11 @@ type ACLSpec struct {
 func (a ACLSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
 // TLSSpec defines TLS configuration for the Nomad cluster.
-// mTLS is always enabled. The operator generates and manages all certificates
-// automatically using a self-signed CA unless CA.SecretName is provided,
-// in which case certificates are issued from the user-supplied CA.
+// mTLS is always enabled.
 type TLSSpec struct {
 	// CA optionally specifies a user-provided Certificate Authority for
 	// certificate issuance. If not specified, the operator generates and
-	// manages a self-signed CA. Providing a CA allows certificates to chain
-	// to your organisation's trusted root.
+	// manages a self-signed CA.
 	// +optional
 	CA *CASpec `json:"ca,omitempty"`
 }
@@ -651,9 +638,7 @@ func (a AuditSpec) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 // emits no override, so Nomad's own default stands. Those defaults are
 // asymmetric on purpose — batch history (24h) far outlives disposable
 // eval state (1h) — so tuning one leaves the others untouched.
-// High-churn dispatch workloads accumulate dead batch state (the driver
-// of leader working-set growth under load); lowering these reclaims it
-// sooner. Only the three history thresholds are exposed; node, deploy,
+// Only the three history thresholds are exposed; node, deploy,
 // CSI, and ACL GC keep Nomad's defaults.
 type ServerGCSpec struct {
 	// JobHistory sets the minimum time a dead job is retained before GC
@@ -728,8 +713,7 @@ const (
 //	LicenseSecretNotFound     — referenced license Secret absent
 //	LicenseSecretInvalid      — license Secret present, key missing
 //	CAExpired                 — CA past expiry (checked before
-//	                            WaitingForReplicas: name the cause,
-//	                            not the symptom)
+//	                            WaitingForReplicas)
 //	PhaseFailed               — a reconcile phase returned an error
 //	Reconciling               — generic requeue
 //	ScaleDownBlocked          — scale-down waiting on a Raft leader

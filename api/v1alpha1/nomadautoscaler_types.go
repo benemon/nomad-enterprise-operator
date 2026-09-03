@@ -122,8 +122,7 @@ type AutoscalerImageSpec struct {
 }
 
 // DynamicApplicationSizingSpec opts the agent into Dynamic Application
-// Sizing (Nomad Enterprise). Sizing policies live in job
-// specifications, not here; enabling this extends the minted ACL
+// Sizing (Nomad Enterprise). Enabling this extends the minted ACL
 // policy with the recommendations capability.
 // +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.prometheusURL) && size(self.prometheusURL) > 0)",message="prometheusURL is required when dynamic application sizing is enabled"
 type DynamicApplicationSizingSpec struct {
