@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
@@ -81,6 +82,29 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		sts.Spec.Replicas = existing.Spec.Replicas
 	}
 
+	// Scale-up is serialized: one replica per reconcile, gated on the
+	// previous server reaching the voter set. Simultaneous joins race
+	// Nomad's member reconciliation — leadership churn mid-join can
+	// strand a server in an AddNonvoter/RemoveServer loop (neo-tma) —
+	// while a lone join meets a settled leader. Initial creation still
+	// starts all replicas at once: bootstrap_expect needs them.
+	stepping := false
+	if existing.Spec.Replicas != nil && *sts.Spec.Replicas > *existing.Spec.Replicas {
+		next := *existing.Spec.Replicas
+		ap := cluster.Status.Autopilot
+		if ap != nil && ap.Healthy && int32(ap.Voters) >= *existing.Spec.Replicas {
+			next++
+		}
+		if next < *sts.Spec.Replicas {
+			stepping = true
+			if next == *existing.Spec.Replicas {
+				p.Log.Info("Scale-up holding: previous replica not yet a settled voter",
+					"replicas", next, "target", *sts.Spec.Replicas)
+			}
+			sts.Spec.Replicas = &next
+		}
+	}
+
 	// Update StatefulSet if spec changed
 	if update, reason := p.needsUpdate(existing, sts); update {
 		// Preserve fields that shouldn't be updated
@@ -94,6 +118,9 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		}
 	}
 
+	if stepping {
+		return Requeue(15*time.Second, "scale-up in progress; stepping one replica at a time")
+	}
 	return OK()
 }
 

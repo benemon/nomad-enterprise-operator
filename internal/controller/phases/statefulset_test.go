@@ -283,6 +283,61 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	}
 }
 
+// Scale-up must step one replica per reconcile, gated on the previous
+// replica reaching the voter set (neo-tma: simultaneous joins race
+// Nomad's member reconciliation during leadership churn).
+func TestStatefulSetScaleUpSerialized(t *testing.T) {
+	cases := []struct {
+		name         string
+		stsReplicas  int32
+		autopilot    *nomadv1alpha1.AutopilotStatus
+		wantReplicas int32
+		wantRequeue  bool
+	}{
+		{"steps by one when settled", 1,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 1}, 2, true},
+		{"holds until new replica votes", 2,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 1}, 2, true},
+		{"holds without autopilot status", 1, nil, 1, true},
+		{"final step reaches target", 2,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 2}, 3, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := newTestCluster("ns", "nomad")
+			cluster.Status.Autopilot = tc.autopilot
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "ns"},
+				Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(tc.stsReplicas)},
+			}
+			phase := NewStatefulSetPhase(&PhaseContext{
+				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).
+					WithRuntimeObjects(cluster, sts).Build(),
+				Scheme: scheme.Scheme,
+				Log:    zap.New(zap.UseDevMode(true)),
+			})
+
+			result := phase.Execute(context.Background(), cluster)
+			if result.Error != nil {
+				t.Fatalf("Execute() error = %v", result.Error)
+			}
+			if got := result.RequeueAfter > 0; got != tc.wantRequeue {
+				t.Errorf("requeue = %v, want %v", got, tc.wantRequeue)
+			}
+
+			updated := &appsv1.StatefulSet{}
+			if err := phase.Client.Get(context.Background(),
+				types.NamespacedName{Name: "nomad", Namespace: "ns"}, updated); err != nil {
+				t.Fatalf("Get STS: %v", err)
+			}
+			if *updated.Spec.Replicas != tc.wantReplicas {
+				t.Errorf("sts replicas = %d, want %d", *updated.Spec.Replicas, tc.wantReplicas)
+			}
+		})
+	}
+}
+
 // Liveness must be leader-independent (neo-pl4): /v1/agent/health
 // 500s during a leaderless window, so an HTTP liveness check kills
 // healthy followers mid-election and cascades one OOM into quorum
