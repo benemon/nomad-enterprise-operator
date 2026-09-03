@@ -292,7 +292,7 @@ func TestStatefulSetScaleUpSerialized(t *testing.T) {
 		stsReplicas  int32
 		autopilot    *nomadv1alpha1.AutopilotStatus
 		wantReplicas int32
-		wantRequeue  bool
+		wantRevisit  bool
 	}{
 		{"steps by one when settled", 1,
 			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 1}, 2, true},
@@ -311,19 +311,26 @@ func TestStatefulSetScaleUpSerialized(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "ns"},
 				Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(tc.stsReplicas)},
 			}
-			phase := NewStatefulSetPhase(&PhaseContext{
+			phaseCtx := &PhaseContext{
 				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).
 					WithRuntimeObjects(cluster, sts).Build(),
 				Scheme: scheme.Scheme,
 				Log:    zap.New(zap.UseDevMode(true)),
-			})
+			}
+			phase := NewStatefulSetPhase(phaseCtx)
 
 			result := phase.Execute(context.Background(), cluster)
 			if result.Error != nil {
 				t.Fatalf("Execute() error = %v", result.Error)
 			}
-			if got := result.RequeueAfter > 0; got != tc.wantRequeue {
-				t.Errorf("requeue = %v, want %v", got, tc.wantRequeue)
+			// Stepping must NOT short-circuit the chain (that starves
+			// the status refresh the gate depends on): it asks for a
+			// revisit instead of a requeue.
+			if result.Requeue {
+				t.Error("stepping must not return a chain-stopping requeue")
+			}
+			if got := phaseCtx.RevisitAfter > 0; got != tc.wantRevisit {
+				t.Errorf("revisit = %v, want %v", got, tc.wantRevisit)
 			}
 
 			updated := &appsv1.StatefulSet{}

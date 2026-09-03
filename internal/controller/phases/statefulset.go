@@ -119,7 +119,13 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 	}
 
 	if stepping {
-		return Requeue(15*time.Second, "scale-up in progress; stepping one replica at a time")
+		// Revisit soon for the next step, but let the chain finish: the
+		// voter gate reads status.autopilot, which ClusterStatusPhase
+		// refreshes later in the chain — a short-circuiting Requeue here
+		// would starve that refresh and deadlock the ladder.
+		if p.RevisitAfter == 0 || p.RevisitAfter > 15*time.Second {
+			p.RevisitAfter = 15 * time.Second
+		}
 	}
 	return OK()
 }
