@@ -60,9 +60,9 @@ description.
   the code cannot show.
 - Match the conventions of the surrounding code and of sibling operators
   in the ecosystem, even where a style guide would suggest otherwise.
-- Nomad agent configuration renders as HCL1. Unknown stanza names are
-  silently ignored by Nomad's decoder, so config changes are proven
-  against a live agent, not against the template.
+- Rendered Nomad configuration is proven against the real operand, not
+  against the template: the operand-contract CI job decodes every
+  server.hcl and snapshot.hcl shape with the pinned nomad-ent image.
 - Docs prose uses plain hyphens and complete sentences, and states
   limitations up front.
 
