@@ -1,7 +1,8 @@
 name: Grep checks
 
-# Static-text gates that enforce CONTRIBUTING.md §1.5's three "no foot-gun"
-# rules. Each rule is its own step so the failure surface is precisely the
+# Static-text gates for this repo's no-foot-gun rules; this file is
+# the rules' authority (CONTRIBUTING.md's Gates section points here).
+# Each rule is its own step so the failure surface is precisely the
 # rule that triggered it (not a generic "grep-checks failed").
 #
 # Rules:
@@ -34,7 +35,7 @@ permissions:
 
 jobs:
   grep-checks:
-    name: Static-text gates (CONTRIBUTING.md §1.5)
+    name: Static-text gates
     runs-on: ubuntu-latest
     env:
       # Scopes are limited to first-party code; generated files and the
@@ -76,6 +77,14 @@ jobs:
       # scale-down peer removal goes through RaftRemovePeer, and stale
       # gossip members are cleaned up by autopilot.cleanupDeadServers.
       RULE_FORCE_LEAVE_REGEX: 'ForceLeave|force-leave|ForceLeaveNode'
+      # Rule 5 — reviewer-directed comment phrases. A comment arguing the
+      # code is correct addresses a reviewer, not the next reader
+      # (CONTRIBUTING.md Conventions: comments are signposts).
+      RULE_REVIEWER_PHRASE_REGEX: '//.*\b(properly|correctly handles|this ensures|note that we)\b'
+      # Rule 6 — adjectives in top-level doc comments (godoc: one terse
+      # factual sentence). Column-0 comments only, so inline prose using
+      # these words legitimately is not flagged.
+      RULE_DOC_ADJECTIVE_REGEX: '^//.*\b(simple|robust|powerful|comprehensive|elegant|sensible|convenient)\b'
 
     steps:
       - name: Checkout
@@ -146,3 +155,34 @@ jobs:
             exit 1
           fi
           echo "OK — no Serf force-leave call sites in $SCOPES."
+
+      - name: Rule 5 — no reviewer-directed comment phrases
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2086
+          matches=$(grep -RInE \
+            --include='*.go' \
+            --exclude='zz_generated.*.go' \
+            "$RULE_REVIEWER_PHRASE_REGEX" $SCOPES || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Reviewer-directed comment phrase. State the constraint; correctness arguments belong in the PR description."
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK — no reviewer-directed comment phrases in $SCOPES."
+
+      - name: Rule 6 — no adjectives in top-level doc comments
+        run: |
+          set -uo pipefail
+          # shellcheck disable=SC2086
+          matches=$(grep -RInE \
+            --include='*.go' \
+            --exclude='zz_generated.*.go' \
+            --exclude='*_test.go' \
+            "$RULE_DOC_ADJECTIVE_REGEX" $SCOPES || true)
+          if [ -n "$matches" ]; then
+            echo "::error::Adjective in a doc comment. godoc is one terse factual sentence."
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK — no adjectives in top-level doc comments in $SCOPES."
