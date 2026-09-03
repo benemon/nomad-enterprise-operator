@@ -74,7 +74,8 @@ Audit storage is independent of data storage: when audit is enabled the
 StatefulSet always carries a dedicated audit PVC sized per
 `server.audit.size`, even when `spec.persistence.size` is empty and
 Raft data runs on `emptyDir`. Audit logs survive pod restarts in every
-configuration.
+configuration, but a removed ordinal's audit PVC is reclaimed on
+scale-down along with its data PVC.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

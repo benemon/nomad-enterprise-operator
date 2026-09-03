@@ -296,6 +296,12 @@ audit {
     stages     = ["OperationReceived"]
     operations = ["GET"]
   }
+  filter "health checks" {
+    type       = "HTTPEvent"
+    endpoints  = ["/v1/agent/health", "/v1/status/leader"]
+    stages     = ["*"]
+    operations = ["*"]
+  }
 
   sink "file" {
     type               = "file"

@@ -247,6 +247,9 @@ func TestGenerator_Generate_AuditEnabled(t *testing.T) {
 		{"received-GET filter", `filter "OperationReceived GETs" {`},
 		{"received stage", `stages     = ["OperationReceived"]`},
 		{"GET operation", `operations = ["GET"]`},
+		{"health-check filter", `filter "health checks" {`},
+		{"agent health endpoint", `"/v1/agent/health"`},
+		{"leader endpoint", `"/v1/status/leader"`},
 	}
 
 	for _, a := range assertions {
@@ -274,7 +277,12 @@ func TestGenerator_Generate_AuditDisabledNoFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	for _, block := range []string{"audit {", `filter "default"`, `filter "OperationReceived GETs"`} {
+	for _, block := range []string{
+		"audit {",
+		`filter "default"`,
+		`filter "OperationReceived GETs"`,
+		`filter "health checks"`,
+	} {
 		if strings.Contains(hcl, block) {
 			t.Errorf("audit disabled: %q must not render", block)
 		}

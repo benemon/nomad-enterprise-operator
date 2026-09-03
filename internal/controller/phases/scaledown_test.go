@@ -29,6 +29,8 @@ import (
 	prometheustestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/mock"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -198,6 +200,62 @@ func fetchSTS(t *testing.T, f *scaleDownFixture) *appsv1.StatefulSet {
 		t.Fatalf("Get(sts) error = %v", err)
 	}
 	return updated
+}
+
+// assertFinalizeReclaims runs finalize on a fixture whose STS carries
+// stsReplicas and whose recorded removal count covers a 3→1 gap, then
+// asserts the removed ordinals' data+audit PVCs are gone (missing
+// audit-nomad-1 proves NotFound tolerance) and ordinal 0's survive.
+func assertFinalizeReclaims(t *testing.T, stsReplicas int32) {
+	t.Helper()
+	f := newScaleDownFixture(t, stsReplicas, 1)
+	ctx := context.Background()
+	// finalize is only ever reached with the gap fully recorded.
+	f.cluster.Status.ScaleDown = &nomadv1alpha1.ScaleDownStatus{
+		RemovedPeers: []string{"peer-1", "peer-2"},
+	}
+
+	for _, name := range []string{
+		"data-nomad-0", "audit-nomad-0",
+		"data-nomad-1", "data-nomad-2", "audit-nomad-2",
+	} {
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "ns",
+		}}
+		if err := f.phase.Client.Create(ctx, pvc); err != nil {
+			t.Fatalf("Create(%s) error = %v", name, err)
+		}
+	}
+
+	if result := f.phase.finalize(ctx, f.cluster, fetchSTS(t, f), 1); result.Error != nil {
+		t.Fatalf("finalize() error = %v", result.Error)
+	}
+
+	for _, name := range []string{"data-nomad-1", "audit-nomad-1", "data-nomad-2", "audit-nomad-2"} {
+		err := f.phase.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: "ns"},
+			&corev1.PersistentVolumeClaim{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("Get(%s) error = %v, want NotFound", name, err)
+		}
+	}
+	for _, name := range []string{"data-nomad-0", "audit-nomad-0"} {
+		if err := f.phase.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: "ns"},
+			&corev1.PersistentVolumeClaim{}); err != nil {
+			t.Errorf("Get(%s) error = %v, want PVC to survive", name, err)
+		}
+	}
+}
+
+func TestScaleDown_FinalizeReclaimsRemovedOrdinalPVCs(t *testing.T) {
+	assertFinalizeReclaims(t, 3)
+}
+
+// A retry after a failed PVC delete re-enters finalize with the STS
+// already patched down to the desired count. The reclaim must still
+// run — deriving the ordinal range from the removal count, not the
+// lowered replica count, is what makes it retry-safe (neo-tma).
+func TestScaleDown_FinalizeReclaimsAfterReplicasAlreadyPatched(t *testing.T) {
+	assertFinalizeReclaims(t, 1)
 }
 
 // peersAtReplicas returns a synthetic peer list, nomad-0..N-1, with

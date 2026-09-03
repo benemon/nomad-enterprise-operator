@@ -2302,7 +2302,7 @@ spec:
 	})
 
 	// Raft-aware scale-down against real Nomad: 3 -> 1, serial peer
-	// removal, STS patched last, PVCs preserved. The opt-in annotation
+	// removal, STS patched last, removed-ordinal PVCs reclaimed. The opt-in annotation
 	// is set up-front to satisfy the sub-3 floor gate.
 	Context("NomadCluster scale-down (D2b)", Ordered, func() {
 		const scaleDownClusterName = "scaledown-test"
@@ -2363,7 +2363,7 @@ spec:
 			_, _ = utils.Run(cmd)
 		})
 
-		It("removes peers serially, patches the STS, and preserves PVCs (AC-2.3.4/4b/4c/7)", func() {
+		It("removes peers serially, patches the STS, and reclaims removed PVCs (AC-2.3.4/4b/4c/7)", func() {
 			By("waiting for autopilot to report healthy (3-server cluster fully formed)")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,
@@ -2413,33 +2413,30 @@ spec:
 					"status.scaleDown should be cleared once the operation completes")
 			}, 1*time.Minute).Should(Succeed())
 
-			By("verifying PVCs for removed ordinals 1 and 2 survive (AC-2.3.4c)")
+			By("verifying data and audit PVCs for removed ordinals 1 and 2 are reclaimed (AC-2.3.4c)")
 			for _, ordinal := range []string{"1", "2"} {
-				pvcName := fmt.Sprintf("data-%s-%s", scaleDownClusterName, ordinal)
-				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
-					"-o", "jsonpath={.metadata.name}")
-				output, err := utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred(),
-					"PVC %q must still exist after scale-down (reclaimPolicy governs cluster-delete only)", pvcName)
-				Expect(output).To(Equal(pvcName))
+				for _, prefix := range []string{"data", "audit"} {
+					pvcName := fmt.Sprintf("%s-%s-%s", prefix, scaleDownClusterName, ordinal)
+					Eventually(func(g Gomega) {
+						cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
+							"--ignore-not-found", "-o",
+							`jsonpath={.metadata.name}{" "}{.metadata.deletionTimestamp}`)
+						output, err := utils.Run(cmd)
+						g.Expect(err).NotTo(HaveOccurred())
+						fields := strings.Fields(output)
+						if len(fields) == 0 {
+							return
+						}
+						g.Expect(fields).To(HaveLen(2),
+							"PVC %q must be gone or have a deletionTimestamp", pvcName)
+						g.Expect(fields[0]).To(Equal(pvcName))
+					}, 2*time.Minute).Should(Succeed())
+				}
 			}
 		})
 
-		// neo-i4a: scale-UP after scale-down — proves the README claim
-		// that preserved PVCs re-attach and peers rejoin the quorum.
-		It("scales back up to 3 re-attaching the preserved PVCs (neo-i4a)", func() {
-			By("capturing the preserved PVC UIDs before scale-up")
-			pvcUIDs := map[string]string{}
-			for _, ordinal := range []string{"1", "2"} {
-				pvcName := fmt.Sprintf("data-%s-%s", scaleDownClusterName, ordinal)
-				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
-					"-o", "jsonpath={.metadata.uid}")
-				output, err := utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(output).NotTo(BeEmpty())
-				pvcUIDs[pvcName] = output
-			}
-
+		// neo-i4a: scale-UP after scale-down — fresh PVCs let peers rejoin the quorum.
+		It("scales back up to 3 with fresh volumes (neo-i4a)", func() {
 			By("patching spec.replicas back to 3")
 			cmd := exec.Command("kubectl", "patch", "nomadcluster", scaleDownClusterName, "-n", namespace,
 				"--type=merge", "-p", `{"spec":{"replicas":3}}`)
@@ -2463,16 +2460,6 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("true 3"), "autopilot should report a healthy 3-voter quorum")
 			}, 10*time.Minute, 10*time.Second).Should(Succeed())
-
-			By("verifying ordinals 1 and 2 re-attached the SAME PVCs (uid match)")
-			for pvcName, wantUID := range pvcUIDs {
-				cmd := exec.Command("kubectl", "get", "pvc", pvcName, "-n", namespace,
-					"-o", "jsonpath={.metadata.uid}")
-				output, err := utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(output).To(Equal(wantUID),
-					"PVC %q must be the same object post-scale-up — re-attach, not recreate", pvcName)
-			}
 		})
 	})
 

@@ -71,7 +71,16 @@ annotating the cluster with
 `nomad.hashicorp.com/accept-degraded-quorum: "true"`. Until then the
 `Ready` condition reports reason `DegradedQuorumNotAccepted`.
 
-PVCs for removed ordinals are **not deleted** by the operator. `spec.persistence.reclaimPolicy` governs cluster-*delete* behaviour only - scale-down preserves PVCs in every case so a subsequent scale-up can re-attach to existing data.
+The data and audit PVCs for removed ordinals are **reclaimed** on
+scale-down. A Nomad server's `data_dir` holds only its Raft state and
+node identity - the durable cluster state lives on the surviving
+leader - so a removed server that later rejoins on its old volume boots
+with a stale identity the leader rejects as a duplicate, and never
+returns to the voter set. Reclaiming the volumes means a subsequent
+scale-up provisions fresh ones and the rejoining servers reform quorum
+cleanly. `spec.persistence.reclaimPolicy` governs cluster-*delete*
+behaviour separately. Back up audit logs off-cluster if you need a
+removed server's audit trail past a scale-down.
 
 Two operational rules:
 
