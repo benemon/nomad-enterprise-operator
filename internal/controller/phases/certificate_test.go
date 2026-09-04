@@ -26,6 +26,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -445,6 +446,66 @@ func TestUserCANeverRotates(t *testing.T) {
 	for _, e := range events {
 		if strings.Contains(e, "CARotation") {
 			t.Fatalf("rotation event fired for a user-provided CA: %v", events)
+		}
+	}
+}
+
+// The cert must not vary with replica count either: enumerated
+// per-ordinal SANs re-issued the cert on scale-up of clusters created
+// below their eventual size, and checksum/secrets then rolled the
+// surviving servers mid-scale — the same failure class as the
+// affinity gate, one layer down.
+func TestServerDNSSANsReplicaInvariant(t *testing.T) {
+	phase := &CertificatePhase{PhaseContext: &PhaseContext{}}
+	one := newTestCluster("ns", "nomad")
+	one.Spec.Replicas = 1
+	five := newTestCluster("ns", "nomad")
+	five.Spec.Replicas = 5
+
+	sansOne := phase.serverDNSSANs(one)
+	sansFive := phase.serverDNSSANs(five)
+	if !reflect.DeepEqual(sansOne, sansFive) {
+		t.Errorf("cert SANs vary with replica count:\nN=1: %v\nN=5: %v", sansOne, sansFive)
+	}
+	want := []string{
+		"server.global.nomad",
+		"*.nomad-headless.ns.svc.cluster.local",
+		"*.nomad-headless.ns.svc",
+		"nomad-internal.ns.svc.cluster.local",
+		"nomad-internal.ns.svc",
+		"localhost",
+	}
+	if !reflect.DeepEqual(sansOne, want) {
+		t.Errorf("SAN set = %v, want %v", sansOne, want)
+	}
+
+	// The wildcards must actually verify for real pod hostnames, both
+	// FQDN forms, at any ordinal.
+	ca, err := tlspkg.GenerateCA("test")
+	if err != nil {
+		t.Fatalf("GenerateCA() error = %v", err)
+	}
+	issued, err := tlspkg.IssueCertificate(ca, tlspkg.CertificateRequest{
+		CommonName: "server.global.nomad",
+		DNSNames:   sansOne,
+		TTL:        time.Hour,
+		IsServer:   true,
+	})
+	if err != nil {
+		t.Fatalf("IssueCertificate() error = %v", err)
+	}
+	block, _ := pem.Decode(issued.CertPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("ParseCertificate() error = %v", err)
+	}
+	for _, host := range []string{
+		"nomad-0.nomad-headless.ns.svc.cluster.local",
+		"nomad-7.nomad-headless.ns.svc.cluster.local",
+		"nomad-0.nomad-headless.ns.svc",
+	} {
+		if err := cert.VerifyHostname(host); err != nil {
+			t.Errorf("VerifyHostname(%s) error = %v", host, err)
 		}
 	}
 }

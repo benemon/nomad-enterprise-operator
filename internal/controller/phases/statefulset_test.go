@@ -283,6 +283,47 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 	}
 }
 
+// Every downward-API env source must pin apiVersion: the apiserver
+// defaults it on the stored object, and an unset value here made the
+// env DeepEqual report drift on every reconcile.
+func TestEnvFieldRefsPinAPIVersion(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	sts := phase.buildStatefulSet(context.Background(), newTestCluster("ns", "nomad"))
+	for _, e := range sts.Spec.Template.Spec.Containers[0].Env {
+		if e.ValueFrom != nil && e.ValueFrom.FieldRef != nil && e.ValueFrom.FieldRef.APIVersion != "v1" {
+			t.Errorf("env %s fieldRef apiVersion = %q, want v1", e.Name, e.ValueFrom.FieldRef.APIVersion)
+		}
+	}
+}
+
+// The delivery guarantee rolls the servers only when audit is enabled:
+// with audit off the rendered HCL has no audit block, so the lever is
+// inert and must stay out of the restart checksum.
+func TestChecksumTracksAuditDelivery(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	build := func(enabled bool, guarantee string) string {
+		cluster := newTestCluster("ns", "nomad")
+		cluster.Spec.Server.Audit.Enabled = ptr.To(enabled)
+		cluster.Spec.Server.Audit.DeliveryGuarantee = guarantee
+		return phase.buildStatefulSet(context.Background(), cluster).
+			Spec.Template.Annotations["checksum/config"]
+	}
+	if build(true, "enforced") == build(true, "best-effort") {
+		t.Error("audit enabled: changing deliveryGuarantee must change checksum/config")
+	}
+	if build(false, "enforced") != build(false, "best-effort") {
+		t.Error("audit disabled: deliveryGuarantee must not affect checksum/config")
+	}
+}
+
 // Scale-up must step one replica per reconcile, gated on the previous
 // replica reaching the voter set (neo-tma: simultaneous joins race
 // Nomad's member reconciliation during leadership churn).
@@ -299,6 +340,11 @@ func TestStatefulSetScaleUpSerialized(t *testing.T) {
 		{"holds until new replica votes", 2,
 			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 1}, 2, true},
 		{"holds without autopilot status", 1, nil, 1, true},
+		// A stale pre-scale-down status (voters above the replica
+		// count) must hold, not step — with >= it walked the whole
+		// ladder unsettled.
+		{"holds on stale-high voter count", 1,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 5}, 1, true},
 		{"final step reaches target", 2,
 			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 2}, 3, false},
 	}

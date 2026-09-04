@@ -86,6 +86,32 @@ cleanly. `spec.persistence.reclaimPolicy` governs cluster-*delete*
 behaviour separately. Back up audit logs off-cluster if you need a
 removed server's audit trail past a scale-down.
 
+## Scaling up
+
+Scale-up from a live cluster is serialized: the operator adds one
+replica per reconcile and waits for the new server to join the voter
+set before adding the next. Simultaneous joins race Nomad's member
+reconciliation - leadership churn mid-join can strand a server in an
+add/remove loop - while a lone join meets a settled leader. Initial
+cluster creation still starts all replicas at once, as
+`bootstrap_expect` requires. A scale-up stalled at fewer voters than
+replicas is visible in `status.autopilot`; restarting the affected pod
+forces a fresh gossip join and unsticks it.
+
+## Single-server address healing
+
+A lone server rescheduled onto a new pod IP keeps its Raft ID but not
+its address, and Nomad cannot amend the sole voter's own Raft entry -
+there is no quorum to vote the change through, so a later scale-up
+would strand at one voter. The server start wrapper closes this at
+boot: when the rendered config says one replica, Raft state exists,
+and no sibling pod resolves in the headless service, it rewrites the
+self-entry to the current pod IP via Nomad's native `peers.json`
+recovery. The guards matter more than the write - a multi-server
+cluster must never be reset to a self-only configuration, so the heal
+never fires while any sibling exists. Multi-voter clusters need no
+help: the leader repairs peer addresses natively.
+
 Two operational rules:
 
 - **Do not `kubectl delete pod <cluster>-N` directly.** The operator's scale-down contract is "user adjusts `spec.replicas`." Out-of-band pod deletion does not trigger Raft peer removal; the dead Raft entry sits there until Nomad autopilot's `cleanupDeadServers` eventually removes it (if enabled).

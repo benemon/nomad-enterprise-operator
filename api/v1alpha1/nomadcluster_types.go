@@ -604,10 +604,10 @@ type CASecretKeys struct {
 	PrivateKey string `json:"privateKey,omitempty"`
 }
 
-// AuditSpec defines audit logging configuration. Delivery guarantee
-// (enforced), format (json), and rotation (24h × 15 files) are
-// operator-owned — users needing different log shipping
-// should ship via sidecar, not rotation tuning.
+// AuditSpec defines audit logging configuration. Format (json) and
+// rotation (24h × 15 files) are operator-owned — users needing
+// different log shipping should ship via sidecar, not rotation
+// tuning. Delivery is the one user lever, enforced by default.
 type AuditSpec struct {
 	// Enabled determines if audit logging is enabled.
 	// When enabled, an audit volume is automatically created.
@@ -631,7 +631,7 @@ type AuditSpec struct {
 	// DeliveryGuarantee controls audit event delivery. enforced blocks
 	// the API response until the event is persisted (fails closed);
 	// best-effort keeps serving when the sink cannot keep up (fails
-	// open). Audit shape is otherwise operator-owned.
+	// open).
 	// +kubebuilder:validation:Enum=enforced;best-effort
 	// +kubebuilder:default=enforced
 	// +optional

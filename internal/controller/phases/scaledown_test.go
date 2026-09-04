@@ -19,6 +19,7 @@ package phases
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -32,10 +33,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
@@ -202,13 +206,10 @@ func fetchSTS(t *testing.T, f *scaleDownFixture) *appsv1.StatefulSet {
 	return updated
 }
 
-// assertFinalizeReclaims runs finalize on a fixture whose STS carries
-// stsReplicas and whose recorded removal count covers a 3→1 gap, then
-// asserts the removed ordinals' data+audit PVCs are gone (missing
-// audit-nomad-1 proves NotFound tolerance) and ordinal 0's survive.
-func assertFinalizeReclaims(t *testing.T, stsReplicas int32) {
-	t.Helper()
-	f := newScaleDownFixture(t, stsReplicas, 1)
+// finalize must reclaim the removed ordinals' data+audit PVCs (missing
+// audit-nomad-1 proves NotFound tolerance) and keep ordinal 0's.
+func TestScaleDown_FinalizeReclaimsRemovedOrdinalPVCs(t *testing.T) {
+	f := newScaleDownFixture(t, 3, 1)
 	ctx := context.Background()
 	// finalize is only ever reached with the gap fully recorded.
 	f.cluster.Status.ScaleDown = &nomadv1alpha1.ScaleDownStatus{
@@ -246,16 +247,80 @@ func assertFinalizeReclaims(t *testing.T, stsReplicas int32) {
 	}
 }
 
-func TestScaleDown_FinalizeReclaimsRemovedOrdinalPVCs(t *testing.T) {
-	assertFinalizeReclaims(t, 3)
-}
+// A retry after a failed PVC delete re-enters Execute with the STS
+// already patched down, where the no-gap branch must resume the
+// reclaim through finalize rather than clearing status over the
+// stale PVCs.
+func TestScaleDown_ExecuteResumesReclaimAfterFailedDelete(t *testing.T) {
+	ctx := context.Background()
+	cluster := newTestCluster("ns", "nomad")
+	cluster.Spec.Replicas = 1
+	cluster.Spec.Server.ACL.Enabled = ptr.To(false)
+	cluster.Status.ScaleDown = &nomadv1alpha1.ScaleDownStatus{
+		RemovedPeers: []string{"peer-1", "peer-2"},
+	}
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "ns"},
+		Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(int32(1))},
+	}
+	objs := make([]runtime.Object, 0, 8)
+	objs = append(objs, cluster, sts)
+	for _, name := range []string{
+		"data-nomad-0", "audit-nomad-0",
+		"data-nomad-1", "audit-nomad-1", "data-nomad-2", "audit-nomad-2",
+	} {
+		objs = append(objs, &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		})
+	}
 
-// A retry after a failed PVC delete re-enters finalize with the STS
-// already patched down to the desired count. The reclaim must still
-// run — deriving the ordinal range from the removal count, not the
-// lowered replica count, is what makes it retry-safe (neo-tma).
-func TestScaleDown_FinalizeReclaimsAfterReplicasAlreadyPatched(t *testing.T) {
-	assertFinalizeReclaims(t, 1)
+	failed := false
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithRuntimeObjects(objs...).
+		WithStatusSubresource(cluster).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && !failed {
+					failed = true
+					return apierrors.NewInternalError(fmt.Errorf("induced transient failure"))
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	phase := NewScaleDownPhase(&PhaseContext{
+		Client: fakeClient,
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	})
+
+	if result := phase.Execute(ctx, cluster); result.Error == nil {
+		t.Fatal("first Execute() should surface the induced delete failure")
+	}
+	if cluster.Status.ScaleDown == nil {
+		t.Fatal("status.scaleDown must survive a failed reclaim")
+	}
+
+	if result := phase.Execute(ctx, cluster); result.Error != nil {
+		t.Fatalf("retry Execute() error = %v", result.Error)
+	}
+	for _, name := range []string{"data-nomad-1", "audit-nomad-1", "data-nomad-2", "audit-nomad-2"} {
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "ns"},
+			&corev1.PersistentVolumeClaim{})
+		if !apierrors.IsNotFound(err) {
+			t.Errorf("Get(%s) error = %v, want NotFound after retry", name, err)
+		}
+	}
+	for _, name := range []string{"data-nomad-0", "audit-nomad-0"} {
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "ns"},
+			&corev1.PersistentVolumeClaim{}); err != nil {
+			t.Errorf("Get(%s) error = %v, want PVC to survive", name, err)
+		}
+	}
+	if cluster.Status.ScaleDown != nil {
+		t.Error("status.scaleDown must clear once every reclaim is accepted")
+	}
 }
 
 // peersAtReplicas returns a synthetic peer list, nomad-0..N-1, with

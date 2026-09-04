@@ -79,15 +79,12 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	desiredReplicas := cluster.Spec.Replicas
 
 	if currentReplicas <= desiredReplicas {
-		// No gap to close. If a prior operation left status.scaleDown
-		// populated (e.g. the operator was killed between patching the
-		// STS and clearing status), clear it now.
+		// No gap to close. A populated status.scaleDown means a prior
+		// operation was interrupted between patching the STS and
+		// finishing cleanup — resume through finalize; clearing status
+		// here instead would orphan the stale PVCs.
 		if cluster.Status.ScaleDown != nil {
-			patchBase := cluster.DeepCopy()
-			cluster.Status.ScaleDown = nil
-			if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
-				return Error(err, "Failed to clear status.scaleDown")
-			}
+			return p.finalize(ctx, cluster, sts, desiredReplicas)
 		}
 		// D2e (neo-1ve.5): no operation in flight.
 		metrics.ScaleDownInProgress.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)

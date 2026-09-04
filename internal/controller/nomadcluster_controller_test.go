@@ -807,8 +807,7 @@ var _ = Describe("NomadCluster Controller", func() {
 
 			// Scale-up is serialized (neo-tma): each step is gated on
 			// status.autopilot confirming the previous replica joined
-			// the voter set, so the ladder is driven voter count by
-			// voter count.
+			// the voter set.
 			stsReplicas := func() int32 {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster",

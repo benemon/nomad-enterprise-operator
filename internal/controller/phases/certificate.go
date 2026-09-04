@@ -576,27 +576,15 @@ func (p *CertificatePhase) serverDNSSANs(cluster *nomadv1alpha1.NomadCluster) []
 		region = "global"
 	}
 
-	replicas := cluster.Spec.Replicas
-	if replicas == 0 {
-		replicas = 3
-	}
-
-	dns := []string{
+	// Enumerating pod SANs per replica made the cert vary with
+	// spec.replicas, rolling the surviving servers mid-scale (the
+	// neo-tma template-invariance class).
+	return []string{
 		fmt.Sprintf("server.%s.nomad", region),
-	}
-
-	for i := int32(0); i < replicas; i++ {
-		dns = append(dns,
-			fmt.Sprintf("%s-%d.%s-headless.%s.svc.cluster.local", cluster.Name, i, cluster.Name, cluster.Namespace),
-			fmt.Sprintf("%s-%d.%s-headless.%s.svc", cluster.Name, i, cluster.Name, cluster.Namespace),
-		)
-	}
-
-	dns = append(dns,
+		fmt.Sprintf("*.%s-headless.%s.svc.cluster.local", cluster.Name, cluster.Namespace),
+		fmt.Sprintf("*.%s-headless.%s.svc", cluster.Name, cluster.Namespace),
 		fmt.Sprintf("%s-internal.%s.svc.cluster.local", cluster.Name, cluster.Namespace),
 		fmt.Sprintf("%s-internal.%s.svc", cluster.Name, cluster.Namespace),
 		"localhost",
-	)
-
-	return dns
+	}
 }

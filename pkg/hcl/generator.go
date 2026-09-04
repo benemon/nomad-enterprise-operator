@@ -170,8 +170,7 @@ func (g *Generator) buildTemplateData() templateData {
 		// Audit shape is operator-owned per ADR 0003 ("Fields dropped
 		// in v1"): JSON only, 24h rotation × 15 files (~15 days).
 		// Users needing different log shipping use a sidecar, not
-		// rotation tuning. Delivery is the one user lever: enforced by
-		// default, best-effort opt-in via spec.server.audit.
+		// rotation tuning.
 		AuditDeliveryGuarantee: AuditDeliveryGuarantee(cluster),
 		AuditFormat:            "json",
 		AuditRotateDur:         "24h",

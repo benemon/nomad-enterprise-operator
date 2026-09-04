@@ -2433,6 +2433,70 @@ spec:
 					}, 2*time.Minute).Should(Succeed())
 				}
 			}
+
+			By("verifying the survivor was neither restarted nor self-healed during scale-down")
+			// The config says 1 replica while the removed peers' pods
+			// drain, so the DNS-sibling guard is what keeps peers.json
+			// unwritten here.
+			cmd = exec.Command("kubectl", "get", "pod", scaleDownClusterName+"-0", "-n", namespace,
+				"-o", "jsonpath={.status.containerStatuses[0].restartCount}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("0"), "scale-down must not restart the surviving server")
+
+			logs, _ := utils.Run(exec.Command("kubectl", "logs",
+				"pod/"+scaleDownClusterName+"-0", "-n", namespace))
+			Expect(logs).NotTo(ContainSubstring("wrote peers.json"),
+				"the self-heal must not fire while removed peers' pods still resolve")
+		})
+
+		// neo-ixt: a lone server rescheduled with a new pod IP keeps its
+		// Raft ID but strands its address in the Raft config, and the
+		// member reconcile cannot amend the sole voter's own entry. The
+		// start wrapper rewrites the self-entry at boot; the scale-up
+		// spec below depends on this healed state.
+		It("self-heals the single voter across a crash with an IP change (neo-ixt)", func() {
+			By("recording the pod IP and deleting the pod to force a reschedule")
+			cmd := exec.Command("kubectl", "get", "pod", scaleDownClusterName+"-0", "-n", namespace,
+				"-o", "jsonpath={.status.podIP}")
+			oldIP, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "delete", "pod", scaleDownClusterName+"-0", "-n", namespace,
+				"--wait=true", "--timeout=2m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the replacement pod to become ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", scaleDownClusterName+"-0", "-n", namespace,
+					"-o", "jsonpath={.status.containerStatuses[0].ready}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true"))
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the wrapper healed the raft self-entry")
+			cmd = exec.Command("kubectl", "get", "pod", scaleDownClusterName+"-0", "-n", namespace,
+				"-o", "jsonpath={.status.podIP}")
+			newIP, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(newIP).NotTo(Equal(oldIP), "reschedule should change the pod IP; if equal the scenario is vacuous")
+
+			cmd = exec.Command("kubectl", "logs", scaleDownClusterName+"-0", "-n", namespace)
+			logs, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logs).To(ContainSubstring("wrote peers.json"),
+				"start wrapper must rewrite the single-server self-entry on reschedule")
+
+			By("verifying the cluster is healthy on the new address")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.autopilot.healthy} {.status.autopilot.voters}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true 1"))
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
 		// neo-i4a: scale-UP after scale-down — fresh PVCs let peers rejoin the quorum.
@@ -2460,6 +2524,54 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("true 3"), "autopilot should report a healthy 3-voter quorum")
 			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		// The self-heal guards must keep peers.json writes out of every
+		// multi-server situation: a reset to a self-only config there
+		// discards live peers. A steady-state crash exercises the
+		// bootstrap_expect and DNS-sibling guards.
+		It("never writes peers.json on a multi-server restart", func() {
+			By("deleting pod 1 of the 3-server cluster")
+			cmd := exec.Command("kubectl", "delete", "pod", scaleDownClusterName+"-1", "-n", namespace,
+				"--wait=true", "--timeout=2m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for the quorum to recover natively")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,
+					"-o", "jsonpath={.status.autopilot.healthy} {.status.autopilot.voters}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("true 3"))
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying no pod ever ran the single-server self-heal")
+			for i := 0; i < 3; i++ {
+				pod := fmt.Sprintf("%s-%d", scaleDownClusterName, i)
+				logs, err := utils.Run(exec.Command("kubectl", "logs", "pod/"+pod, "-n", namespace))
+				Expect(err).NotTo(HaveOccurred(), "log retrieval must succeed for %s", pod)
+				Expect(logs).NotTo(ContainSubstring("wrote peers.json"),
+					"%s must not write peers.json while siblings exist", pod)
+			}
+
+			By("exercising the DNS-sibling guard directly against live sibling records")
+			// The catastrophic path is a single-server config meeting a
+			// multi-server cluster. Run the guard's decision pipeline
+			// against the real headless DNS: with siblings resolvable
+			// it must refuse.
+			guard := `ADDRS=$(nslookup ` + scaleDownClusterName + `-headless.` + namespace + `.svc.cluster.local 2>/dev/null |
+  awk '/^Name:/{n=1;next} /^Address/{if(n)print $2}' || true)
+SELF=$(hostname -i | awk '{print $1}')
+if [ -n "$ADDRS" ] && echo "$ADDRS" | grep -qx "$SELF" &&
+  [ "$(echo "$ADDRS" | grep -cvx "$SELF")" -eq 0 ]
+then echo WOULD-WRITE; else echo GUARD-ABORTED; fi`
+			cmd = exec.Command("kubectl", "exec", scaleDownClusterName+"-0", "-n", namespace,
+				"--", "sh", "-c", guard)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("GUARD-ABORTED"),
+				"the sibling guard must refuse the self-heal while peers resolve in DNS")
 		})
 	})
 
@@ -5084,18 +5196,28 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("waiting for the operator to apply the target image to the StatefulSet")
+			By("waiting for the StatefulSet controller to begin the roll")
 			// Convergence below (ready==3, revisions equal) is
 			// indistinguishable from a roll that has not started, so a
 			// poll racing the operator's reconcile declares victory on
-			// the old image. Gate on the roll having begun first.
+			// the old image. Gate on updateRevision moving past the
+			// pre-patch revision: that proves the controller observed
+			// the new template, not merely that the API stored it.
+			cmd = exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.updateRevision}")
+			preRollRevision, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
-					"-o", "jsonpath={.spec.template.spec.containers[0].image}")
+					"-o", "jsonpath={.spec.template.spec.containers[0].image} {.status.updateRevision}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("hashicorp/nomad:"+toTag),
+				fields := strings.Fields(output)
+				g.Expect(fields).To(HaveLen(2))
+				g.Expect(fields[0]).To(Equal("hashicorp/nomad:"+toTag),
 					"operator has not applied the target image yet")
+				g.Expect(fields[1]).NotTo(Equal(preRollRevision),
+					"StatefulSet controller has not started the roll yet")
 			}, 2*time.Minute, 2*time.Second).Should(Succeed())
 
 			By("rolling through the upgrade with the quorum floor asserted at every poll")

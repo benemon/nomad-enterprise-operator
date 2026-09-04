@@ -64,8 +64,6 @@ var _ = Describe("ADR 0003 dropped fields are pruned from the schema", func() {
 			map[string]interface{}{"server": map[string]interface{}{"acl": map[string]interface{}{"bootstrapSecretName": "x"}}}},
 		{"server.autopilot block", []string{"server", "autopilot"},
 			map[string]interface{}{"server": map[string]interface{}{"autopilot": map[string]interface{}{"cleanupDeadServers": true}}}},
-		// server.audit.deliveryGuarantee is no longer dropped: exposed
-		// as the one audit lever per the 2026-09-03 ADR 0003 amendment.
 		{"server.audit.format", []string{"server", "audit", "format"},
 			map[string]interface{}{"server": map[string]interface{}{"audit": map[string]interface{}{"format": "json"}}}},
 		{"server.audit.rotateDuration", []string{"server", "audit", "rotateDuration"},
