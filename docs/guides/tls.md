@@ -3,7 +3,7 @@
 mTLS is always enabled - no configuration is required. The operator automatically:
 
 - Generates a self-signed ECDSA P-256 CA (or uses a user-provided CA)
-- Issues server certificates with correct Nomad SANs (`server.<region>.nomad`, pod FQDNs, service FQDNs)
+- Issues server certificates with the Nomad SANs: `server.<region>.nomad`, a wildcard covering every server pod (`*.<cluster>-headless.<ns>.svc.cluster.local`), and the internal service FQDNs. The wildcard keeps the certificate identical at every replica count, so scaling never re-issues it
 - Distributes a CA bundle ConfigMap for external consumers
 - Rotates certificates approaching expiry (30-day warning window)
 - Configures `verify_server_hostname = true` in the Nomad HCL for RPC mTLS
@@ -72,9 +72,10 @@ a zero-trust-gap rollover -
 3. *Retire*: when the old CA certificate finally expires it drops out
    of the trust bundle on its own.
 
-Peers never disagree on the trust root at any point, and a mid-rotation
-operator restart resumes where it left off (rotation state lives in the
-`<cluster>-ca` Secret, not operator memory). Status signals:
+Every rotation stage serves a trust union covering both CAs (pinned by
+the rotation tests), and rotation state lives in the `<cluster>-ca`
+Secret rather than operator memory, so an operator restart resumes the
+rotation from the recorded stage. Status signals:
 
 - `status.certificateAuthority.expiryTime` - when the active CA expires.
 - `status.certificateAuthority.renewalRequiredBy` - for

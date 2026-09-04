@@ -27,17 +27,13 @@ kubectl get nomadcluster nomad -o jsonpath='{.status.nomadVersion}'
 **2. Keyring reachability.** What a snapshot needs at restore time
 depends on the keyring of the cluster that took it:
 
-- **`aead` (the default)**: the snapshot is self-contained - it
-  restores with no external dependency, because it carries the
-  key-encryption key in cleartext. That is also its risk: treat the
-  artifact itself as key material (see the README's
-  [Keyrings](../guides/keyrings.md) section).
-- **External KMS keyring**: the snapshot holds only wrapped keys. The
-  restoring cluster must be configured with the same
-  `spec.server.keyrings` entries and must be able to reach at least
-  one of them (any one member of an HA set suffices). Without KMS
-  reachability the restore completes but Variables and workload
-  identities are undecryptable.
+- **`aead` (the default)**: the snapshot restores with no external
+  dependency; treat the artifact itself as key material (see
+  [Keyrings](../guides/keyrings.md)).
+- **External KMS keyring**: the restoring cluster needs the same
+  `spec.server.keyrings` entries and reachability to at least one of
+  them. Restore-time key semantics are Nomad's - see [Nomad key
+  management](https://developer.hashicorp.com/nomad/docs/manage/key-management).
 
 ## Scenario 1: Lost Raft quorum
 
@@ -54,9 +50,13 @@ kubectl get nomadcluster nomad -o jsonpath='{.status.autopilot}'
 ```
 
 If a **majority of PVCs are lost**, the Raft log is unrecoverable in
-place. Do not attempt peers.json surgery inside the StatefulSet -
-recover by restore: treat it as Scenario 4 (delete the cluster,
-recreate, restore the latest snapshot).
+place. On multi-server clusters, do not attempt peers.json surgery
+inside the StatefulSet - recover by restore: treat it as Scenario 4
+(delete the cluster, recreate, restore the latest snapshot).
+Single-server clusters are the exception: the start wrapper performs
+the peers.json repair itself when a lone server boots with a stale
+Raft address (see [single-server address
+healing](../guides/scaling.md#single-server-address-healing)).
 
 ## Scenario 2: One replica's PVC lost or corrupted
 
@@ -64,12 +64,15 @@ A single lost replica is within Raft fault tolerance (3- and 5-server
 clusters). Replace the member; the survivors replicate state to it:
 
 ```sh
-kubectl delete pvc data-nomad-2 --wait=false
+kubectl delete pvc data-nomad-2 audit-nomad-2 --wait=false
 kubectl delete pod nomad-2
-# The StatefulSet recreates the pod; a fresh PVC provisions; the
+# The StatefulSet recreates the pod; fresh PVCs provision; the
 # server rejoins and catches up from the leader.
 kubectl get nomadcluster nomad -o jsonpath='{.status.autopilot.healthy}'
 ```
+
+Audit is enabled by default, so each replica carries an `audit-` PVC
+beside its `data-` PVC. Delete both for the replaced member.
 
 Autopilot (`cleanup_dead_servers`, operator-owned) removes the stale
 Raft entry for the old instance automatically.
@@ -77,23 +80,27 @@ Raft entry for the old instance automatically.
 ## Scenario 3: Accidental CR deletion
 
 Under the default `reclaimPolicy: Delete`, deleting the NomadCluster
-removes the data PVCs with it - recovery is restore-from-snapshot
-(Scenario 4). Keep a `NomadSnapshot` schedule running; it is the
-recovery mechanism this operator supports.
+removes every labelled PVC with it, data and audit both - recovery is
+restore-from-snapshot (Scenario 4). Keep a `NomadSnapshot` schedule
+running; it is the recovery mechanism this operator supports.
 
-**If you opted into `reclaimPolicy: Retain`**: the PVCs survive, but a
-recreated same-name cluster does **not** recover automatically.
-Validated observation (operator v0.2.x, Nomad 2.0.x): the recreated
-pods adopt the old Raft state, which pins peer addresses to the
-previous pods' IPs; no member of the new cluster appears in the stored
-configuration, no leader can be elected, and the pods crash-loop
-(enforced audit blocks the health endpoint while leaderless, so
-probes restart the pods before any recovery could complete). Recovery
-from retained PVCs requires Nomad's manual outage-recovery procedure
-(`peers.json` - see Nomad's outage recovery documentation), performed
-against the crash-looping pods' current IPs and node IDs. Where a
-snapshot exists, prefer Scenario 4: it is simpler and validated
-end-to-end.
+**If you opted into `reclaimPolicy: Retain`**: the PVCs survive.
+A recreated single-server cluster recovers automatically since
+operator 0.4.1: the start wrapper detects the lone server's stale
+Raft address and repairs it at boot (see [single-server address
+healing](../guides/scaling.md#single-server-address-healing)). A
+recreated multi-server cluster does not recover automatically. The
+recreated pods adopt the old Raft state, which pins peer addresses to
+the previous pods' IPs; no member of the new cluster appears in the
+stored configuration, no leader can be elected, and the pods
+crash-loop (enforced audit blocks the health endpoint while
+leaderless, so probes restart the pods before any recovery could
+complete). Recovery from retained multi-server PVCs requires Nomad's
+manual [outage recovery
+procedure](https://developer.hashicorp.com/nomad/docs/manage/outage-recovery),
+performed against the crash-looping pods' current IPs and node IDs.
+Where a snapshot exists, prefer Scenario 4. It is simpler and
+validated end-to-end.
 
 ## Scenario 4: Deletion with reclaimPolicy: Delete - restore from snapshot
 
@@ -172,6 +179,13 @@ contents; recovery needs a backup or manual procedure).
 are your custody, not the operator's; they are not in this table.)
 
 ### Backup
+
+!!! warning
+    Since operator 0.4.1, scaling down deletes the removed ordinals'
+    data **and audit** PVCs. That reclamation is permanent and is not
+    covered by any snapshot: `NomadSnapshot` captures Raft state, not
+    audit logs. Ship audit logs off-cluster if you need them past a
+    scale-down.
 
 Capture the operator-state objects by label selector; include them in
 any namespace backup tooling (Velero and similar) explicitly:

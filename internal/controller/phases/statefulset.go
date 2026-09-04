@@ -25,8 +25,10 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +42,16 @@ import (
 // StatefulSetPhase creates and manages the Nomad server StatefulSet.
 type StatefulSetPhase struct {
 	*PhaseContext
+}
+
+// auditDeliveryChecksumValue keeps the delivery guarantee out of the
+// restart checksum while audit is disabled: the rendered HCL carries no
+// audit block then, so a lever change must not roll the servers.
+func auditDeliveryChecksumValue(cluster *nomadv1alpha1.NomadCluster) string {
+	if !cluster.Spec.Server.Audit.IsEnabled() {
+		return ""
+	}
+	return hcl.AuditDeliveryGuarantee(cluster)
 }
 
 // NewStatefulSetPhase creates a new StatefulSetPhase.
@@ -80,6 +92,33 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		sts.Spec.Replicas = existing.Spec.Replicas
 	}
 
+	// Scale-up is serialized: one replica per reconcile, gated on the
+	// previous server reaching the voter set. Simultaneous joins race
+	// Nomad's member reconciliation — leadership churn mid-join can
+	// strand a server in an AddNonvoter/RemoveServer loop (neo-tma) —
+	// while a lone join meets a settled leader. Initial creation still
+	// starts all replicas at once: bootstrap_expect needs them.
+	stepping := false
+	if existing.Spec.Replicas != nil && *sts.Spec.Replicas > *existing.Spec.Replicas {
+		// Exact match, not >=: a stale status carrying a pre-scale-down
+		// voter count (e.g. 5 after 5→1) would otherwise walk the whole
+		// ladder without any join settling. Stale-high now holds until
+		// the status phase refreshes.
+		next := *existing.Spec.Replicas
+		ap := cluster.Status.Autopilot
+		if ap != nil && ap.Healthy && int32(ap.Voters) == *existing.Spec.Replicas {
+			next++
+		}
+		if next < *sts.Spec.Replicas {
+			stepping = true
+			if next == *existing.Spec.Replicas {
+				p.Log.Info("Scale-up holding: previous replica not yet a settled voter",
+					"replicas", next, "target", *sts.Spec.Replicas)
+			}
+			sts.Spec.Replicas = &next
+		}
+	}
+
 	// Update StatefulSet if spec changed
 	if update, reason := p.needsUpdate(existing, sts); update {
 		// Preserve fields that shouldn't be updated
@@ -93,6 +132,15 @@ func (p *StatefulSetPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.N
 		}
 	}
 
+	if stepping {
+		// Revisit soon for the next step, but let the chain finish: the
+		// voter gate reads status.autopilot, which ClusterStatusPhase
+		// refreshes later in the chain — a short-circuiting Requeue here
+		// would starve that refresh and deadlock the ladder.
+		if p.RevisitAfter == 0 || p.RevisitAfter > 15*time.Second {
+			p.RevisitAfter = 15 * time.Second
+		}
+	}
 	return OK()
 }
 
@@ -138,8 +186,45 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// quorum never forms (GH #11). The config Secret is shared across
 	// pods, so the exclusion happens here; the filtered copy lands on a
 	// memory-backed emptyDir to keep the gossip key off node disk.
+	//
+	// The peers.json block prevents single-voter address staleness
+	// (neo-ixt): a lone server restarting with a new pod IP keeps its
+	// Raft ID but not its address, and Nomad's member reconcile cannot
+	// amend the sole voter's own entry — it aborts before ever adding
+	// new servers, so a later scale-up strands at one voter. Guards:
+	// bootstrap_expect = 1 (a multi-server config must never be reset
+	// to self-only), existing raft state (fresh bootstraps and emptyDir
+	// restarts stay on the normal path), and no sibling in headless DNS
+	// (spec.replicas may already say 1 while scale-down peers are still
+	// voters; their pods outlive their Raft entries, so a persisting
+	// sibling means abort). Removed peers' records may briefly outlive
+	// a completed scale-down — raft removal precedes pod deletion — so
+	// the wait retries until the answer is clean or the window closes.
+	// The guard fails closed — a skipped heal costs one more restart; a
+	// wrong heal resets a multi-server Raft configuration. Address rows
+	// are taken only after Name lines (the resolver's own address line
+	// would otherwise count).
 	startCommand := fmt.Sprintf(
-		`grep -vF "\"${POD_NAME}.%s-headless.%s.svc.cluster.local\"" /nomad/config/server.hcl > /nomad/config-runtime/server.hcl && exec nomad agent -config=/nomad/config-runtime/server.hcl`,
+		`NODE_ID=$(cat /nomad/data/server/node-id 2>/dev/null || true)
+if [ -n "$NODE_ID" ] && [ -n "${POD_IP}" ] && grep -q 'bootstrap_expect = 1$' /nomad/config/server.hcl; then
+  ALONE=""
+  for i in $(seq 1 30); do
+    ADDRS=$(nslookup %[1]s-headless.%[2]s.svc.cluster.local 2>/dev/null | awk '/^Name:/{n=1;next} /^Address/{if(n)print $2}' || true)
+    if [ -n "$ADDRS" ] && echo "$ADDRS" | grep -qx "${POD_IP}" &&
+      [ "$(echo "$ADDRS" | grep -cvx "${POD_IP}")" -eq 0 ]; then
+      ALONE=yes
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ALONE" = yes ]; then
+    case "${POD_IP}" in *:*) SELF_ADDR="[${POD_IP}]";; *) SELF_ADDR="${POD_IP}";; esac
+    echo "[{\"id\":\"$NODE_ID\",\"address\":\"$SELF_ADDR:4647\",\"non_voter\":false}]" > /nomad/data/server/raft/peers.json.tmp
+    mv /nomad/data/server/raft/peers.json.tmp /nomad/data/server/raft/peers.json
+    echo "wrote peers.json: single-server raft self-entry pinned to $SELF_ADDR"
+  fi
+fi
+grep -vF "\"${POD_NAME}.%[1]s-headless.%[2]s.svc.cluster.local\"" /nomad/config/server.hcl > /nomad/config-runtime/server.hcl && exec nomad agent -config=/nomad/config-runtime/server.hcl`,
 		cluster.Name, cluster.Namespace)
 
 	// Build pod spec
@@ -202,11 +287,14 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 
 	// Pod anti-affinity is operator-owned per ADR 0003: preferred
 	// (required is a footgun on small clusters), weight 100, hostname
-	// topology, applied at replicas >= 3. Multi-zone spreading uses the
-	// user-facing spec.topologySpreadConstraints instead.
-	if replicas >= 3 {
-		podSpec.Affinity = buildOperatorAffinity(cluster)
-	}
+	// topology. Applied at every replica count: preferred scheduling is
+	// inert with nothing to avoid, and gating it on replicas makes the
+	// pod template vary with scale — the resulting rolling restart of a
+	// lone survivor changes its IP behind its Raft ID, and a
+	// single-voter leader cannot repair its own stale address entry
+	// (neo-tma). Multi-zone spreading uses the user-facing
+	// spec.topologySpreadConstraints instead.
+	podSpec.Affinity = buildOperatorAffinity(cluster)
 
 	// Add topology spread constraints
 	if len(cluster.Spec.TopologySpreadConstraints) > 0 {
@@ -219,14 +307,15 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// replica change.
 	keyringsJSON, _ := json.Marshal(p.Keyrings)
 	configData := map[string]string{
-		"advertise":  p.AdvertiseAddress,
-		"gossip":     p.GossipKey,
-		"acl":        strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
-		"tls":        "true",
-		"audit":      strconv.FormatBool(cluster.Spec.Server.Audit.IsEnabled()),
-		"region":     cluster.Spec.Topology.Region,
-		"datacenter": cluster.Spec.Topology.Datacenter,
-		"keyrings":   string(keyringsJSON),
+		"advertise":      p.AdvertiseAddress,
+		"gossip":         p.GossipKey,
+		"acl":            strconv.FormatBool(cluster.Spec.Server.ACL.IsEnabled()),
+		"tls":            "true",
+		"audit":          strconv.FormatBool(cluster.Spec.Server.Audit.IsEnabled()),
+		"audit-delivery": auditDeliveryChecksumValue(cluster),
+		"region":         cluster.Spec.Topology.Region,
+		"datacenter":     cluster.Spec.Topology.Datacenter,
+		"keyrings":       string(keyringsJSON),
 	}
 	if _, _, ok := TrustBundle(cluster); ok {
 		bundleChecksum, err := p.computeTrustBundleChecksum(ctx, cluster)
@@ -295,11 +384,15 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 				},
 			},
 		},
+		// fieldRef apiVersion is pinned throughout: the apiserver
+		// defaults it on the stored object, and an unset value here
+		// makes the env DeepEqual report drift on every reconcile.
 		{
 			Name: "NAMESPACE",
 			ValueFrom: &corev1.EnvVarSource{
 				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.namespace",
+					APIVersion: "v1",
+					FieldPath:  "metadata.namespace",
 				},
 			},
 		},
@@ -307,7 +400,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 			Name: "POD_NAME",
 			ValueFrom: &corev1.EnvVarSource{
 				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "metadata.name",
+					APIVersion: "v1",
+					FieldPath:  "metadata.name",
 				},
 			},
 		},
@@ -315,7 +409,8 @@ func (p *StatefulSetPhase) buildEnvVars(cluster *nomadv1alpha1.NomadCluster) []c
 			Name: "POD_IP",
 			ValueFrom: &corev1.EnvVarSource{
 				FieldRef: &corev1.ObjectFieldSelector{
-					FieldPath: "status.podIP",
+					APIVersion: "v1",
+					FieldPath:  "status.podIP",
 				},
 			},
 		},

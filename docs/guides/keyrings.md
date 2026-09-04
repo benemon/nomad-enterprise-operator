@@ -1,9 +1,11 @@
 # Keyrings
 
 Nomad's root encryption keys - which protect Variables and sign
-workload identities - are wrapped by a **keyring**. The default (`aead`)
-stores its key-encryption key **in cleartext inside Raft**, which means
-every Raft snapshot carries usable key material:
+workload identities - are wrapped by a **keyring** (see [Nomad key
+management](https://developer.hashicorp.com/nomad/docs/manage/key-management)).
+The default (`aead`) stores its key-encryption key **in cleartext
+inside Raft**, which means every Raft snapshot carries usable key
+material:
 
 > **Snapshot custody is key custody.** On an `aead` cluster (the
 > default), anyone who can read a snapshot - including the object-store
@@ -13,11 +15,13 @@ every Raft snapshot carries usable key material:
 > copy of your keys.
 
 With an external KMS keyring, only *wrapped* keys ride Raft: snapshots
-remain complete for disaster recovery and are safe at rest - a restore
-decrypts if and only if the restoring cluster can reach the KMS.
+remain complete for disaster recovery and are safe at rest. Restore
+decryption requires KMS reachability; the unwrap semantics are
+Nomad's - see [Nomad key
+management](https://developer.hashicorp.com/nomad/docs/manage/key-management).
 
-Four providers are supported, singly or as an HA set (every listed
-keyring wraps new keys; any one reachable keyring unwraps):
+Four providers are supported, singly or as an HA set. Every listed
+keyring wraps new keys; any one reachable keyring unwraps:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -47,8 +51,8 @@ provider change, and HA expand/contract all follow the same
 operator-managed cycle: render the union of old and new keyrings, roll
 the servers, rotate every root key under the new set, remove the old
 keys, retire the demoted keyrings, and roll once more.
-`status.keyring` reports `phase` (`Ready`, `Introducing`, `Rotating`,
-`Retiring`, `Degraded`), the `active` and `retiring` sets,
+`status.keyring` reports `phase` (`Ready`, `Introducing`, `Retiring`,
+`Degraded`), the `active` and `retiring` sets,
 `retirementPending` while old keys await removal, and `tokenExpiry`
 when the operator manages a Vault token. Once rotation under the new
 set succeeds, the phase is `Ready`; old-key removal continues in the
@@ -142,11 +146,14 @@ carries); tokens never appear in the `NomadCluster` manifest.
 
 ## Who needs `system:auth-delegator`
 
-The kubernetes auth method validates ServiceAccount tokens via the
-TokenReview API, and the identity making that call needs the
-`system:auth-delegator` ClusterRole. Which identity that is depends on
-the Vault mount configuration - **the operator never creates
-ClusterRoleBindings**; grant it per this table:
+The [kubernetes auth
+method](https://developer.hashicorp.com/vault/docs/auth/kubernetes)
+validates ServiceAccount tokens via the TokenReview API, and the
+identity making that call needs the `system:auth-delegator`
+ClusterRole. Which identity that is depends on the Vault mount
+configuration; the reviewer-selection semantics are Vault's, and the
+table maps them to the grant the operator's setup needs. **The
+operator never creates ClusterRoleBindings**; grant per this table:
 
 | Mount configuration | TokenReview caller | Grant `auth-delegator` to |
 |---------------------|--------------------|---------------------------|
@@ -161,8 +168,7 @@ operator's default `audiences` is `["vault"]` (VSO convention), and a
 its own TokenReview - login fails with `permission denied`. Against
 external Vault, either set `audiences: ["https://kubernetes.default.svc"]`
 (and the matching `audience` on the Vault role), or configure a
-`token_reviewer_jwt` on the auth method. Verified live against Vault
-Enterprise on OpenShift.
+`token_reviewer_jwt` on the auth method.
 
 A denied TokenReview surfaces on the cluster as the
 `KeyringVaultReviewerDenied` condition reason with this table's

@@ -805,13 +805,10 @@ var _ = Describe("NomadCluster Controller", func() {
 			updatedCluster.Spec.Replicas = 5
 			Expect(k8sClient.Update(ctx, updatedCluster)).To(Succeed())
 
-			By("Running reconciliation after update")
-			for i := 0; i < 10; i++ {
-				_, _ = reconcileCluster(ctx, namespacedName)
-			}
-
-			By("Verifying StatefulSet now has 5 replicas")
-			Eventually(func() int32 {
+			// Scale-up is serialized (neo-tma): each step is gated on
+			// status.autopilot confirming the previous replica joined
+			// the voter set.
+			stsReplicas := func() int32 {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      "test-cluster",
 					Namespace: namespace,
@@ -820,7 +817,35 @@ var _ = Describe("NomadCluster Controller", func() {
 					return 0
 				}
 				return *sts.Spec.Replicas
-			}, timeout, interval).Should(Equal(int32(5)))
+			}
+			setVoters := func(n int) {
+				current := &nomadv1alpha1.NomadCluster{}
+				Expect(k8sClient.Get(ctx, namespacedName, current)).To(Succeed())
+				current.Status.Autopilot = &nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: n}
+				Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
+			}
+
+			By("Verifying scale-up holds without autopilot voter confirmation")
+			for i := 0; i < 5; i++ {
+				_, _ = reconcileCluster(ctx, namespacedName)
+			}
+			Expect(stsReplicas()).To(Equal(int32(3)),
+				"scale-up must not step until autopilot confirms the current voters")
+
+			By("Stepping to 4 once 3 voters confirmed")
+			setVoters(3)
+			for i := 0; i < 5; i++ {
+				_, _ = reconcileCluster(ctx, namespacedName)
+			}
+			Eventually(stsReplicas, timeout, interval).Should(Equal(int32(4)),
+				"one confirmed step must add exactly one replica")
+
+			By("Stepping to 5 once 4 voters confirmed")
+			setVoters(4)
+			for i := 0; i < 5; i++ {
+				_, _ = reconcileCluster(ctx, namespacedName)
+			}
+			Eventually(stsReplicas, timeout, interval).Should(Equal(int32(5)))
 
 			By("Verifying ConfigMap has updated bootstrap_expect")
 			cm := &corev1.Secret{}

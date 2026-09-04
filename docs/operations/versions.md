@@ -10,10 +10,22 @@ deliberately does not do it for you. The full procedure, including the
 pre-upgrade one-shot snapshot and rollback guidance, is in the
 [disaster-recovery runbook](../runbooks/disaster-recovery.md). The short form: take a
 one-shot `NomadSnapshot`, wait for `status.phase: Succeeded`, then patch
-`spec.image.tag`; the operator rolls the StatefulSet one pod at a time
-behind the PodDisruptionBudget.
+`spec.image.tag`. The StatefulSet's RollingUpdate strategy replaces one
+pod at a time, each gated on the previous pod passing readiness. The
+PodDisruptionBudget separately bounds eviction-driven disruption (node
+drains) so a drain during the roll cannot take a second server down.
 
-**Why a pinned default matters.** Nomad is a Raft consensus cluster. A floating tag (one that resolves to "whatever the latest patch happens to be at this instant") combined with the operator's default `imagePullPolicy: Always` means a registry-side retag during a rolling restart can produce version-mismatched peers. Two servers running 2.0.3 and one server running 2.0.4 may interact in ways that produce silent quorum loss or replication anomalies. By pinning the default to a single concrete version per operator release, every server in every Raft cluster runs the same Nomad binary unless the user explicitly opts out.
+**Why a pinned default matters.** Nomad is a Raft consensus cluster. A
+floating tag (one that resolves to "whatever the latest patch happens
+to be at this instant") combined with the operator's default
+`imagePullPolicy: Always` means a registry-side retag during a rolling
+restart can produce version-mismatched peers. Mixed-version server
+sets are constrained by [Nomad's upgrade
+guidance](https://developer.hashicorp.com/nomad/docs/upgrade); the
+operator does not manage that compatibility. Pinning the default to a
+single concrete version per operator release keeps every server in
+every Raft cluster on the same Nomad binary unless the user explicitly
+opts out.
 
 **How to override.** Set `spec.image.tag` to your desired version (concrete or floating) at the CR level:
 

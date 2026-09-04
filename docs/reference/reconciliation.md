@@ -13,7 +13,7 @@ The NomadCluster controller reconciles through a sequential phase pipeline:
 9. **Config** - renders server.hcl into the `<cluster>-config` Secret (a Secret, not a ConfigMap: it carries the gossip key and inline keyring credentials)
 10. **StatefulSet** - creates or updates the Nomad server StatefulSet
 11. **PDB** - creates or updates the PodDisruptionBudget for `spec.replicas ≥ 3` (skipped for `replicas = 1`)
-12. **ScaleDown** - removes Raft peers when `sts.spec.replicas` exceeds `spec.replicas`, one peer per reconcile, before patching the StatefulSet (see "Scaling down" below)
+12. **ScaleDown** - removes Raft peers when `sts.spec.replicas` exceeds `spec.replicas`, one peer per reconcile, before patching the StatefulSet (see [Scaling down](../guides/scaling.md#scaling-down))
 13. **Route** - creates OpenShift Route and resolves the admitted hostname (when enabled, gated on Route CRD availability)
 14. **Monitoring** - creates ServiceMonitor and PrometheusRule (when enabled, gated on Prometheus Operator CRD availability)
 15. **ACLBootstrap** - bootstraps ACLs and creates the operator status token (when ACLs enabled)

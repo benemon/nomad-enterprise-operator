@@ -1,60 +1,49 @@
 # Nomad Enterprise Operator
 
-Deploy, snapshot and scale Nomad Enterprise control planes - on the
-Kubernetes cluster you already run.
+A Kubernetes operator that deploys, snapshots, and scales Nomad
+Enterprise server clusters.
 { .neo-tagline }
 
-Running a Nomad Enterprise control plane means answering questions that
-have nothing to do with scheduling workloads: who issues and rotates the
-mTLS certificates, where the gossip key lives, how the ACL system gets
-bootstrapped without a human holding a root token, what wraps the root
-encryption keys, and whether last night's Raft snapshot actually reached
-the bucket. On Kubernetes, every one of those answers is usually a
-script someone wrote and hopes still works.
+Running a Nomad Enterprise control plane involves work beyond
+scheduling: issuing and rotating mTLS certificates, storing the gossip
+key, bootstrapping the ACL system, wrapping the root encryption keys,
+and verifying that Raft snapshots reach their storage target. This
+operator manages those concerns declaratively through Kubernetes
+objects, past the point where a Helm chart ends at API submission.
 
-This operator makes them declarative. An operator is a reconciliation
-loop: it holds a model of what ought to be true, watches what is true,
-and continuously converges the second towards the first. Where a Helm
-chart ends at API submission, this operator manages Nomad itself,
-through Kubernetes objects - the Raft membership, the encryption keys,
-the certificates, and the ACL system that accumulate state long after
-install. A `NomadCluster` resource deploys
-a production-shaped Nomad Enterprise server cluster - mTLS everywhere,
-ACLs bootstrapped, audit logging on, Pod Security `restricted` - and
-two companion resources cover the operational tail: `NomadSnapshot` for
-scheduled and one-shot Raft snapshots to local, S3, GCS, or Azure Blob
-storage, and `NomadAutoscaler` for managed Nomad Autoscaler agents,
-including Dynamic Application Sizing.
+A `NomadCluster` resource deploys a Nomad Enterprise server cluster
+with mTLS, bootstrapped ACLs, audit logging, and Pod Security
+`restricted` from the first reconcile. Two companion resources cover
+day-2 operations: `NomadSnapshot` for scheduled and one-shot Raft
+snapshots to local, S3, GCS, or Azure Blob storage, and
+`NomadAutoscaler` for managed Nomad Autoscaler agents, including
+Dynamic Application Sizing.
 
 !!! note "Community project"
     This operator is not maintained or supported by HashiCorp. It is an
     independent community project. The `nomad.hashicorp.com` API group
     used by its CRDs is a structural identifier inherited from the Nomad
     ecosystem, not an endorsement or affiliation. A Nomad Enterprise
-    license is required for the clusters it deploys. If you deploy it,
-    your support contract is the GitHub issue tracker.
+    license is required for the clusters it deploys. Support is
+    community-based through the GitHub issue tracker; there is no SLA.
 
 ## Architectural boundaries
 
-Two deliberate scope decisions define what this operator is:
+Two scope decisions define what this operator is:
 
-**Server clusters only - bring your own clients.** The operator deploys
-and manages Nomad **server** (control-plane) clusters. HashiCorp does
-not support running Nomad clients as containers, so client nodes are
-explicitly out of scope: provision your client fleet on VMs or bare
-metal and point it at the cluster's advertised address
-(`status.services`). Nothing in the CRD models clients, and nothing
-will.
+**Server clusters only.** The operator deploys and manages Nomad
+**server** (control-plane) clusters. HashiCorp does not support running
+Nomad clients as containers, so client nodes are out of scope:
+provision your client fleet on VMs or bare metal and point it at the
+cluster's advertised address (`status.services`). The CRD does not
+model clients.
 
-**Single region per cluster - no federation management (v1).** Each
-NomadCluster CR is one Raft cluster in one region
-(`spec.topology.region`). Multi-region federation - WAN gossip joins,
-cross-region ACL replication - is not managed by the operator in v1.
-Nomad itself supports federating operator-deployed clusters if you
-expose the serf WAN port and configure the joins out-of-band; the
-operator neither helps nor hinders. If federation management becomes a
-real need, it will arrive as its own design cycle, not as a side
-effect.
+**Single region per cluster.** Each NomadCluster CR is one Raft
+cluster in one region (`spec.topology.region`). Multi-region
+federation (WAN gossip joins, cross-region ACL replication) is not
+managed by the operator in v1. Nomad itself supports federating
+operator-deployed clusters if you expose the serf WAN port and
+configure the joins out-of-band.
 
 ## Where to go
 

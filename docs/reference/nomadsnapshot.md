@@ -133,7 +133,7 @@ Snapshots **require ACLs** on the referenced NomadCluster
 (`spec.server.acl.enabled: true`, the default): the agent authenticates
 with a dedicated token the operator mints. A cluster with ACLs disabled
 is reported as a terminal misconfiguration - `Ready=False` with reason
-`ACLsDisabled` and a Warning Event - not as a transient wait.
+`ACLsDisabled` and a Warning Event. It is not reported as a transient wait.
 
 The operator creates a dedicated ACL policy with `snapshot-save` and
 `license-read` capabilities and a token bound to that policy. The token

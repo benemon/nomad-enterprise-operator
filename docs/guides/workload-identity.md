@@ -17,7 +17,7 @@ operator's scope (see
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `server.vaults[].name` | `string` | `default` | Cluster name jobs reference via `vault.cluster`; `default` serves jobs that do not specify one. Unique, ≤63 chars |
+| `server.vaults[].name` | `string` | `default` | Cluster name jobs reference via `vault.cluster`; `default` serves jobs that do not specify one. Unique, ≤63 chars; at most 8 entries |
 | `server.vaults[].defaultIdentity` | `object` | | Identity injected into tasks whose `vault` block declares no `identity` of its own |
 | `server.vaults[].defaultIdentity.audiences` | `[]string` | | Required within `defaultIdentity`; must match the JWT auth method's `bound_audiences` |
 | `server.vaults[].defaultIdentity.ttl` | `string` | | Identity JWT validity (Nomad duration, e.g. `"1h"`). Unset means no expiry - set it to bound the replay window |
@@ -75,8 +75,10 @@ precedence over the default.
 StatefulSet** (rendered config change), like every server-config
 field.
 
-Vault-side prerequisites (outside the operator): a `jwt` auth method
-whose `jwks_url` points at the cluster's JWKS endpoint -
+Vault-side prerequisites (outside the operator; field semantics are
+Vault's - see [JWT/OIDC auth](https://developer.hashicorp.com/vault/docs/auth/jwt)):
+a `jwt` auth method whose `jwks_url` points at the cluster's JWKS
+endpoint -
 `https://<name>-internal.<namespace>.svc.cluster.local:4646/.well-known/jwks.json`
 with `jwks_ca_pem` set to the cluster CA - plus roles and policies
 bound to the identity claims (`nomad_namespace`, `nomad_job_id`, and

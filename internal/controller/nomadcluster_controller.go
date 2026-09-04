@@ -282,8 +282,9 @@ func (r *NomadClusterReconciler) handleDeletion(ctx context.Context, cluster *no
 		}
 
 		// volumeClaimTemplate PVCs are not owned by the CR, so no GC.
-		// Under Retain (default) they survive deletion — Raft state
-		// outlives accidental CR removal. Deletion-time value wins.
+		// Under Retain they survive deletion — Raft state outlives
+		// accidental CR removal. Deletion-time value wins; the default
+		// is Delete.
 		if cluster.Spec.Persistence.ReclaimPolicy == nomadv1alpha1.ReclaimPolicyDelete {
 			// The StatefulSet OBJECT must be gone before the PVCs are
 			// deleted: a live STS controller re-creates claims deleted

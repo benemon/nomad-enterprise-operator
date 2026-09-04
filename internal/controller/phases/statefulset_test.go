@@ -19,6 +19,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -267,6 +268,127 @@ func TestBuildStatefulSet_ChecksumExcludesReplicas(t *testing.T) {
 		t.Errorf("checksum/config drifted across replica counts: %q (N=3) vs %q (N=1) — scale operations must not trigger pod restarts (AC-2.3.4f)",
 			checksumThree, checksumOne)
 	}
+
+	// The whole template, not just the checksum, must be
+	// replica-invariant: any variance (the affinity gate was one,
+	// neo-tma) rolling-restarts a lone survivor, whose IP change
+	// behind its Raft ID strands the cluster at one voter on the
+	// next scale-up.
+	if !reflect.DeepEqual(stsThree.Spec.Template, stsOne.Spec.Template) {
+		t.Errorf("pod template varies with replica count:\nN=3: %+v\nN=1: %+v",
+			stsThree.Spec.Template, stsOne.Spec.Template)
+	}
+	if stsOne.Spec.Template.Spec.Affinity == nil {
+		t.Error("operator anti-affinity must be present at every replica count")
+	}
+}
+
+// Every downward-API env source must pin apiVersion: the apiserver
+// defaults it on the stored object, and an unset value here made the
+// env DeepEqual report drift on every reconcile.
+func TestEnvFieldRefsPinAPIVersion(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	sts := phase.buildStatefulSet(context.Background(), newTestCluster("ns", "nomad"))
+	for _, e := range sts.Spec.Template.Spec.Containers[0].Env {
+		if e.ValueFrom != nil && e.ValueFrom.FieldRef != nil && e.ValueFrom.FieldRef.APIVersion != "v1" {
+			t.Errorf("env %s fieldRef apiVersion = %q, want v1", e.Name, e.ValueFrom.FieldRef.APIVersion)
+		}
+	}
+}
+
+// The delivery guarantee rolls the servers only when audit is enabled:
+// with audit off the rendered HCL has no audit block, so the lever is
+// inert and must stay out of the restart checksum.
+func TestChecksumTracksAuditDelivery(t *testing.T) {
+	phase := &StatefulSetPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	build := func(enabled bool, guarantee string) string {
+		cluster := newTestCluster("ns", "nomad")
+		cluster.Spec.Server.Audit.Enabled = ptr.To(enabled)
+		cluster.Spec.Server.Audit.DeliveryGuarantee = guarantee
+		return phase.buildStatefulSet(context.Background(), cluster).
+			Spec.Template.Annotations["checksum/config"]
+	}
+	if build(true, "enforced") == build(true, "best-effort") {
+		t.Error("audit enabled: changing deliveryGuarantee must change checksum/config")
+	}
+	if build(false, "enforced") != build(false, "best-effort") {
+		t.Error("audit disabled: deliveryGuarantee must not affect checksum/config")
+	}
+}
+
+// Scale-up must step one replica per reconcile, gated on the previous
+// replica reaching the voter set (neo-tma: simultaneous joins race
+// Nomad's member reconciliation during leadership churn).
+func TestStatefulSetScaleUpSerialized(t *testing.T) {
+	cases := []struct {
+		name         string
+		stsReplicas  int32
+		autopilot    *nomadv1alpha1.AutopilotStatus
+		wantReplicas int32
+		wantRevisit  bool
+	}{
+		{"steps by one when settled", 1,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 1}, 2, true},
+		{"holds until new replica votes", 2,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 1}, 2, true},
+		{"holds without autopilot status", 1, nil, 1, true},
+		// A stale pre-scale-down status (voters above the replica
+		// count) must hold, not step — with >= it walked the whole
+		// ladder unsettled.
+		{"holds on stale-high voter count", 1,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 5}, 1, true},
+		{"final step reaches target", 2,
+			&nomadv1alpha1.AutopilotStatus{Healthy: true, Voters: 2}, 3, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := newTestCluster("ns", "nomad")
+			cluster.Status.Autopilot = tc.autopilot
+			sts := &appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "nomad", Namespace: "ns"},
+				Spec:       appsv1.StatefulSetSpec{Replicas: ptr.To(tc.stsReplicas)},
+			}
+			phaseCtx := &PhaseContext{
+				Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).
+					WithRuntimeObjects(cluster, sts).Build(),
+				Scheme: scheme.Scheme,
+				Log:    zap.New(zap.UseDevMode(true)),
+			}
+			phase := NewStatefulSetPhase(phaseCtx)
+
+			result := phase.Execute(context.Background(), cluster)
+			if result.Error != nil {
+				t.Fatalf("Execute() error = %v", result.Error)
+			}
+			// Stepping must NOT short-circuit the chain (that starves
+			// the status refresh the gate depends on): it asks for a
+			// revisit instead of a requeue.
+			if result.Requeue {
+				t.Error("stepping must not return a chain-stopping requeue")
+			}
+			if got := phaseCtx.RevisitAfter > 0; got != tc.wantRevisit {
+				t.Errorf("revisit = %v, want %v", got, tc.wantRevisit)
+			}
+
+			updated := &appsv1.StatefulSet{}
+			if err := phase.Client.Get(context.Background(),
+				types.NamespacedName{Name: "nomad", Namespace: "ns"}, updated); err != nil {
+				t.Fatalf("Get STS: %v", err)
+			}
+			if *updated.Spec.Replicas != tc.wantReplicas {
+				t.Errorf("sts replicas = %d, want %d", *updated.Spec.Replicas, tc.wantReplicas)
+			}
+		})
+	}
 }
 
 // Liveness must be leader-independent (neo-pl4): /v1/agent/health
@@ -423,44 +545,6 @@ func TestAuditPVCIndependent(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestStatefulSetScaleUp covers neo-i4a: increasing spec.replicas must
-// flow straight through to the StatefulSet — the D2b guard only
-// preserves the existing count while it EXCEEDS the desired count
-// (scale-down territory); an up-scale is a plain update.
-func TestStatefulSetScaleUp(t *testing.T) {
-	cluster := newTestCluster("ns", "nomad")
-	cluster.Spec.Replicas = 1
-
-	phaseCtx := &PhaseContext{
-		Client:           fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
-		Scheme:           scheme.Scheme,
-		Log:              zap.New(zap.UseDevMode(true)),
-		AdvertiseAddress: "10.0.0.5",
-		GossipKey:        "fixed-gossip-key-for-test==",
-	}
-	phase := &StatefulSetPhase{PhaseContext: phaseCtx}
-
-	// Create at 1 replica.
-	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
-		t.Fatalf("Execute() create error = %v", result.Error)
-	}
-
-	// Scale up to 3.
-	cluster.Spec.Replicas = 3
-	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
-		t.Fatalf("Execute() scale-up error = %v", result.Error)
-	}
-
-	sts := &appsv1.StatefulSet{}
-	if err := phaseCtx.Client.Get(context.Background(),
-		types.NamespacedName{Name: "nomad", Namespace: "ns"}, sts); err != nil {
-		t.Fatalf("StatefulSet missing: %v", err)
-	}
-	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 3 {
-		t.Errorf("sts replicas = %v after scale-up, want 3", sts.Spec.Replicas)
 	}
 }
 

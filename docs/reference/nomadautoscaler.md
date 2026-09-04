@@ -20,7 +20,7 @@ source. The CR covers two metric paths:
 |-------|------|---------|-------------|
 | `clusterRef.name` | `string` | | Name of the target NomadCluster. **Immutable** - retargeting would orphan the minted ACL credentials, so delete and recreate instead (the finalizer cleans up) |
 | `clusterRef.namespace` | `string` | | Not supported (admission-rejected): the NomadCluster must be in the NomadAutoscaler's own namespace, because the agent pod mounts the cluster's TLS Secret and pods cannot mount Secrets across namespaces |
-| `replicas` | `int` | `1` | Agent pods, 1–3. Above 1 enables the agent's [high-availability mode](#autoscaler-high-availability) |
+| `replicas` | `int` | `1` | Agent pods, 1-3. Above 1 enables the agent's [high-availability mode](#autoscaler-high-availability) |
 | `image.repository` | `string` | `hashicorp/nomad-autoscaler-enterprise` | Agent image. Dynamic Application Sizing needs the enterprise image |
 | `image.tag` | `string` | `0.5.0-ent` | Pinned concrete version, same rationale as [image version pinning](../operations/versions.md) |
 | `image.digest` | `string` | | Optional content-digest pin; takes precedence over `tag` |
@@ -59,8 +59,11 @@ telemetry {
 
 `prometheus_metrics` is what makes `/v1/metrics?format=prometheus`
 answer (without it the endpoint returns 415), which the DAS Prometheus
-scrapes. None of these failure modes are discoverable from agent
-errors - the symptom is scaling policies that evaluate to zero.
+scrapes.
+
+!!! warning
+    None of these failure modes surface in agent errors. The symptom
+    is scaling policies that evaluate to zero.
 
 ## Dynamic Application Sizing
 
@@ -71,9 +74,8 @@ endpoints. Recommendations surface in the Nomad UI and the
 `/v1/recommendations` API. Note the recommendations API is compiled
 out of CE binaries: query an enterprise server (a CE binary answers
 501, including the CLI talking through a CE client agent). Running the
-enterprise binary on client nodes removes the caveat - clients need no
-license of their own, so this is the natural shape for an enterprise
-cluster.
+enterprise binary on client nodes removes the caveat; clients need no
+license of their own.
 
 ## Autoscaler high availability
 
@@ -90,11 +92,11 @@ Failover timing with the agent's defaults (`lock_ttl 60s`,
 
 - **Graceful shutdown** (rollout, drain, pod delete): the agent
   releases the lock on SIGTERM, and `lock_delay` does not apply to a
-  released lock. Takeover measured at ~2s when another pod is starting
+  released lock. Takeover completes in ~2s when another pod is starting
   (rollouts), worst case one standby retry period (~66s).
 - **Leader crash** (SIGKILL, OOM, node loss): the lock must expire -
   TTL from the last renewal plus `lock_delay`, plus the standby's next
-  acquire attempt. Measured at ~3 minutes. Expect **no scaling actions
+  acquire attempt, ~3 minutes. Expect **no scaling actions
   for up to ~3 minutes** after a leader crash; size scaling policy
   cooldowns accordingly.
 
@@ -104,7 +106,7 @@ The autoscaler **requires ACLs** on the referenced NomadCluster
 (`spec.server.acl.enabled: true`, the default): the agent authenticates
 with a dedicated token the operator mints. A cluster with ACLs disabled
 is reported as a terminal misconfiguration - `Ready=False` with reason
-`ACLsDisabled` and a Warning Event - not as a transient wait.
+`ACLsDisabled` and a Warning Event. It is not reported as a transient wait.
 
 The operator creates policy `autoscaler-agent-<namespace>-<name>`
 scoped to exactly what the spec needs: `scale` on each entry in

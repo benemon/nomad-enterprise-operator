@@ -3,10 +3,11 @@
 Audience: a human operator bumping the Nomad version of an
 operator-managed NomadCluster. Version changes are user-driven: edit
 `spec.image.tag` and the operator performs a rolling restart of the
-StatefulSet. The PodDisruptionBudget bounds voluntary disruption so
-quorum survives the roll, but Raft *state* compatibility across
-versions is Nomad's contract, not the operator's - which is why you
-snapshot first.
+StatefulSet. RollingUpdate replaces one pod at a time, gated on
+readiness, so at most one server is down during the roll; the
+PodDisruptionBudget separately bounds eviction-driven disruption such
+as node drains. Raft *state* compatibility across versions is Nomad's
+contract - which is why you snapshot first.
 
 **The operator deliberately does not snapshot for you.** An automatic
 pre-upgrade snapshot was considered and retracted (design review §4.1,

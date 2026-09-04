@@ -64,8 +64,6 @@ var _ = Describe("ADR 0003 dropped fields are pruned from the schema", func() {
 			map[string]interface{}{"server": map[string]interface{}{"acl": map[string]interface{}{"bootstrapSecretName": "x"}}}},
 		{"server.autopilot block", []string{"server", "autopilot"},
 			map[string]interface{}{"server": map[string]interface{}{"autopilot": map[string]interface{}{"cleanupDeadServers": true}}}},
-		{"server.audit.deliveryGuarantee", []string{"server", "audit", "deliveryGuarantee"},
-			map[string]interface{}{"server": map[string]interface{}{"audit": map[string]interface{}{"deliveryGuarantee": "enforced"}}}},
 		{"server.audit.format", []string{"server", "audit", "format"},
 			map[string]interface{}{"server": map[string]interface{}{"audit": map[string]interface{}{"format": "json"}}}},
 		{"server.audit.rotateDuration", []string{"server", "audit", "rotateDuration"},

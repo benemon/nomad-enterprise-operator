@@ -2,15 +2,15 @@
 
 ## Prerequisites
 
-- Go v1.26+ (development only)
-- Docker v20.10+
 - kubectl v1.28+
 - Access to a Kubernetes v1.28+ cluster (matches the CSV's
   minKubeVersion; the CRD CEL validation rules need a modern apiserver)
 - A Nomad Enterprise license
 
+Building from source additionally needs Go v1.26+ and Docker v20.10+.
 
-## Container Images
+
+## Container images
 
 All images are published to quay.io:
 
@@ -82,18 +82,25 @@ The suggested namespace `nomad-enterprise-operator-system` will be pre-filled.
 
 For clusters without OLM, each release attaches a consolidated `install.yaml`
 containing the CRDs, RBAC, and operator Deployment pinned to that release's
-image. The manifest is self-contained - no webhooks, no cert-manager. Apply it
-directly:
+image. The manifest has no webhooks and no cert-manager dependency.
 
-```sh
-kubectl apply -f https://github.com/benemon/nomad-enterprise-operator/releases/download/v<version>/install.yaml
-```
+1. Apply the release manifest:
 
-To track the newest release instead of a pinned version, substitute
-`releases/latest/download/install.yaml`.
+    ```sh
+    kubectl apply -f https://github.com/benemon/nomad-enterprise-operator/releases/download/v<version>/install.yaml
+    ```
+
+    To track the newest release instead of a pinned version, substitute
+    `releases/latest/download/install.yaml`.
+
+2. Verify the operator is running:
+
+    ```sh
+    kubectl -n nomad-enterprise-operator-system rollout status deploy/nomad-enterprise-operator-controller-manager
+    ```
 
 To build the installer from a source checkout (for unreleased changes), pin the
-image explicitly - the Makefile default is a placeholder version that was never
+image explicitly. The Makefile default is a placeholder version that was never
 published:
 
 ```sh
@@ -101,9 +108,11 @@ make build-installer IMG=quay.io/benjamin_holmes/nomad-enterprise-operator:v<ver
 kubectl apply -f dist/install.yaml
 ```
 
-## Minimal Example
+## Minimal example
 
-The only required field is `license`. Everything else uses sensible defaults (3 replicas, ACLs enabled, auto-generated gossip key, 10Gi persistent storage):
+The only required field is `license`. Every other field has a default:
+3 replicas, ACLs enabled, an auto-generated gossip key, and 15Gi of
+persistent storage per replica (10Gi data, 5Gi audit):
 
 ```yaml
 apiVersion: nomad.hashicorp.com/v1alpha1
@@ -115,18 +124,25 @@ spec:
     secretName: nomad-license
 ```
 
-On kind or any cluster without a load-balancer implementation, also set
-`spec.services.external.type: NodePort` - the default (`LoadBalancer`)
-waits indefinitely for an IP. The CI-tested quickstart at
-[config/samples/minimal/nomadcluster.yaml](https://github.com/benemon/nomad-enterprise-operator/blob/main/config/samples/minimal/nomadcluster.yaml)
-carries this and is verified end-to-end on every nightly run.
+!!! warning
+    On kind or any cluster without a load-balancer implementation, also
+    set `spec.services.external.type: NodePort`. The default
+    (`LoadBalancer`) waits indefinitely for an IP. The sample at
+    `config/samples/minimal/nomadcluster.yaml` in the repository
+    carries this setting.
 
 ## Uninstall
 
+Delete NomadCluster resources first so the operator can run their
+finalizers, then remove the operator by the same path it was installed:
+
 ```sh
-kubectl delete -k config/samples/
-make uninstall
-make undeploy
+kubectl delete nomadcluster --all -A
+# OLM install:
+kubectl delete subscription nomad-enterprise-operator -n nomad-enterprise-operator-system
+kubectl delete csv -n nomad-enterprise-operator-system -l operators.coreos.com/nomad-enterprise-operator.nomad-enterprise-operator-system
+# Manifest install:
+kubectl delete -f https://github.com/benemon/nomad-enterprise-operator/releases/download/v<version>/install.yaml
 ```
 
 

@@ -27,15 +27,18 @@ import (
 	"github.com/hashicorp/nomad-enterprise-operator/internal/metrics"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ScaleDownPhase removes Raft peers serially — one per reconcile,
 // highest ordinal first, tracked in status.scaleDown.removedPeers —
-// then patches the StatefulSet once the gap is covered. PVCs are never
-// touched: reclaimPolicy governs cluster-delete only.
+// then patches the StatefulSet once the gap is covered. Removed ordinals'
+// PVCs are reclaimed so a later scale-up rejoins with clean Raft state;
+// reclaimPolicy governs cluster-delete separately.
 type ScaleDownPhase struct {
 	*PhaseContext
 }
@@ -59,7 +62,7 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 		Name:      cluster.Name,
 		Namespace: cluster.Namespace,
 	}, sts)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		// First reconcile — StatefulSet not created yet; nothing to scale down.
 		return OK()
 	}
@@ -76,15 +79,12 @@ func (p *ScaleDownPhase) Execute(ctx context.Context, cluster *nomadv1alpha1.Nom
 	desiredReplicas := cluster.Spec.Replicas
 
 	if currentReplicas <= desiredReplicas {
-		// No gap to close. If a prior operation left status.scaleDown
-		// populated (e.g. the operator was killed between patching the
-		// STS and clearing status), clear it now.
+		// No gap to close. A populated status.scaleDown means a prior
+		// operation was interrupted between patching the STS and
+		// finishing cleanup — resume through finalize; clearing status
+		// here instead would orphan the stale PVCs.
 		if cluster.Status.ScaleDown != nil {
-			patchBase := cluster.DeepCopy()
-			cluster.Status.ScaleDown = nil
-			if err := p.Client.Status().Patch(ctx, cluster, client.MergeFrom(patchBase)); err != nil {
-				return Error(err, "Failed to clear status.scaleDown")
-			}
+			return p.finalize(ctx, cluster, sts, desiredReplicas)
 		}
 		// D2e (neo-1ve.5): no operation in flight.
 		metrics.ScaleDownInProgress.WithLabelValues(cluster.Name, cluster.Namespace).Set(0)
@@ -226,6 +226,17 @@ func (p *ScaleDownPhase) finalize(
 	sts *appsv1.StatefulSet,
 	desiredReplicas int32,
 ) PhaseResult {
+	// Removed ordinals are [desiredReplicas, originalReplicas). Derive the
+	// upper bound from the recorded removal count, not sts.Spec.Replicas —
+	// this function patches that field down, so a retry after a failed PVC
+	// delete would see the lowered count and skip the reclaim, orphaning
+	// the stale volumes onto the next scale-up.
+	deletePVCs := cluster.Status.ScaleDown != nil
+	var currentReplicas int32
+	if deletePVCs {
+		currentReplicas = desiredReplicas + int32(len(cluster.Status.ScaleDown.RemovedPeers))
+	}
+
 	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != desiredReplicas {
 		patchBase := sts.DeepCopy()
 		sts.Spec.Replicas = &desiredReplicas
@@ -234,6 +245,22 @@ func (p *ScaleDownPhase) finalize(
 		}
 		p.Log.Info("Patched StatefulSet replicas at scale-down completion",
 			"name", sts.Name, "replicas", desiredReplicas)
+	}
+
+	if deletePVCs {
+		for ordinal := desiredReplicas; ordinal < currentReplicas; ordinal++ {
+			for _, prefix := range []string{"data", "audit"} {
+				pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("%s-%s-%d", prefix, cluster.Name, ordinal),
+					Namespace: cluster.Namespace,
+				}}
+				p.Log.Info("Deleting PVC for removed StatefulSet ordinal",
+					"name", pvc.Name, "ordinal", ordinal)
+				if err := p.Client.Delete(ctx, pvc); err != nil && !apierrors.IsNotFound(err) {
+					return Error(err, "Failed to delete PVC for removed StatefulSet ordinal")
+				}
+			}
+		}
 	}
 
 	if cluster.Status.ScaleDown != nil {
