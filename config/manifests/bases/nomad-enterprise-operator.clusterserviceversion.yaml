@@ -32,10 +32,6 @@ spec:
     - description: |-
         NomadSnapshot is the Schema for the nomadsnapshots API.
 
-        The XValidation rule below blocks a mode switch (adding/removing
-        spec.schedule) while a one-shot Job is running; recurring mode is
-        never blocked.
-
         spec.clusterRef is immutable: retargeting would orphan the old
         cluster's ACL policy and token (status.tokenAccessorID is only
         checked against the new cluster). Delete and recreate to retarget —
@@ -59,7 +55,7 @@ spec:
     application scaling and Dynamic Application Sizing).
   displayName: Nomad Enterprise Operator
   icon:
-  - base64data: PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz48c3ZnIGlkPSJMb2dvcyIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiB3aWR0aD0iNTAiIGhlaWdodD0iNzIiIHZpZXdCb3g9IjAgMCA1MCA3MiI+PGRlZnM+PHN0eWxlPi5jbHMtMXtmaWxsOiMwMGNhOGU7c3Ryb2tlLXdpZHRoOjBweDt9PC9zdHlsZT48L2RlZnM+PHBhdGggY2xhc3M9ImNscy0xIiBkPSJNMjUsNy4yTDAsMjEuNnYyOC44bDI1LDE0LjQsMjUtMTQuNHYtMjguOUwyNSw3LjJaTTM2LjEsMzguOGwtNi43LDMuOC04LTQuNHY5LjJsLTcuNiw0Ljh2LTE5LjJsNi0zLjcsOC4zLDQuNHYtOS4zbDgtNC44djE5LjJaIi8+PC9zdmc+
+  - base64data: PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjAiIGhlaWdodD0iMTIwIiB2aWV3Qm94PSIwIDAgMTIwIDEyMCIgZmlsbD0ibm9uZSI+PG1hc2sgaWQ9Im1zbG90Ij48cmVjdCB3aWR0aD0iMTIwIiBoZWlnaHQ9IjEyMCIgZmlsbD0id2hpdGUiPjwvcmVjdD48cmVjdCB4PSI1MyIgeT0iLTEwIiB3aWR0aD0iMTQiIGhlaWdodD0iNzAiIGZpbGw9ImJsYWNrIiB0cmFuc2Zvcm09InJvdGF0ZSg0NSA2MCA2MCkiPjwvcmVjdD48L21hc2s+PGcgZmlsbD0iIzA2ZDA5MiI+PHBhdGggZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNNjAgMTUgQTQ1IDQ1IDAgMSAwIDYwIDEwNSBBNDUgNDUgMCAxIDAgNjAgMTUgWiBNNjAgMzEgTDg1LjExIDQ1LjUgTDg1LjExIDc0LjUgTDYwIDg5IEwzNC44OSA3NC41IEwzNC44OSA0NS41IFoiIG1hc2s9InVybCgjbXNsb3QpIj48L3BhdGg+PHBhdGggZD0iTTg2LjE2IDI3Ljg0IEw5MS4zNiAzMC44NCBMOTEuMzYgMzYuODQgTDg2LjE2IDM5Ljg0IEw4MC45NiAzNi44NCBMODAuOTYgMzAuODQgWiI+PC9wYXRoPjwvZz48L3N2Zz4K
     mediatype: image/svg+xml
   install:
     spec:
