@@ -279,20 +279,13 @@ func (r *NomadAutoscalerReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 
 	agentConfig := generateAutoscalerConfig(autoscaler, internalAddr)
-	configChecksum := phases.ConfigChecksum(map[string]string{"autoscaler.hcl": agentConfig})
-	// A token re-mint rewrites the Secret in place while the pod spec
-	// stays byte-identical, and env-injected Secrets are never re-read
-	// by running pods: hash the token into the template so a re-mint
-	// rolls the agents (the cluster StatefulSet's checksum/secrets
-	// pattern).
-	secretsChecksum := phases.ConfigChecksum(map[string]string{phases.SecretKeySecretID: agentToken})
 
 	if err := r.reconcileConfigMap(ctx, autoscaler, agentConfig); err != nil {
 		log.Error(err, "Failed to reconcile ConfigMap")
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileDeployment(ctx, autoscaler, cluster, configChecksum, secretsChecksum); err != nil {
+	if err := r.reconcileDeployment(ctx, autoscaler, cluster, agentConfig, agentToken); err != nil {
 		log.Error(err, "Failed to reconcile Deployment")
 		return ctrl.Result{}, err
 	}
@@ -869,7 +862,23 @@ func autoscalerImageRef(a *nomadv1alpha1.NomadAutoscaler) string {
 }
 
 // reconcileDeployment creates or updates the agent Deployment.
-func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler, cluster *nomadv1alpha1.NomadCluster, configChecksum, secretsChecksum string) error {
+func (r *NomadAutoscalerReconciler) reconcileDeployment(ctx context.Context, autoscaler *nomadv1alpha1.NomadAutoscaler, cluster *nomadv1alpha1.NomadCluster, agentConfig, agentToken string) error {
+	configData := map[string]string{"autoscaler.hcl": agentConfig}
+	if _, _, ok := phases.TrustBundle(cluster); ok {
+		bundleChecksum, err := phases.TrustBundleChecksum(ctx, r.Client, cluster)
+		if err != nil {
+			return fmt.Errorf("failed to compute trust bundle checksum: %w", err)
+		}
+		configData["trust-bundle"] = bundleChecksum
+	}
+	configChecksum := phases.ConfigChecksum(configData)
+	// A token re-mint rewrites the Secret in place while the pod spec
+	// stays byte-identical, and env-injected Secrets are never re-read
+	// by running pods: hash the token into the template so a re-mint
+	// rolls the agents (the cluster StatefulSet's checksum/secrets
+	// pattern).
+	secretsChecksum := phases.ConfigChecksum(map[string]string{phases.SecretKeySecretID: agentToken})
+
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      autoscalerAgentName(autoscaler),
@@ -1011,6 +1020,23 @@ func (r *NomadAutoscalerReconciler) buildAgentPodTemplate(
 			NodeSelector: autoscaler.Spec.NodeSelector,
 			Tolerations:  autoscaler.Spec.Tolerations,
 		},
+	}
+
+	if name, key, ok := phases.TrustBundle(cluster); ok {
+		template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "trust-bundle",
+			MountPath: "/etc/ssl/certs",
+			ReadOnly:  true,
+		})
+		template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+			Name: "trust-bundle",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					Items:                []corev1.KeyToPath{{Key: key, Path: "ca-certificates.crt"}},
+				},
+			},
+		})
 	}
 
 	// A standby on the same node as the leader protects nothing:

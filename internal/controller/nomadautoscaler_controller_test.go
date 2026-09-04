@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -331,6 +332,47 @@ var _ = Describe("NomadAutoscaler Controller", func() {
 			Expect(autoscaler.Status.TokenAccessorID).To(Equal("test-accessor"))
 			Expect(autoscaler.Status.PolicyName).To(Equal("autoscaler-agent-" + namespace + "-as"))
 			Expect(autoscaler.Status.DeploymentName).To(Equal("as-autoscaler-agent"))
+		})
+
+		It("mounts the cluster trust bundle and rolls the Deployment when its content changes", func() {
+			bundle := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "roots", Namespace: namespace},
+				Data:       map[string]string{"ca-bundle.crt": "first"},
+			}
+			Expect(k8sClient.Create(ctx, bundle)).To(Succeed())
+			cluster.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+				ConfigMapRef: corev1.LocalObjectReference{Name: "roots"},
+			}
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			autoscaler = newTestAutoscaler(namespace, "tb", "nomad")
+			Expect(k8sClient.Create(ctx, autoscaler)).To(Succeed())
+			nsName := types.NamespacedName{Name: autoscaler.Name, Namespace: namespace}
+
+			reconcileToSteadyState(nsName)
+
+			deploy := &appsv1.Deployment{}
+			deployKey := types.NamespacedName{Name: "tb-autoscaler-agent", Namespace: namespace}
+			Expect(k8sClient.Get(ctx, deployKey, deploy)).To(Succeed())
+			var mounted bool
+			for _, v := range deploy.Spec.Template.Spec.Volumes {
+				if v.Name == "trust-bundle" && v.ConfigMap != nil && v.ConfigMap.Name == "roots" {
+					mounted = true
+				}
+			}
+			Expect(mounted).To(BeTrue(), "agent pod must mount the cluster trust bundle")
+			first := deploy.Spec.Template.Annotations["checksum/config"]
+			Expect(first).NotTo(BeEmpty())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "roots", Namespace: namespace}, bundle)).To(Succeed())
+			bundle.Data["ca-bundle.crt"] = "second"
+			Expect(k8sClient.Update(ctx, bundle)).To(Succeed())
+
+			_, err := reconcileAutoscaler(ctx, nsName, factory)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, deployKey, deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Annotations["checksum/config"]).NotTo(Equal(first),
+				"a trust bundle content change must roll the agents — running pods keep the stale roots")
 		})
 
 		It("should render HA config, lock ACL, PDB, and anti-affinity for replicas > 1", func() {
@@ -650,3 +692,61 @@ var _ = Describe("NomadAutoscaler token mint unwind (neo-2um.17)", func() {
 			"the unrecorded mint must be unwound so retries cannot accumulate orphans")
 	})
 })
+
+func TestAutoscalerAgentTrustBundle(t *testing.T) {
+	tests := []struct {
+		name       string
+		bundle     *nomadv1alpha1.TrustBundleSpec
+		wantBundle bool
+	}{
+		{name: "no trust bundle"},
+		{
+			name: "effective trust bundle",
+			bundle: &nomadv1alpha1.TrustBundleSpec{
+				ConfigMapRef: corev1.LocalObjectReference{Name: "autoscaler-roots"},
+				Key:          "roots.pem",
+			},
+			wantBundle: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			autoscaler := testAutoscaler(nil)
+			cluster := newTestCluster("ns1", "nomad")
+			cluster.Spec.TrustBundle = tt.bundle
+			r := &NomadAutoscalerReconciler{}
+
+			template := r.buildAgentPodTemplate(autoscaler, cluster, "c", "s")
+			var volume *corev1.Volume
+			for i := range template.Spec.Volumes {
+				if template.Spec.Volumes[i].Name == "trust-bundle" {
+					volume = &template.Spec.Volumes[i]
+				}
+			}
+			var mount *corev1.VolumeMount
+			for i := range template.Spec.Containers[0].VolumeMounts {
+				if template.Spec.Containers[0].VolumeMounts[i].Name == "trust-bundle" {
+					mount = &template.Spec.Containers[0].VolumeMounts[i]
+				}
+			}
+
+			if !tt.wantBundle {
+				if volume != nil || mount != nil {
+					t.Fatalf("unexpected trust bundle volume=%+v mount=%+v", volume, mount)
+				}
+				return
+			}
+			if volume == nil || volume.ConfigMap == nil || volume.ConfigMap.Name != "autoscaler-roots" {
+				t.Fatalf("trust bundle volume = %+v", volume)
+			}
+			if len(volume.ConfigMap.Items) != 1 || volume.ConfigMap.Items[0].Key != "roots.pem" ||
+				volume.ConfigMap.Items[0].Path != "ca-certificates.crt" {
+				t.Errorf("trust bundle items = %+v", volume.ConfigMap.Items)
+			}
+			if mount == nil || mount.MountPath != "/etc/ssl/certs" || !mount.ReadOnly {
+				t.Errorf("trust bundle mount = %+v", mount)
+			}
+		})
+	}
+}

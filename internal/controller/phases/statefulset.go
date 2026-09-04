@@ -318,7 +318,7 @@ grep -vF "\"${POD_NAME}.%[1]s-headless.%[2]s.svc.cluster.local\"" /nomad/config/
 		"keyrings":       string(keyringsJSON),
 	}
 	if _, _, ok := TrustBundle(cluster); ok {
-		bundleChecksum, err := p.computeTrustBundleChecksum(ctx, cluster)
+		bundleChecksum, err := TrustBundleChecksum(ctx, p.Client, cluster)
 		if err != nil {
 			p.Log.Error(err, "Failed to compute trust bundle checksum, using empty hash")
 			bundleChecksum = ConfigChecksum(nil)
@@ -884,30 +884,6 @@ func (p *StatefulSetPhase) computeSecretsChecksum(ctx context.Context, cluster *
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
-}
-
-func (p *StatefulSetPhase) computeTrustBundleChecksum(ctx context.Context, cluster *nomadv1alpha1.NomadCluster) (string, error) {
-	name, _, ok := TrustBundle(cluster)
-	if !ok {
-		return ConfigChecksum(nil), nil
-	}
-
-	cm := &corev1.ConfigMap{}
-	if err := p.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, cm); err != nil {
-		if errors.IsNotFound(err) {
-			return ConfigChecksum(nil), nil
-		}
-		return "", fmt.Errorf("failed to get trust bundle ConfigMap %s: %w", name, err)
-	}
-
-	data := make(map[string]string, len(cm.Data)+len(cm.BinaryData))
-	for key, value := range cm.Data {
-		data[key] = value
-	}
-	for key, value := range cm.BinaryData {
-		data[key] = string(value)
-	}
-	return ConfigChecksum(data), nil
 }
 
 // getGossipSecretName returns the gossip secret name for the cluster.

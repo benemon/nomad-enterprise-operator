@@ -112,10 +112,11 @@ spec:
 ## Trust bundle (`spec.trustBundle`)
 
 The Nomad Enterprise operand image ships without CA roots. Cloud
-keyrings (`awskms`, `azurekeyvault`, and `gcpckms`) and cloud snapshot
-targets therefore need a trust bundle to verify public TLS endpoints.
-The operator mounts the selected ConfigMap into server and snapshot-agent
-pods as `/etc/ssl/certs/ca-certificates.crt`.
+keyrings (`awskms`, `azurekeyvault`, and `gcpckms`), cloud snapshot
+targets, and an HTTPS `prometheusURL` for Dynamic Application Sizing
+therefore need a trust bundle to verify TLS endpoints. The operator
+mounts the selected ConfigMap into server, snapshot-agent, and
+autoscaler-agent pods as `/etc/ssl/certs/ca-certificates.crt`.
 
 On OpenShift, leave `spec.trustBundle` unset. When
 `spec.openshift.enabled: true`, the operator creates
@@ -130,8 +131,13 @@ own bundle (for example the injected bundle concatenated with your
 namespace's `openshift-service-ca.crt`) and reference it as a custom
 ConfigMap like any other bundle. On other platforms,
 reference a ConfigMap containing your CA bundle, or bake CA roots into a
-custom operand image. Changing bundle content changes the server pod
-checksum and rolls the StatefulSet.
+custom operand image. Changing bundle content changes each workload's
+config checksum and rolls the server StatefulSet and the
+snapshot-agent and autoscaler Deployments on their next reconcile
+(the bundle ConfigMap is not watched; each controller picks the
+change up on its periodic requeue). The processes load CA roots once
+at start, so the kubelet's in-place ConfigMap refresh alone would
+leave running pods on stale roots.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/go-logr/logr"
@@ -180,6 +181,33 @@ func TrustBundle(cluster *nomadv1alpha1.NomadCluster) (string, string, bool) {
 		return cluster.Name + "-trust-bundle", defaultTrustBundleKey, true
 	}
 	return "", "", false
+}
+
+// TrustBundleChecksum hashes the effective trust bundle ConfigMap's
+// content. An absent bundle or missing ConfigMap yields the
+// empty-content hash.
+func TrustBundleChecksum(ctx context.Context, c client.Client, cluster *nomadv1alpha1.NomadCluster) (string, error) {
+	name, _, ok := TrustBundle(cluster)
+	if !ok {
+		return ConfigChecksum(nil), nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := c.Get(ctx, types.NamespacedName{Name: name, Namespace: cluster.Namespace}, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ConfigChecksum(nil), nil
+		}
+		return "", fmt.Errorf("failed to get trust bundle ConfigMap %s: %w", name, err)
+	}
+
+	data := make(map[string]string, len(cm.Data)+len(cm.BinaryData))
+	for key, value := range cm.Data {
+		data[key] = value
+	}
+	for key, value := range cm.BinaryData {
+		data[key] = string(value)
+	}
+	return ConfigChecksum(data), nil
 }
 
 // getManagementToken loads the operator management token, empty with

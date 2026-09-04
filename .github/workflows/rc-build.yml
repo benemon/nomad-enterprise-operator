@@ -33,6 +33,7 @@ jobs:
   rc-build:
     needs: test
     name: Build and Push RC Image
+    timeout-minutes: 100
     runs-on: ubuntu-latest
     permissions:
       contents: read

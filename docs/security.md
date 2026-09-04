@@ -103,7 +103,7 @@ operator deletes an object explicitly.
 
 | Resource | Verbs | Used by |
 |----------|-------|---------|
-| `configmaps` | create, update, delete + reads | Cluster controller: OpenShift trust bundle and CA bundle ConfigMaps, keyring state ConfigMap. Autoscaler controller: agent configuration. `delete`: the cluster controller reaps the legacy rendered-config ConfigMap once the StatefulSet is fully rolled onto the Secret-backed config. |
+| `configmaps` | create, update, delete + reads | Cluster controller: OpenShift trust bundle and CA bundle ConfigMaps, keyring state ConfigMap. Autoscaler controller: agent configuration. Snapshot and autoscaler controllers: trust bundle content reads for the config checksum. `delete`: the cluster controller reaps the legacy rendered-config ConfigMap once the StatefulSet is fully rolled onto the Secret-backed config. |
 | `secrets` | create, update, delete + reads | Cluster controller: TLS certificates, gossip key, rendered server config, ACL token Secrets. Snapshot and autoscaler controllers: agent config and token Secrets. `delete`: the deletion finalizer removes the bootstrap-token Secret explicitly (it has no ownerReference - see above). `watch` also drives rolling restarts when referenced user Secrets change. |
 | `services` | create, update + reads | Cluster controller: internal, external, and headless Services. Autoscaler controller: agent metrics Service. |
 | `serviceaccounts` | create + reads | Cluster controller: the per-cluster ServiceAccount the Nomad pods run as. Owned, so never updated or deleted by the operator. |
