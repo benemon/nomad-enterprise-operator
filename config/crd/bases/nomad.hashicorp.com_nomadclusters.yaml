@@ -350,7 +350,7 @@ spec:
                           DeliveryGuarantee controls audit event delivery. enforced blocks
                           the API response until the event is persisted (fails closed);
                           best-effort keeps serving when the sink cannot keep up (fails
-                          open). Audit shape is otherwise operator-owned.
+                          open).
                         enum:
                         - enforced
                         - best-effort
