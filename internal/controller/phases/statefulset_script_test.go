@@ -44,31 +44,36 @@ func TestStartCommandSelfHealScript(t *testing.T) {
 	script := sts.Spec.Template.Spec.Containers[0].Command[2]
 
 	cases := []struct {
-		name        string
-		nslookup    string // stub stdout; empty = no output
-		bootstrap   string
-		nodeID      string
-		podIP       string
-		wantWrite   bool
-		wantAddress string
+		name         string
+		nslookup     string // stub stdout; empty = no output
+		nslookupLate string // when set, stub switches to this after two calls
+		bootstrap    string
+		nodeID       string
+		podIP        string
+		wantWrite    bool
+		wantAddress  string
 	}{
-		{"lone v4 server heals", "Name:\tnomad-headless.ns.svc.cluster.local\nAddress: 10.1.2.3\n",
+		{"sibling record drains then heals",
+			"Name:\tx\nAddress: 10.1.2.3\nName:\tx\nAddress: 10.1.2.4\n",
+			"Name:\tx\nAddress: 10.1.2.3\n",
 			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", true, `"address":"10.1.2.3:4647"`},
-		{"empty lookup fails closed", "",
-			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", false, ""},
-		{"v4 sibling blocks", "Name:\tx\nAddress: 10.1.2.3\nName:\tx\nAddress: 10.1.2.4\n",
-			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", false, ""},
-		{"v6 sibling blocks", "Name:\tx\nAddress: 10.1.2.3\nName:\tx\nAddress: fd00::9\n",
-			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", false, ""},
-		{"resolver address line not counted as sibling", "Server:\t10.96.0.10\nAddress: 10.96.0.10:53\n\nName:\tx\nAddress: 10.1.2.3\n",
+		{"lone v4 server heals", "Name:\tnomad-headless.ns.svc.cluster.local\nAddress: 10.1.2.3\n", "",
 			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", true, `"address":"10.1.2.3:4647"`},
-		{"multi-server config blocks", "Name:\tx\nAddress: 10.1.2.3\n",
+		{"empty lookup fails closed", "", "",
+			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", false, ""},
+		{"v4 sibling blocks", "Name:\tx\nAddress: 10.1.2.3\nName:\tx\nAddress: 10.1.2.4\n", "",
+			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", false, ""},
+		{"v6 sibling blocks", "Name:\tx\nAddress: 10.1.2.3\nName:\tx\nAddress: fd00::9\n", "",
+			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", false, ""},
+		{"resolver address line not counted as sibling", "Server:\t10.96.0.10\nAddress: 10.96.0.10:53\n\nName:\tx\nAddress: 10.1.2.3\n", "",
+			"  bootstrap_expect = 1", "abc-123", "10.1.2.3", true, `"address":"10.1.2.3:4647"`},
+		{"multi-server config blocks", "Name:\tx\nAddress: 10.1.2.3\n", "",
 			"  bootstrap_expect = 3", "abc-123", "10.1.2.3", false, ""},
-		{"missing node-id blocks", "Name:\tx\nAddress: 10.1.2.3\n",
+		{"missing node-id blocks", "Name:\tx\nAddress: 10.1.2.3\n", "",
 			"  bootstrap_expect = 1", "", "10.1.2.3", false, ""},
-		{"empty POD_IP blocks", "Name:\tx\nAddress: 10.1.2.3\n",
+		{"empty POD_IP blocks", "Name:\tx\nAddress: 10.1.2.3\n", "",
 			"  bootstrap_expect = 1", "abc-123", "", false, ""},
-		{"lone v6 server heals with brackets", "Name:\tx\nAddress: fd00::3\n",
+		{"lone v6 server heals with brackets", "Name:\tx\nAddress: fd00::3\n", "",
 			"  bootstrap_expect = 1", "abc-123", "fd00::3", true, `"address":"[fd00::3]:4647"`},
 	}
 
@@ -95,8 +100,16 @@ func TestStartCommandSelfHealScript(t *testing.T) {
 				t.Fatal(err)
 			}
 			quoted := "'" + strings.ReplaceAll(tc.nslookup, "'", `'\''`) + "'"
-			if err := os.WriteFile(filepath.Join(binDir, "nslookup"),
-				[]byte("#!/bin/sh\nprintf '%s' "+quoted+"\n"), 0o755); err != nil {
+			stub := "#!/bin/sh\nprintf '%s' " + quoted + "\n"
+			if tc.nslookupLate != "" {
+				quotedLate := "'" + strings.ReplaceAll(tc.nslookupLate, "'", `'\''`) + "'"
+				stub = "#!/bin/sh\n" +
+					"n=$(cat " + filepath.Join(root, "calls") + " 2>/dev/null || echo 0)\n" +
+					"echo $((n+1)) > " + filepath.Join(root, "calls") + "\n" +
+					"if [ \"$n\" -lt 2 ]; then printf '%s' " + quoted + "\n" +
+					"else printf '%s' " + quotedLate + "\nfi\n"
+			}
+			if err := os.WriteFile(filepath.Join(binDir, "nslookup"), []byte(stub), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			// sleep stubbed to keep the fail-closed retry loop instant.

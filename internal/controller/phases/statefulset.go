@@ -196,19 +196,23 @@ func (p *StatefulSetPhase) buildStatefulSet(ctx context.Context, cluster *nomadv
 	// to self-only), existing raft state (fresh bootstraps and emptyDir
 	// restarts stay on the normal path), and no sibling in headless DNS
 	// (spec.replicas may already say 1 while scale-down peers are still
-	// voters; their pods outlive their Raft entries, so a resolving
-	// sibling means abort). The guard fails closed — a skipped heal
-	// costs one more restart; a wrong heal resets a multi-server Raft
-	// configuration. Address rows are taken only after Name lines (the
-	// resolver's own address line would otherwise count).
+	// voters; their pods outlive their Raft entries, so a persisting
+	// sibling means abort). Removed peers' records may briefly outlive
+	// a completed scale-down — raft removal precedes pod deletion — so
+	// the wait retries until the answer is clean or the window closes.
+	// The guard fails closed — a skipped heal costs one more restart; a
+	// wrong heal resets a multi-server Raft configuration. Address rows
+	// are taken only after Name lines (the resolver's own address line
+	// would otherwise count).
 	startCommand := fmt.Sprintf(
 		`NODE_ID=$(cat /nomad/data/server/node-id 2>/dev/null || true)
 if [ -n "$NODE_ID" ] && [ -n "${POD_IP}" ] && grep -q 'bootstrap_expect = 1$' /nomad/config/server.hcl; then
   ALONE=""
   for i in $(seq 1 30); do
     ADDRS=$(nslookup %[1]s-headless.%[2]s.svc.cluster.local 2>/dev/null | awk '/^Name:/{n=1;next} /^Address/{if(n)print $2}' || true)
-    if [ -n "$ADDRS" ] && echo "$ADDRS" | grep -qx "${POD_IP}"; then
-      if [ "$(echo "$ADDRS" | grep -cvx "${POD_IP}")" -eq 0 ]; then ALONE=yes; fi
+    if [ -n "$ADDRS" ] && echo "$ADDRS" | grep -qx "${POD_IP}" &&
+      [ "$(echo "$ADDRS" | grep -cvx "${POD_IP}")" -eq 0 ]; then
+      ALONE=yes
       break
     fi
     sleep 1
