@@ -23,9 +23,9 @@ rotation, gossip and root-key custody, ACL bootstrap, audit logging,
 snapshots, and upgrades. This operator makes that lifecycle declarative
 through three custom resources:
 
-- **`NomadCluster`** - a production-shaped server cluster: mTLS
-  everywhere, ACLs bootstrapped automatically, audit logging, external
-  KMS keyrings, Vault workload identity, Pod Security `restricted`.
+- **`NomadCluster`** - a server cluster with mTLS, automatic ACL
+  bootstrap, audit logging, external KMS keyrings, Vault workload
+  identity, and Pod Security `restricted`.
 - **`NomadSnapshot`** - scheduled or one-shot Raft snapshots to a local
   PVC, S3, GCS, or Azure Blob storage.
 - **`NomadAutoscaler`** - managed Nomad Autoscaler agents, including
@@ -38,8 +38,8 @@ Kubernetes and are out of scope. See
 ## Quick start
 
 The only required field is a Nomad Enterprise license. Everything else
-defaults sensibly (3 replicas, ACLs enabled, auto-generated gossip key,
-10Gi persistent storage):
+has a default: 3 replicas, ACLs enabled, an auto-generated gossip key,
+and 15Gi of persistent storage per replica (10Gi data, 5Gi audit):
 
 ```yaml
 apiVersion: nomad.hashicorp.com/v1alpha1

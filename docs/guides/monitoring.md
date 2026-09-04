@@ -38,14 +38,14 @@ Consequences to plan for:
   ServiceMonitor without the drop rule targeting the marked headless
   service - the operator does not prevent supplementary monitors.
 
-The shipped PrometheusRule covers three concern groups: health
+The shipped PrometheusRule carries one rule group (`nomad.rules`)
+whose 13 alerts cover three concerns: health
 (leader loss, server down, job failures, memory, Raft backlog and
 commit latency), lifecycle expiry (CA and server certificates,
 license), and control-plane saturation. `NomadEvalsBlocked` and
 `NomadPlanQueueBacklog` fire on the scale-trigger signals;
 `NomadRaftCommitSlow` fires on the symptom of under-provisioned
-storage or CPU. All expressions target metric names verified against
-live Nomad 2.0.x telemetry. When the saturation alerts fire:
+storage or CPU. When the saturation alerts fire:
 
 > Scale the servers vertically first; scale horizontally (3 → 5
 > servers) when sustained scheduler saturation persists at the larger
@@ -72,12 +72,13 @@ automatically; the declarative equivalent ships at
 | `nomad_operator_acl_bootstrap_failures_total` | Counter | `cluster`, `namespace` | Failed ACL bootstrap attempts. Any non-zero rate warrants investigation |
 | `nomad_operator_scale_down_in_progress` | Gauge | `cluster`, `namespace` | 1 while a Raft scale-down operation is running, else 0 |
 | `nomad_operator_nomad_version_info` | Gauge | `cluster`, `namespace`, `version` | Constant 1; the observed Nomad server version is carried as a label. The previous series is deleted on version change so each cluster exposes a single version label |
+| `nomad_operator_keyring_token_renewals_total` | Counter | `cluster`, `namespace`, `entry` | Successful Vault keyring-token renewals per transit entry; read as a rate against mints |
+| `nomad_operator_keyring_token_mints_total` | Counter | `cluster`, `namespace`, `entry` | Vault keyring-token mints (fresh logins) per transit entry; a rising rate with flat renewals signals a re-mint storm |
 
 A Grafana dashboard covering these metrics plus the controller-runtime
-reconcile, workqueue, and process series ships at
-[`config/grafana/operator-dashboard.json`](https://github.com/benemon/nomad-enterprise-operator/blob/main/config/grafana/operator-dashboard.json) -
-import it and point the datasource variable at the Prometheus that
-scrapes the operator.
+reconcile, workqueue, and process series ships in the repository at
+`config/grafana/operator-dashboard.json`. Import it and point the
+datasource variable at the Prometheus that scrapes the operator.
 
 
 ## Capacity

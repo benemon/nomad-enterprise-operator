@@ -1,5 +1,5 @@
 site_name: Nomad Enterprise Operator
-site_description: Deploy, snapshot and scale Nomad Enterprise control planes - on the Kubernetes cluster you already run.
+site_description: A Kubernetes operator that deploys, snapshots, and scales Nomad Enterprise server clusters.
 site_url: https://benemon.github.io/nomad-enterprise-operator/
 repo_url: https://github.com/benemon/nomad-enterprise-operator
 repo_name: benemon/nomad-enterprise-operator

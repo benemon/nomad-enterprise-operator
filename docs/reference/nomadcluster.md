@@ -1,6 +1,10 @@
 # NomadCluster reference
 
-## Top-level Spec
+A `NomadCluster` deploys and manages one Nomad Enterprise server
+cluster: the StatefulSet, its TLS material, gossip key, ACL bootstrap,
+keyrings, and Services. Field groups follow the spec's structure.
+
+## Top-level spec
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -22,7 +26,7 @@
 | `tolerations` | `[]Toleration` | | Tolerations for pod scheduling |
 | `topologySpreadConstraints` | `[]TopologySpreadConstraint` | | Topology spread constraints |
 
-## Server Configuration (`spec.server`)
+## Server configuration (`spec.server`)
 
 Server-scoped configuration is split across the subsections below:
 [TLS](#tls-specservertls), [ACL](#acl-specserveracl),
@@ -62,10 +66,10 @@ Autopilot is operator-owned and not configurable:
 
 Format (`json`) and rotation (`24h` × 15 files) are operator-owned.
 Ship logs with a sidecar if you need different retention. Delivery is
-the one user lever: `enforced` (the default) blocks API responses until
-the event is persisted - fails closed - while `best-effort` keeps
-serving when the sink cannot keep up - fails open. Leave it enforced
-unless your storage demonstrably cannot sustain the audit write rate.
+the one user lever. `enforced` (the default) blocks API responses
+until the event is persisted. `best-effort` keeps serving when the
+sink cannot keep up. Leave it enforced unless your storage cannot
+sustain the audit write rate.
 
 Two [audit filters](https://developer.hashicorp.com/nomad/docs/configuration/audit)
 ship by default: the `/v1/metrics` endpoint and the `OperationReceived`
@@ -87,12 +91,12 @@ scale-down along with its data PVC.
 | `server.audit.storageClassName` | `string` | | Storage class for the audit PVC |
 | `server.audit.deliveryGuarantee` | `string` | `enforced` | `enforced` or `best-effort` audit event delivery |
 
-## Garbage Collection (`spec.server.gc`)
+## Garbage collection (`spec.server.gc`)
 
 How long terminal job/eval/alloc history is kept before Nomad garbage
 collects it. Every field is optional; an unset field inherits Nomad's
-own default, and those defaults are asymmetric by design - batch history
-(24h) is kept far longer than disposable non-batch eval state (1h). Tune
+own default. Nomad keeps batch history (24h) far longer than
+non-batch eval state (1h). Tune
 these down for high-churn dispatch workloads: dead batch state
 accumulates in Raft between GC runs and is the dominant driver of server
 memory growth under sustained dispatch load. Only the three history
@@ -106,7 +110,7 @@ defaults. Values are Nomad durations (`s`/`m`/`h`, e.g. `30m`, `2h`).
 | `server.gc.evalHistory` | `string` | Nomad `1h` | Minimum retention of a terminal non-batch evaluation and its allocations (`eval_gc_threshold`) |
 
 
-## Gossip Encryption (`spec.gossip`)
+## Gossip encryption (`spec.gossip`)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -186,7 +190,7 @@ NAME              PHASE     READY   DESIRED   ADVERTISE        AGE
 nomad-enterprise  Running   3       3         10.96.0.15       5m
 ```
 
-## Status Fields
+## Status fields
 
 | Field | Description |
 |-------|-------------|
@@ -217,9 +221,8 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 ## Conditions
 
 `status.conditions[]` contains exactly **one** condition, type `Ready`.
-Everything a per-resource condition used to say lives in the status
-sub-fields above - the condition tells you *whether* the cluster is
-healthy; the sub-fields tell you *why*. `Ready=True` requires the
+The condition reports overall health; the status sub-fields above
+carry the detail. `Ready=True` requires the
 StatefulSet at its desired ready replica count, a valid license, and
 healthy autopilot (an unreachable probe does not fail Ready - the
 sub-field keeps its last-known value).

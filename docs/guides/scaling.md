@@ -37,8 +37,8 @@ killer with a healthy heap. The value tracks `resources.limits.memory`
 (including the default when resources are unset); there is no knob.
 The remaining 10% is headroom for memory outside the runtime's
 control, so a server whose genuinely live state exceeds the limit
-still fails - the soft limit buys degradation instead of a cliff, not
-unbounded capacity.
+still fails. The soft limit trades an abrupt OOM kill for gradual
+reclaim; it does not add capacity.
 
 Storage IOPS and throughput are properties of the storageClass and
 invisible to the operator - validating them is a user responsibility.
@@ -59,15 +59,31 @@ For multi-zone distribution use the standard
 
 ## Pod Disruption Budget
 
-For HA clusters (`spec.replicas ≥ 3`) the operator owns a `policy/v1` PodDisruptionBudget named after the cluster, with `maxUnavailable = replicas/2` (integer division: 1 for `N=3`, 2 for `N=5`). This bounds voluntary disruptions - node drains, upgrades, and rolling rollouts - so a Raft quorum is always preserved.
+For HA clusters (`spec.replicas ≥ 3`) the operator owns a `policy/v1`
+PodDisruptionBudget named after the cluster, with `maxUnavailable =
+replicas/2` (integer division: 1 for `N=3`, 2 for `N=5`). This bounds
+voluntary disruptions - node drains, upgrades, and rolling rollouts - so
+a Raft quorum is always preserved.
 
-For single-instance clusters (`spec.replicas = 1`) no PDB is created. Single-instance clusters are not HA, and a PDB with `maxUnavailable: 0` would block all voluntary disruption (preventing routine node maintenance) without providing any quorum benefit.
+For single-instance clusters (`spec.replicas = 1`) no PDB is created.
+Single-instance clusters are not HA, and a PDB with `maxUnavailable: 0`
+would block all voluntary disruption (preventing routine node
+maintenance) without providing any quorum benefit.
 
-The PDB is operator-owned with no spec field; scaling from `N=3` to `N=5` updates `maxUnavailable` in place, and scaling down to `N=1` deletes the PDB. Out-of-band PDB deletions are recreated on the next reconcile.
+The PDB is operator-owned with no spec field; scaling from `N=3` to
+`N=5` updates `maxUnavailable` in place, and scaling down to `N=1`
+deletes the PDB. Out-of-band PDB deletions are recreated on the next
+reconcile.
 
 ## Scaling down
 
-To scale a cluster down, patch `spec.replicas` to the desired count. The operator removes one Raft peer per reconcile (highest ordinal first), verifies the removal against the new peer list, records the removed server ID in `status.scaleDown.removedPeers`, and only patches `sts.spec.replicas` once every required peer has been removed. The recorded list persists across operator restarts so a crashed operator never re-removes a peer.
+To scale a cluster down, patch `spec.replicas` to the desired count. The
+operator removes one Raft peer per reconcile (highest ordinal first),
+verifies the removal against the new peer list, records the removed
+server ID in `status.scaleDown.removedPeers`, and only patches
+`sts.spec.replicas` once every required peer has been removed. The
+recorded list persists across operator restarts so a crashed operator
+never re-removes a peer.
 
 Scaling from 3 or more replicas down to fewer than 3 sacrifices Raft
 fault tolerance, so the operator refuses to start until you opt in by
@@ -107,21 +123,21 @@ would strand at one voter. The server start wrapper closes this at
 boot: when the rendered config says one replica, Raft state exists,
 and no sibling pod resolves in the headless service, it rewrites the
 self-entry to the current pod IP via Nomad's native `peers.json`
-recovery. The guards matter more than the write - a multi-server
-cluster must never be reset to a self-only configuration, so the heal
-never fires while any sibling exists. Multi-voter clusters need no
-help: the leader repairs peer addresses natively.
+recovery. A multi-server cluster must never be reset to a self-only
+configuration, so the heal never fires while any sibling exists.
+Multi-voter clusters repair peer addresses through the leader without
+operator involvement.
 
-### The one window the heal cannot cover
+### Limitation: crash during scale-up
 
 If the lone server crashes **during an in-progress scale-up** - after
 `spec.replicas` was raised (the rendered config now names more than
 one replica) but before the first new server reached the voter set -
-the guards correctly refuse to heal, and the returning server carries
-a stale self-address the new peers cannot get past. The scale-up then
-holds rather than corrupting anything: `status.autopilot` shows fewer
-voters than replicas, and the operator logs `Scale-up holding` on
-every reconcile. Recovery uses only spec operations:
+the guards refuse to heal, and the returning server carries a stale
+self-address the new peers cannot get past. The scale-up holds:
+`status.autopilot` shows fewer voters than replicas, and the operator
+logs `Scale-up holding` on every reconcile. Recovery uses only spec
+operations:
 
 1. Patch `spec.replicas` back to `1`. The operator removes the
    part-joined peers and returns the cluster to a clean single-server
@@ -132,9 +148,17 @@ every reconcile. Recovery uses only spec operations:
 3. Raise `spec.replicas` to the target. The serialized scale-up walks
    back up from the healed state.
 
-Two operational rules:
+!!! warning "Do not `kubectl delete pod <cluster>-N` to scale"
+    The operator's scale-down contract is "user adjusts
+    `spec.replicas`." Out-of-band pod deletion does not trigger Raft
+    peer removal; the dead Raft entry sits there until Nomad
+    autopilot's `cleanupDeadServers` removes it (if enabled).
 
-- **Do not `kubectl delete pod <cluster>-N` directly.** The operator's scale-down contract is "user adjusts `spec.replicas`." Out-of-band pod deletion does not trigger Raft peer removal; the dead Raft entry sits there until Nomad autopilot's `cleanupDeadServers` eventually removes it (if enabled).
-- **Serf gossip cleanup is delegated to autopilot.** The operator does not call `nomad server force-leave`. With the default `autopilot.cleanupDeadServers: true`, stale Serf members are removed within `autopilot.lastContactThreshold × N` intervals after the pod terminates. If you disable `cleanupDeadServers`, run `nomad server force-leave <name>` manually after a scale-down.
+!!! note "Serf gossip cleanup is delegated to autopilot"
+    The operator does not call `nomad server force-leave`. With the
+    default `autopilot.cleanupDeadServers: true`, stale Serf members
+    are removed within `autopilot.lastContactThreshold × N` intervals
+    after the pod terminates. If you disable `cleanupDeadServers`, run
+    `nomad server force-leave <name>` manually after a scale-down.
 
 
