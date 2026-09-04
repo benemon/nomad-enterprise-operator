@@ -166,14 +166,14 @@ func TestTrustBundleChecksum(t *testing.T) {
 
 	t.Run("absent and empty ConfigMaps do not error", func(t *testing.T) {
 		absent := NewStatefulSetPhase(newTestPhaseContext())
-		if _, err := absent.computeTrustBundleChecksum(context.Background(), cluster); err != nil {
+		if _, err := TrustBundleChecksum(context.Background(), absent.Client, cluster); err != nil {
 			t.Fatalf("absent ConfigMap error = %v", err)
 		}
 
 		empty := NewStatefulSetPhase(newTestPhaseContext(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 			Name: "roots", Namespace: "ns",
 		}}))
-		if _, err := empty.computeTrustBundleChecksum(context.Background(), cluster); err != nil {
+		if _, err := TrustBundleChecksum(context.Background(), empty.Client, cluster); err != nil {
 			t.Fatalf("empty ConfigMap error = %v", err)
 		}
 	})

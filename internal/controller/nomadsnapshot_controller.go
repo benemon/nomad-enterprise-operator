@@ -274,7 +274,11 @@ func (r *NomadSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// workload's pod template carries its checksum so config changes
 	// (including credential rotation) roll the agent (AC-2.7.6a).
 	agentConfig := r.generateSnapshotConfig(snapshot, storageCredentials)
-	configChecksum := phases.ConfigChecksum(map[string]string{"snapshot.hcl": agentConfig})
+	configChecksum, err := r.agentConfigChecksum(ctx, cluster, agentConfig)
+	if err != nil {
+		log.Error(err, "Failed to compute config checksum")
+		return ctrl.Result{}, err
+	}
 	// A token re-mint rewrites the Secret in place while the pod spec
 	// stays byte-identical, and env-injected Secrets are never re-read
 	// by running pods: hash the token into the template so a re-mint
@@ -833,6 +837,20 @@ func (r *NomadSnapshotReconciler) reconcileStorageCredentials(
 		return nil, false, err
 	}
 	return nil, false, nil
+}
+
+// agentConfigChecksum hashes the rendered agent config plus, when a
+// trust bundle is effective, the bundle content.
+func (r *NomadSnapshotReconciler) agentConfigChecksum(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, agentConfig string) (string, error) {
+	configData := map[string]string{"snapshot.hcl": agentConfig}
+	if _, _, ok := phases.TrustBundle(cluster); ok {
+		bundleChecksum, err := phases.TrustBundleChecksum(ctx, r.Client, cluster)
+		if err != nil {
+			return "", fmt.Errorf("failed to compute trust bundle checksum: %w", err)
+		}
+		configData["trust-bundle"] = bundleChecksum
+	}
+	return phases.ConfigChecksum(configData), nil
 }
 
 // generateSnapshotConfig renders the agent HCL. Target stanzas are

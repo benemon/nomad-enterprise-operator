@@ -865,6 +865,77 @@ func TestSnapshotTokenRemintRollsDeployment(t *testing.T) {
 	}
 }
 
+// Agents load CA roots once at process start, so a changed bundle must
+// reach them through a config-checksum roll, not the kubelet's in-place
+// ConfigMap refresh.
+func TestSnapshotTrustBundleContentRollsDeployment(t *testing.T) {
+	snap := newOneShotSnapshot("tb-roll")
+	snap.Spec.Schedule = &nomadv1alpha1.SnapshotSchedule{Interval: "1h", Retain: 24}
+	snap.Finalizers = []string{snapshotFinalizer}
+	cluster := newTestCluster("snap-ns", "test-cluster")
+	cluster.Status.ACLBootstrapped = true
+	cluster.Spec.TrustBundle = &nomadv1alpha1.TrustBundleSpec{
+		ConfigMapRef: corev1.LocalObjectReference{Name: "roots"},
+	}
+	bundle := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "roots", Namespace: "snap-ns"},
+		Data:       map[string]string{"ca-bundle.crt": "first"},
+	}
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-tls", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"ca.crt": []byte("dummy-ca")},
+	}
+	mgmt := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster-operator-management", Namespace: "snap-ns"},
+		Data:       map[string][]byte{"secret-id": []byte("mgmt-token")},
+	}
+	r, _ := newSnapshotReconciler(snap, cluster, bundle, tlsSecret, mgmt)
+
+	mockNomad := mocks.NewMockNomadAPI(t)
+	r.NomadClientFactory = func(_ nomad.ClientConfig) (nomad.NomadAPI, error) {
+		return mockNomad, nil
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "tb-roll", Namespace: "snap-ns"}}
+	policyName := "snapshot-agent-snap-ns-tb-roll"
+
+	mockNomad.EXPECT().
+		CreateACLPolicy("mgmt-token", policyName, "Snapshot agent policy for tb-roll", snapshotAgentPolicyRules).
+		Return(nil).Once()
+	mockNomad.EXPECT().
+		CreateACLTokenWithPolicies("mgmt-token", policyName, []string{policyName}).
+		Return(&nomad.ACLTokenResult{AccessorID: "acc-1", SecretID: "secret-1"}, nil).Once()
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	deploy := &appsv1.Deployment{}
+	deployKey := types.NamespacedName{Name: "tb-roll-snapshot-agent", Namespace: "snap-ns"}
+	if err := r.Get(context.Background(), deployKey, deploy); err != nil {
+		t.Fatal(err)
+	}
+	first := deploy.Spec.Template.Annotations["checksum/config"]
+	if first == "" {
+		t.Fatal("pod template missing checksum/config annotation")
+	}
+
+	bundle.Data["ca-bundle.crt"] = "second"
+	if err := r.Update(context.Background(), bundle); err != nil {
+		t.Fatalf("update trust bundle ConfigMap: %v", err)
+	}
+	mockNomad.EXPECT().
+		GetACLToken("mgmt-token", "acc-1").
+		Return(&nomad.ACLTokenResult{AccessorID: "acc-1", SecretID: "secret-1"}, nil).Once()
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() second pass error = %v", err)
+	}
+	if err := r.Get(context.Background(), deployKey, deploy); err != nil {
+		t.Fatal(err)
+	}
+	if got := deploy.Spec.Template.Annotations["checksum/config"]; got == first {
+		t.Error("trust bundle content change did not perturb the pod template — running agents keep the stale roots")
+	}
+}
+
 // neo-87a: the mint is not idempotent — a network error after a
 // possibly-committed create must NOT reach the in-helper LB retry and
 // mint a second, orphaned token. Mockery's .Once() fails the test on
