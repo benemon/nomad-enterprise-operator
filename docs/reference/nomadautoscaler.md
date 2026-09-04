@@ -77,6 +77,11 @@ out of CE binaries: query an enterprise server (a CE binary answers
 enterprise binary on client nodes removes the caveat; clients need no
 license of their own.
 
+An HTTPS `prometheusURL` signed by a private CA needs that CA in the
+cluster's trust bundle: the agent pod mounts the NomadCluster's
+`spec.trustBundle` at `/etc/ssl/certs`. See
+[TLS and trust](../guides/tls.md#trust-bundle-spectrustbundle).
+
 ## Autoscaler high availability
 
 At `replicas > 1` the agents form a leader-election group over a Nomad

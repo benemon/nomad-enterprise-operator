@@ -107,6 +107,13 @@ missing Secret reports `Ready=False` with reason
 S3 and Azure, the credentials are included in `checksum/config`, so
 rotation rolls a recurring Deployment onto the new config.
 
+TLS verification of storage endpoints uses the NomadCluster's trust
+bundle: the agent pod mounts `spec.trustBundle` at `/etc/ssl/certs`.
+The operand image ships without CA roots, so a private CA (an
+S3-compatible endpoint behind your own CA, for example) verifies only
+through the bundle. See
+[TLS and trust](../guides/tls.md#trust-bundle-spectrustbundle).
+
 ### Credential custody
 
 Because the agent reads credentials from its
