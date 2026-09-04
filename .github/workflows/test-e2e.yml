@@ -51,6 +51,7 @@ env:
 jobs:
   test-e2e:
     name: e2e on kind (${{ inputs.lane == 'full' && 'full suite' || 'PR lane' }})
+    timeout-minutes: 100
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code

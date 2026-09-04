@@ -26,6 +26,7 @@ env:
 jobs:
   nightly-e2e:
     name: Full suite on kind
+    timeout-minutes: 100
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -93,6 +94,7 @@ jobs:
 
   upgrade-matrix:
     name: Upgrade ${{ matrix.upgrade.from }} -> ${{ matrix.upgrade.to }}
+    timeout-minutes: 100
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
