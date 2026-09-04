@@ -2531,10 +2531,19 @@ spec:
 		// discards live peers. A steady-state crash exercises the
 		// bootstrap_expect and DNS-sibling guards.
 		It("never writes peers.json on a multi-server restart", func() {
+			// Pod 0's log legitimately carries the heal line from the
+			// single-voter spec above, so it gets a before/after count;
+			// the pods restarted here get absolute absence.
+			By("recording pod 0's prior heal count")
+			logs, err := utils.Run(exec.Command("kubectl", "logs",
+				"pod/"+scaleDownClusterName+"-0", "-n", namespace))
+			Expect(err).NotTo(HaveOccurred())
+			priorHeals := strings.Count(logs, "wrote peers.json")
+
 			By("deleting pod 1 of the 3-server cluster")
 			cmd := exec.Command("kubectl", "delete", "pod", scaleDownClusterName+"-1", "-n", namespace,
 				"--wait=true", "--timeout=2m")
-			_, err := utils.Run(cmd)
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("waiting for the quorum to recover natively")
@@ -2546,9 +2555,14 @@ spec:
 				g.Expect(output).To(Equal("true 3"))
 			}, 10*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying no pod ever ran the single-server self-heal")
-			for i := 0; i < 3; i++ {
-				pod := fmt.Sprintf("%s-%d", scaleDownClusterName, i)
+			By("verifying no self-heal ran during the restart")
+			logs, err = utils.Run(exec.Command("kubectl", "logs",
+				"pod/"+scaleDownClusterName+"-0", "-n", namespace))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Count(logs, "wrote peers.json")).To(Equal(priorHeals),
+				"pod 0 must not heal again while siblings exist")
+			for _, ordinal := range []string{"1", "2"} {
+				pod := scaleDownClusterName + "-" + ordinal
 				logs, err := utils.Run(exec.Command("kubectl", "logs", "pod/"+pod, "-n", namespace))
 				Expect(err).NotTo(HaveOccurred(), "log retrieval must succeed for %s", pod)
 				Expect(logs).NotTo(ContainSubstring("wrote peers.json"),
@@ -5190,6 +5204,18 @@ spec:
 				g.Expect(output).To(Equal("True true"))
 			}, 12*time.Minute, 10*time.Second).Should(Succeed())
 
+			// Convergence below (ready==3, revisions equal) is
+			// indistinguishable from a roll that has not started, so a
+			// poll racing the operator's reconcile declares victory on
+			// the old image. Capture the revision BEFORE the patch —
+			// the operator can apply the new template within
+			// milliseconds — then gate on it moving, which proves the
+			// controller observed the roll.
+			cmd = exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
+				"-o", "jsonpath={.status.updateRevision}")
+			preRollRevision, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
 			By(fmt.Sprintf("patching spec.image.tag to %s", toTag))
 			cmd = exec.Command("kubectl", "patch", "nomadcluster", upgradeClusterName, "-n", namespace,
 				"--type=merge", "-p", fmt.Sprintf(`{"spec":{"image":{"tag":%q}}}`, toTag))
@@ -5197,16 +5223,6 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			By("waiting for the StatefulSet controller to begin the roll")
-			// Convergence below (ready==3, revisions equal) is
-			// indistinguishable from a roll that has not started, so a
-			// poll racing the operator's reconcile declares victory on
-			// the old image. Gate on updateRevision moving past the
-			// pre-patch revision: that proves the controller observed
-			// the new template, not merely that the API stored it.
-			cmd = exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
-				"-o", "jsonpath={.status.updateRevision}")
-			preRollRevision, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "statefulset", upgradeClusterName, "-n", namespace,
 					"-o", "jsonpath={.spec.template.spec.containers[0].image} {.status.updateRevision}")
