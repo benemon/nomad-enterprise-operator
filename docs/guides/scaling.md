@@ -112,6 +112,26 @@ cluster must never be reset to a self-only configuration, so the heal
 never fires while any sibling exists. Multi-voter clusters need no
 help: the leader repairs peer addresses natively.
 
+### The one window the heal cannot cover
+
+If the lone server crashes **during an in-progress scale-up** - after
+`spec.replicas` was raised (the rendered config now names more than
+one replica) but before the first new server reached the voter set -
+the guards correctly refuse to heal, and the returning server carries
+a stale self-address the new peers cannot get past. The scale-up then
+holds rather than corrupting anything: `status.autopilot` shows fewer
+voters than replicas, and the operator logs `Scale-up holding` on
+every reconcile. Recovery uses only spec operations:
+
+1. Patch `spec.replicas` back to `1`. The operator removes the
+   part-joined peers and returns the cluster to a clean single-server
+   shape.
+2. Delete the server pod (`kubectl delete pod <cluster>-0`). On
+   restart the config names one replica again, the guards pass, and
+   the heal pins the Raft self-entry to the new pod IP.
+3. Raise `spec.replicas` to the target. The serialized scale-up walks
+   back up from the healed state.
+
 Two operational rules:
 
 - **Do not `kubectl delete pod <cluster>-N` directly.** The operator's scale-down contract is "user adjusts `spec.replicas`." Out-of-band pod deletion does not trigger Raft peer removal; the dead Raft entry sits there until Nomad autopilot's `cleanupDeadServers` eventually removes it (if enabled).
