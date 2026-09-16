@@ -2,7 +2,7 @@
 
 ## Image version pinning
 
-The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.6-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
+The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.6-ent`), not a floating tag like `1.11-ent` or `2-ent`. This protects Raft cluster integrity.
 
 Upgrading a cluster to a new Nomad version is a user-driven
 `spec.image.tag` change. **Snapshot before you upgrade** - the operator
@@ -53,7 +53,7 @@ immutable, so `pullPolicy: Always` becomes redundant - harmless, but
 `IfNotPresent` avoids pointless registry round-trips. The snapshot
 agent uses the same image reference as the cluster.
 
-**Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. Upgrade behaviour: existing NomadClusters that do not override `spec.image.tag` receive the new default on next reconcile, which triggers a rolling restart of the StatefulSet.
+**Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. The new default applies to NomadClusters created after the operator upgrade. Existing clusters keep the tag stored in their spec, because the API server materialises the default at creation, so move them by setting `spec.image.tag` explicitly, which triggers a rolling restart of the StatefulSet.
 
 ## Nomad version compatibility
 
