@@ -4692,6 +4692,18 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 			Expect(out).To(ContainSubstring("charlie789"))
 
+			// A root key minted with no active provider looks healthy on
+			// every API surface until a restart, when it cannot be
+			// unwrapped from Raft: only a restart proves the wrap.
+			By("restarting the server: root keys must unwrap from Raft, not memory")
+			_, err = utils.Run(exec.Command("kubectl", "delete", "pod", krA+"-0", "-n", namespace))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := nomadExec(krA, "var", "get", "e2e/secret")
+				g.Expect(err).NotTo(HaveOccurred(), out)
+				g.Expect(out).To(ContainSubstring("charlie789"))
+			}, 4*time.Minute, 10*time.Second).Should(Succeed())
+
 			By("saving a KMS-cluster snapshot")
 			_, err = nomadExec(krA, "operator", "snapshot", "save", "/tmp/kms.snap")
 			Expect(err).NotTo(HaveOccurred())
@@ -4979,6 +4991,81 @@ spec:
 					"nomad", "var", "put", "-force", "e2e/res-mut", "v=alpha123"))
 				g.Expect(err).NotTo(HaveOccurred())
 			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		// Incident 4 (lab, 0.4.2): an entry removed mid-migration and
+		// re-added under the same name rendered beside its retiring copy;
+		// Nomad kept the retiring block, no provider was active, and the
+		// next rotation minted root keys nothing could unwrap after a
+		// restart.
+		It("recovers an entry removed and re-added under the same name before its retirement finished", func() {
+			const kr = "keyring-res-readd"
+			DeferCleanup(func() { deleteCluster(kr) })
+			primary := primaryEntry(vaultNS, "http", "a-", goodTokenSecret, "")
+			secondary := strings.Replace(primaryEntry(vaultNS, "http", "b-", goodTokenSecret, ""),
+				"name: primary", "name: secondary", 1)
+			retiring := func() string {
+				out, _ := utils.Run(exec.Command("kubectl", "get", "nomadcluster", kr, "-n", namespace,
+					"-o", "jsonpath={.status.keyring.retiring}"))
+				return out
+			}
+
+			By("creating a single-entry cluster and writing a Variable")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(resCR(kr, primary))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(keyringStatus(kr)).To(Equal(`Ready ["primary"]`))
+			}, 6*time.Minute, 10*time.Second).Should(Succeed())
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(exec.Command("kubectl", "exec", kr+"-0", "-n", namespace, "--",
+					"nomad", "var", "put", "-force", "e2e/res-readd", "v=readd456"))
+				g.Expect(err).NotTo(HaveOccurred())
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("adding a second entry, then removing it while its introduction is still rolling")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(resCR(kr, primary+secondary))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				g.Expect(keyringStatus(kr)).To(HavePrefix("Introducing"))
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(resCR(kr, primary))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("re-adding the same name while it sits in the retiring set")
+			Eventually(func(g Gomega) {
+				g.Expect(retiring()).To(ContainSubstring("secondary"),
+					"the removed entry must be retiring, not gone, for the collision to be exercised")
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(resCR(kr, primary+secondary))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying convergence with exactly one rendered block per entry name")
+			Eventually(func(g Gomega) {
+				g.Expect(keyringStatus(kr)).To(Equal(`Ready ["primary","secondary"]`))
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+			rendered, err := utils.Run(exec.Command("sh", "-c", fmt.Sprintf(
+				"kubectl get secret %s-config -n %s -o jsonpath='{.data.server\\.hcl}' | base64 -d", kr, namespace)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.Count(rendered, `name   = "secondary"`)).To(Equal(1), rendered)
+			Expect(strings.Count(rendered, `name   = "primary"`)).To(Equal(1), rendered)
+
+			By("restarting the server: every root key must unwrap from Raft")
+			_, err = utils.Run(exec.Command("kubectl", "delete", "pod", kr+"-0", "-n", namespace))
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "exec", kr+"-0", "-n", namespace, "--",
+					"nomad", "var", "get", "e2e/res-readd"))
+				g.Expect(err).NotTo(HaveOccurred(), out)
+				g.Expect(out).To(ContainSubstring("readd456"))
+			}, 4*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
 		// Incident 2 (rc.3): a mid-introduction rotation stalled on a

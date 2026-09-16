@@ -18,12 +18,14 @@ package phases
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	nomadv1alpha1 "github.com/hashicorp/nomad-enterprise-operator/api/v1alpha1"
+	"github.com/hashicorp/nomad-enterprise-operator/pkg/hcl"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad"
 	"github.com/hashicorp/nomad-enterprise-operator/pkg/nomad/mocks"
 	mock2 "github.com/stretchr/testify/mock"
@@ -740,6 +742,188 @@ func TestKeyringStateLossMidMigration(t *testing.T) {
 	for _, b := range phase.Keyrings {
 		if b.Type == "aead" {
 			t.Fatalf("retiring aead block still rendered after re-seed — semantics changed, update runbook Scenario 5")
+		}
+	}
+}
+
+// TestKeyringRevertBeforeRotation: disabling while the enable is still
+// introducing renders ONE aead block — the explicit active aead and the
+// retiring aead share Nomad's provider identity.
+func TestKeyringRevertBeforeRotation(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, _, _ := keyringFixture(t, mock)
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if cluster.Status.Keyring.Phase != "Introducing" {
+		t.Fatalf("phase = %s, want Introducing", cluster.Status.Keyring.Phase)
+	}
+
+	cluster.Spec.Server.Keyrings = nil
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	st := cluster.Status.Keyring
+	if st.Phase != "Introducing" || len(st.Active) != 1 || st.Active[0] != "aead" ||
+		len(st.Retiring) != 1 || st.Retiring[0] != "primary" {
+		t.Fatalf("status = %+v, want Introducing/[aead] retiring [primary]", st)
+	}
+	assertOneBlockPerName(t, phase.Keyrings, "aead", "transit.primary")
+}
+
+// TestKeyringReaddedNameCollidesWithRetiring: a name removed mid-migration
+// and re-added before its retirement finished must replace the retiring
+// copy, never render beside it (the lab's unloadable-root-key incident).
+func TestKeyringReaddedNameCollidesWithRetiring(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, _, _ := keyringFixture(t, mock)
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("primary")}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	cluster.Spec.Server.Keyrings = nil
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if r := cluster.Status.Keyring.Retiring; len(r) != 1 || r[0] != "primary" {
+		t.Fatalf("retiring = %v, want [primary] before the re-add", r)
+	}
+
+	vt2 := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "vt2", Namespace: "kr-ns"},
+		Data:       map[string][]byte{"VAULT_TOKEN": []byte("hvs.replaced")},
+	}
+	if err := phase.Client.Create(context.Background(), vt2); err != nil {
+		t.Fatal(err)
+	}
+	readded := transitSpec("primary")
+	readded.Transit.Auth.Token.SecretRef.Name = "vt2"
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{readded}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	st := cluster.Status.Keyring
+	if st.Phase != "Introducing" || len(st.Active) != 1 || st.Active[0] != "primary" ||
+		len(st.Retiring) != 1 || st.Retiring[0] != "aead" {
+		t.Fatalf("status = %+v, want Introducing/[primary] retiring [aead]", st)
+	}
+	assertOneBlockPerName(t, phase.Keyrings, "transit.primary", "aead")
+	var tokenArg string
+	for _, b := range phase.Keyrings {
+		if b.Name != "primary" {
+			continue
+		}
+		for _, a := range b.Args {
+			if a.Key == "token" {
+				tokenArg = a.Value
+			}
+		}
+	}
+	if tokenArg != "hvs.replaced" {
+		t.Fatalf("rendered token = %q, want the re-added entry's credential", tokenArg)
+	}
+}
+
+// TestKeyringEntryNamedAeadKeepsImplicitAead: an external entry may be
+// named "aead"; its identity is transit.aead, distinct from the unnamed
+// aead provider whose keys the migration still has to load.
+func TestKeyringEntryNamedAeadKeepsImplicitAead(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, _, _ := keyringFixture(t, mock)
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	deliverConfig(t, phase)
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{transitSpec("aead")}
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	st := cluster.Status.Keyring
+	if st.Phase != "Introducing" || len(st.Retiring) != 1 || st.Retiring[0] != "aead" {
+		t.Fatalf("status = %+v, want Introducing with the unnamed aead retiring", st)
+	}
+	var unnamed, named bool
+	for _, b := range phase.Keyrings {
+		switch {
+		case b.Type == "aead" && b.Name == "" && !b.Active:
+			unnamed = true
+		case b.Type == "transit" && b.Name == "aead" && b.Active:
+			named = true
+		}
+	}
+	if !unnamed || !named || len(phase.Keyrings) != 2 {
+		t.Fatalf("render = %+v, want inactive unnamed aead plus active transit.aead", phase.Keyrings)
+	}
+}
+
+// TestKeyringStateWithCollidingRetiringSelfHeals: persisted state that
+// already carries an active name in its retiring set (hand-edited, or
+// written by an operator predating the invariant) is normalised on load.
+func TestKeyringStateWithCollidingRetiringSelfHeals(t *testing.T) {
+	mock := mocks.NewMockNomadAPI(t)
+	phase, cluster, _, _ := keyringFixture(t, mock)
+	current := transitSpec("primary")
+	stale := transitSpec("primary")
+	stale.Transit.KeyIDPrefix = "old-"
+	raw, err := json.Marshal(&keyringState{
+		Active:   []storedKeyring{{Entry: &current}},
+		Retiring: []storedKeyring{{Entry: &stale}},
+		Phase:    keyringPhaseReady,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: keyringStateName(cluster), Namespace: cluster.Namespace},
+		Data:       map[string]string{"state": string(raw)},
+	}
+	if err := phase.Client.Create(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+	cluster.Spec.Server.Keyrings = []nomadv1alpha1.KeyringEntry{current}
+
+	if result := phase.Execute(context.Background(), cluster); result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if st := cluster.Status.Keyring; st.Phase != "Ready" || len(st.Retiring) != 0 {
+		t.Fatalf("status = %+v, want Ready with nothing retiring", st)
+	}
+	assertOneBlockPerName(t, phase.Keyrings, "transit.primary")
+	persisted := &corev1.ConfigMap{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: keyringStateName(cluster), Namespace: cluster.Namespace}, persisted); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(persisted.Data["state"], "old-") {
+		t.Fatalf("persisted state still carries the colliding retiring entry: %s", persisted.Data["state"])
+	}
+}
+
+func assertOneBlockPerName(t *testing.T, blocks []hcl.KeyringBlock, ids ...string) {
+	t.Helper()
+	seen := map[string]int{}
+	for _, b := range blocks {
+		if b.Name == "" {
+			seen[b.Type]++
+			continue
+		}
+		seen[b.Type+"."+b.Name]++
+	}
+	if len(blocks) != len(ids) {
+		t.Fatalf("render = %+v, want exactly %d blocks", blocks, len(ids))
+	}
+	for _, id := range ids {
+		if seen[id] != 1 {
+			t.Fatalf("render = %+v, want exactly one block with identity %q", blocks, id)
 		}
 	}
 }

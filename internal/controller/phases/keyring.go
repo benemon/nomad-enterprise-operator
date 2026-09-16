@@ -588,35 +588,45 @@ func storedEqual(a, b []storedKeyring) bool {
 // (keys wrapped under the explicit block are not loadable by the
 // implicit default).
 func (p *KeyringPhase) absorbSpecChanges(ctx context.Context, cluster *nomadv1alpha1.NomadCluster, state *keyringState, cm *corev1.ConfigMap, desired []storedKeyring) PhaseResult {
+	// Retiring identities stay disjoint from active ones: Nomad keys
+	// providers by type+name and the LAST same-identity block wins, so
+	// a retiring copy of an active identity leaves no active provider
+	// and rotation mints a root key nothing can unwrap after a restart.
+	if retiring := retiringWithout(state.Retiring, state.Active); len(retiring) != len(state.Retiring) {
+		state.Retiring = retiring
+		if err := p.saveState(ctx, cm, state); err != nil {
+			return Error(err, "Failed to persist keyring state")
+		}
+	}
 	disableSteady := len(desired) == 0 && len(state.Active) == 1 && state.Active[0].Entry == nil
 	if storedEqual(state.Active, desired) || disableSteady {
 		return OK()
 	}
 	demoted := storedMinus(state.Active, desired)
 
-	// A same-name mutation is an in-place replace, never a demotion:
-	// blocks are identified by name, so a demoted entry cannot coexist
-	// in the union render with its same-name successor (the duplicate
-	// blocks left Nomad Ready with an unloadable root key, neo-h6y).
-	// A same-name edit addresses the same wrapper — a credential fix;
-	// changing an entry's transit TARGET requires a new entry name.
-	names := map[string]bool{}
+	// A same-identity mutation is an in-place replace, never a demotion:
+	// a demoted entry cannot coexist in the union render with its
+	// same-identity successor (the duplicate blocks left Nomad Ready
+	// with an unloadable root key, neo-h6y). A same-identity edit
+	// addresses the same wrapper — a credential fix; changing an
+	// entry's transit TARGET requires a new entry name.
+	ids := map[string]bool{}
 	for _, sk := range desired {
-		names[storedName(sk)] = true
+		ids[storedID(sk)] = true
 	}
 	var retired []storedKeyring
 	for _, sk := range demoted {
-		if !names[storedName(sk)] {
+		if !ids[storedID(sk)] {
 			retired = append(retired, sk)
 		}
 	}
 	current := map[string]bool{}
 	for _, sk := range state.Active {
-		current[storedName(sk)] = true
+		current[storedID(sk)] = true
 	}
 	additions := false
 	for _, sk := range desired {
-		if !current[storedName(sk)] {
+		if !current[storedID(sk)] {
 			additions = true
 			break
 		}
@@ -643,7 +653,7 @@ func (p *KeyringPhase) absorbSpecChanges(ctx context.Context, cluster *nomadv1al
 		demoted = storedMinus(state.Active, nil)
 	}
 	state.Active = active
-	state.Retiring = mergeRetiring(state.Retiring, demoted)
+	state.Retiring = retiringWithout(append(state.Retiring, demoted...), active)
 	state.Phase = keyringPhaseIntroducing
 	state.LastRetirementPending = ""
 	if err := p.saveState(ctx, cm, state); err != nil {
@@ -737,19 +747,36 @@ func storedMinus(a, b []storedKeyring) []storedKeyring {
 	return out
 }
 
-// mergeRetiring merges new demotions into the retiring set, deduped by
-// name (a re-migration mid-flight keeps the earliest wrapper present).
-func mergeRetiring(existing, add []storedKeyring) []storedKeyring {
-	seen := map[string]bool{}
+// retiringWithout drops retiring entries whose identity is active (a
+// returning entry resumes the same wrapper with its current
+// credentials) and collapses same-identity duplicates within retiring
+// to the last one, as Nomad would.
+func retiringWithout(retiring, active []storedKeyring) []storedKeyring {
+	drop := map[string]bool{}
+	for _, sk := range active {
+		drop[storedID(sk)] = true
+	}
+	last := map[string]int{}
+	for i, sk := range retiring {
+		last[storedID(sk)] = i
+	}
 	var out []storedKeyring
-	for _, x := range append(existing, add...) {
-		if seen[storedName(x)] {
-			continue
+	for i, sk := range retiring {
+		if id := storedID(sk); !drop[id] && last[id] == i {
+			out = append(out, sk)
 		}
-		seen[storedName(x)] = true
-		out = append(out, x)
 	}
 	return out
+}
+
+// storedID is Nomad's provider identity for a stored keyring:
+// type, or type.name for a named block.
+func storedID(sk storedKeyring) string {
+	b := entryBlock(sk, false)
+	if b.Name == "" {
+		return b.Type
+	}
+	return b.Type + "." + b.Name
 }
 
 func storedNames(stored []storedKeyring) string {
