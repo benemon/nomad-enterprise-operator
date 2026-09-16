@@ -108,7 +108,7 @@ type ImageSpec struct {
 	// Tag is the container image tag, default-pinned to a concrete
 	// patch version: a registry-side retag mid-roll can produce
 	// version-mismatched Raft peers and silent quorum loss.
-	// +kubebuilder:default="2.0.5-ent"
+	// +kubebuilder:default="2.0.6-ent"
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
 

@@ -10,7 +10,7 @@ keyrings, and Services. Field groups follow the spec's structure.
 |-------|------|---------|-------------|
 | `replicas` | `int` | `3` | Number of Nomad server replicas. Must be 1, 3, or 5 |
 | `image.repository` | `string` | `hashicorp/nomad` | Container image repository |
-| `image.tag` | `string` | `2.0.5-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) - see [Image version pinning](../operations/versions.md) |
+| `image.tag` | `string` | `2.0.6-ent` | Container image tag. **Pinned to a concrete patch version** (not a floating tag) - see [Image version pinning](../operations/versions.md) |
 | `image.digest` | `string` | - | Optional content digest (`sha256:…`). When set, the image reference is `repository@digest` and `tag` is ignored - see [Image version pinning](../operations/versions.md) |
 | `image.pullPolicy` | `string` | `Always` | Image pull policy (`Always`, `IfNotPresent`, `Never`) |
 | `license.secretName` | `string` | | Name of secret containing the Nomad license, stored under the key `license` (operator-owned). Mutually exclusive with `value` |
