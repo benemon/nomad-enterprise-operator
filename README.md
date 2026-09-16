@@ -1,6 +1,10 @@
 [![E2E Tests](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test-e2e.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test-e2e.yml)
 [![Lint](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/lint.yml)
 [![Tests](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/test.yml)
+[![CodeQL](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/codeql.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/codeql.yml)
+[![Scorecard](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/scorecard.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/scorecard.yml)
+[![govulncheck](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/benemon/nomad-enterprise-operator/actions/workflows/govulncheck.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/benemon/nomad-enterprise-operator/badge)](https://securityscorecards.dev/viewer/?uri=github.com/benemon/nomad-enterprise-operator)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/neo-lockup-dark.svg">
