@@ -95,6 +95,7 @@ jobs:
       # contents: write for the GitHub Release step below.
       contents: write
       packages: write
+      id-token: write     # keyless cosign signing
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -139,6 +140,26 @@ jobs:
           make catalog-build catalog-push \
             CATALOG_IMG=${{ env.IMAGE_TAG_BASE }}-catalog:v${{ env.VERSION }} \
             BUNDLE_IMGS=${{ env.IMAGE_TAG_BASE }}-bundle:v${{ env.VERSION }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Keyless signatures over the operator, bundle and catalog image digests.
+      # Verify with:
+      #   cosign verify quay.io/benjamin_holmes/nomad-enterprise-operator:<tag> \
+      #     --certificate-identity-regexp '^https://github.com/benemon/nomad-enterprise-operator/\.github/workflows/release\.yml@' \
+      #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Sign the release images
+        env:
+          IMG: ${{ env.IMAGE_TAG_BASE }}:v${{ env.VERSION }}
+          BUNDLE: ${{ env.IMAGE_TAG_BASE }}-bundle:v${{ env.VERSION }}
+          CATALOG: ${{ env.IMAGE_TAG_BASE }}-catalog:v${{ env.VERSION }}
+        run: |
+          for ref in "$IMG" "$BUNDLE" "$CATALOG"; do
+            digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r '.digest')
+            [ -n "$digest" ] && [ "$digest" != "null" ] || { echo "no digest for $ref"; exit 1; }
+            cosign sign --yes "${ref%:*}@${digest}"
+          done
 
       - name: Build installer manifest
         run: |
