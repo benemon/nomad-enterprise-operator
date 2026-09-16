@@ -1008,6 +1008,13 @@ data:
 			output, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).NotTo(BeEmpty(), "operator management secret should contain a non-empty secret-id")
+
+			By("verifying a tokenless request is denied (the acls guide's anonymous posture)")
+			cmd = exec.Command("kubectl", "exec", testClusterName+"-0", "-n", namespace, "--",
+				"sh", "-c", "NOMAD_TOKEN= nomad node status")
+			output, err = utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "a tokenless request must be refused, got: %s", output)
+			Expect(output + err.Error()).To(ContainSubstring("Permission denied"))
 		})
 
 		It("registers a job carrying a Vault block", func() {
@@ -1546,6 +1553,26 @@ data:
 				base64.StdEncoding.EncodeToString(keyPEM))
 			cmd := exec.Command("kubectl", "apply", "-f", "-")
 			cmd.Stdin = strings.NewReader(seedYAML)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Rotation state lives in the CA Secret, not operator memory
+			// (the tls guide's restart guarantee): kill the operator while
+			// the dual-trust stage is rolling and the rotation must still
+			// complete.
+			By("restarting the operator mid-rotation")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secret", testClusterName+"-ca", "-n", namespace,
+					"-o", "jsonpath={.data.tls-next\\.crt}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "the dual-trust stage should stage the next CA in tls-next.crt")
+			}, 3*time.Minute, 2*time.Second).Should(Succeed())
+			cmd = exec.Command("kubectl", "delete", "pod", "-n", namespace, "-l", "control-plane=controller-manager")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Available", "-n", namespace,
+				"deploy/nomad-enterprise-operator-controller-manager", "--timeout=3m")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 

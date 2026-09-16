@@ -18,9 +18,14 @@ package phases
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"sigs.k8s.io/yaml"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -243,5 +248,48 @@ func TestPrometheusRuleDeletedOnToggleOff(t *testing.T) {
 	// Toggle-off on a cluster that never had a rule must not error.
 	if result := phase.deletePrometheusRule(context.Background(), cluster); result.Error != nil {
 		t.Fatalf("deletePrometheusRule() on absent rule error = %v", result.Error)
+	}
+}
+
+// TestPrometheusRuleExprsValid pins the monitoring guide: every shipped
+// alert expression is PromQL that promtool accepts. CI installs
+// promtool; elsewhere the test skips.
+func TestPrometheusRuleExprsValid(t *testing.T) {
+	promtool, err := exec.LookPath("promtool")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("promtool not on PATH in CI")
+		}
+		t.Skip("promtool not on PATH")
+	}
+	_ = monitoringv1.AddToScheme(scheme.Scheme)
+
+	cluster := newTestCluster("mon-ns", "mon")
+	cluster.Spec.Monitoring.PrometheusRulesEnabled = true
+	phase := &MonitoringPhase{PhaseContext: &PhaseContext{
+		Client: fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Scheme: scheme.Scheme,
+		Log:    zap.New(zap.UseDevMode(true)),
+	}}
+	if result := phase.ensurePrometheusRule(context.Background(), cluster); result.Error != nil {
+		t.Fatalf("ensurePrometheusRule() error = %v", result.Error)
+	}
+	rule := &monitoringv1.PrometheusRule{}
+	if err := phase.Client.Get(context.Background(),
+		types.NamespacedName{Name: "mon", Namespace: "mon-ns"}, rule); err != nil {
+		t.Fatalf("PrometheusRule not created: %v", err)
+	}
+
+	raw, err := yaml.Marshal(map[string]any{"groups": rule.Spec.Groups})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(promtool, "check", "rules", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("promtool check rules: %v\n%s", err, out)
 	}
 }
