@@ -2,7 +2,7 @@
 
 ## Image version pinning
 
-The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.5-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
+The default value of `spec.image.tag` is a **concrete patch version** (e.g. `2.0.6-ent`), not a floating tag like `1.11-ent` or `2-ent`. This is a deliberate safety measure for Raft cluster integrity.
 
 Upgrading a cluster to a new Nomad version is a user-driven
 `spec.image.tag` change. **Snapshot before you upgrade** - the operator
@@ -32,7 +32,7 @@ opts out.
 ```yaml
 spec:
   image:
-    tag: "2.0.5-ent"   # or any other tag your environment requires
+    tag: "2.0.6-ent"   # or any other tag your environment requires
 ```
 
 **Digest pinning (air-gapped/CISO environments).** For environments
@@ -63,7 +63,7 @@ one required field). Compatibility is stated in three tiers, and the
 
 | Tier | Versions | Evidence |
 |------|----------|----------|
-| Tested | `2.0.x-ent` (current default `2.0.5-ent`) | full e2e suite, nightly |
+| Tested | `2.0.x-ent` (current default `2.0.6-ent`) | full e2e suite, nightly |
 | Tested upgrade paths | `1.10-ent → 1.11-ent`, `1.11-ent → 2.0-ent` | nightly upgrade matrix: rolling upgrade with the Raft quorum floor asserted at every poll |
 | Expected to work | `1.10.x-ent` and `1.11.x-ent` as running versions | upgrade-matrix clusters boot and serve on these lines, but the full suite does not run against them |
 | Unsupported | anything below `1.10-ent`; Nomad CE | untested; CE lacks the licensed features the operator manages (audit, snapshot agent) |

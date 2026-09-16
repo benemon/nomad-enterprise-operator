@@ -62,7 +62,7 @@ func agentBanner(t *testing.T, img, config string) string {
 func TestOperandContract_SnapshotHCL(t *testing.T) {
 	img := os.Getenv("OPERAND_IMAGE")
 	if img == "" {
-		t.Fatal("OPERAND_IMAGE not set (e.g. hashicorp/nomad:2.0.5-ent)")
+		t.Fatal("OPERAND_IMAGE not set (e.g. hashicorp/nomad:2.0.6-ent)")
 	}
 
 	r := &NomadSnapshotReconciler{}

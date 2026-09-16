@@ -82,6 +82,15 @@ through the migration cycle and existing root keys are re-wrapped;
 editing the target in place would leave previously wrapped keys
 unloadable.
 
+**Removing an entry and re-adding it with the same name and provider
+type resumes the same wrapper.** If the entry is still in `retiring`
+when it returns, the operator drops the retiring copy and the returning
+entry, with its current credentials, becomes the only block for that
+provider and name; root keys wrapped by the earlier copy stay loadable
+through it, provided the entry still points at the same key. Nomad
+identifies providers by type and name, so two blocks sharing both would
+collapse to the last one rendered.
+
 ## Transit authentication (`transit.auth`)
 
 The transit provider authenticates to Vault through one of **four
