@@ -1557,9 +1557,7 @@ data:
 			Expect(err).NotTo(HaveOccurred())
 
 			// Rotation state lives in the CA Secret, not operator memory
-			// (the tls guide's restart guarantee): kill the operator while
-			// the dual-trust stage is rolling and the rotation must still
-			// complete.
+			// (the tls guide's restart guarantee).
 			By("restarting the operator mid-rotation")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "secret", testClusterName+"-ca", "-n", namespace,

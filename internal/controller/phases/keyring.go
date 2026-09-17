@@ -606,10 +606,7 @@ func (p *KeyringPhase) absorbSpecChanges(ctx context.Context, cluster *nomadv1al
 
 	// A same-identity mutation is an in-place replace, never a demotion:
 	// a demoted entry cannot coexist in the union render with its
-	// same-identity successor (the duplicate blocks left Nomad Ready
-	// with an unloadable root key, neo-h6y). A same-identity edit
-	// addresses the same wrapper — a credential fix; changing an
-	// entry's transit TARGET requires a new entry name.
+	// same-identity successor (neo-h6y). A new target needs a new name.
 	ids := map[string]bool{}
 	for _, sk := range desired {
 		ids[storedID(sk)] = true
@@ -747,10 +744,8 @@ func storedMinus(a, b []storedKeyring) []storedKeyring {
 	return out
 }
 
-// retiringWithout drops retiring entries whose identity is active (a
-// returning entry resumes the same wrapper with its current
-// credentials) and collapses same-identity duplicates within retiring
-// to the last one, as Nomad would.
+// retiringWithout drops retiring entries whose identity is active and
+// collapses same-identity duplicates to the last one, as Nomad would.
 func retiringWithout(retiring, active []storedKeyring) []storedKeyring {
 	drop := map[string]bool{}
 	for _, sk := range active {

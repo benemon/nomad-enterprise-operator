@@ -747,7 +747,7 @@ func TestKeyringStateLossMidMigration(t *testing.T) {
 }
 
 // TestKeyringRevertBeforeRotation: disabling while the enable is still
-// introducing renders ONE aead block — the explicit active aead and the
+// introducing renders ONE aead block: the explicit active aead and the
 // retiring aead share Nomad's provider identity.
 func TestKeyringRevertBeforeRotation(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
@@ -778,7 +778,7 @@ func TestKeyringRevertBeforeRotation(t *testing.T) {
 
 // TestKeyringReaddedNameCollidesWithRetiring: a name removed mid-migration
 // and re-added before its retirement finished must replace the retiring
-// copy, never render beside it (the lab's unloadable-root-key incident).
+// copy, never render beside it.
 func TestKeyringReaddedNameCollidesWithRetiring(t *testing.T) {
 	mock := mocks.NewMockNomadAPI(t)
 	phase, cluster, _, _ := keyringFixture(t, mock)
