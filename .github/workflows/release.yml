@@ -95,16 +95,26 @@ jobs:
       # contents: write for the GitHub Release step below.
       contents: write
       packages: write
-      id-token: write     # keyless cosign signing
+      id-token: write       # keyless cosign signing + provenance
+      attestations: write   # build-provenance attestations
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history + tags so cyclonedx-gomod can derive the module
+          # version from the tag when generating the SBOM.
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
+      - name: Generate SBOM
+        run: |
+          mkdir -p dist
+          go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.11.0 \
+            app -json -licenses -main cmd -output dist/nomad-enterprise-operator.cdx.json .
       - name: Set version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
 
@@ -161,11 +171,33 @@ jobs:
             cosign sign --yes "${ref%:*}@${digest}"
           done
 
+      # Resolve the pushed operator image digest so the attestation binds to it
+      # (read back from the registry rather than assumed).
+      - name: Resolve operator image digest
+        id: digest
+        run: |
+          digest=$(docker buildx imagetools inspect \
+            "${{ env.IMAGE_TAG_BASE }}:v${{ env.VERSION }}" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          [ -n "$digest" ] && [ "$digest" != "null" ]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      # Signed build provenance for the operator image, stored in the
+      # repository's attestation store. Verify with:
+      #   gh attestation verify oci://<image>:<tag> -R benemon/nomad-enterprise-operator
+      - name: Attest operator image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-name: ${{ env.IMAGE_TAG_BASE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
       - name: Build installer manifest
         run: |
           make build-installer \
             IMG=${{ env.IMAGE_TAG_BASE }}:v${{ env.VERSION }}
 
+      - name: Attest installer manifest provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/install.yaml
       - name: Create GitHub Release with generated notes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -182,4 +214,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${GITHUB_REF_NAME}" dist/install.yaml \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+      - name: Upload SBOM to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/nomad-enterprise-operator.cdx.json \
             --repo "${GITHUB_REPOSITORY}" --clobber
