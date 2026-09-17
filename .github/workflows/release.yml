@@ -54,6 +54,32 @@ jobs:
           fi
           exit 1
 
+      - name: Compare default autoscaler tag against latest Nomad Autoscaler release
+        run: |
+          default_version=$(sed -n 's/.*kubebuilder:default="\([0-9][0-9.]*\)-ent".*/\1/p' \
+            api/v1alpha1/nomadautoscaler_types.go | head -1)
+          if [ -z "$default_version" ]; then
+            echo "::error::could not extract the default autoscaler tag from nomadautoscaler_types.go"
+            exit 1
+          fi
+          current_version=$(curl -fsS https://checkpoint-api.hashicorp.com/v1/check/nomad-autoscaler | jq -r .current_version)
+          echo "default autoscaler: ${default_version}-ent / latest Nomad Autoscaler: ${current_version}"
+          if [ "$default_version" = "$current_version" ]; then
+            echo "default autoscaler is current"
+            exit 0
+          fi
+          token=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:hashicorp/nomad-autoscaler-enterprise:pull" | jq -r .token)
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json" \
+            "https://registry-1.docker.io/v2/hashicorp/nomad-autoscaler-enterprise/manifests/${current_version}-ent")
+          if [ "$code" != "200" ]; then
+            echo "::notice::Nomad Autoscaler ${current_version} is out but hashicorp/nomad-autoscaler-enterprise:${current_version}-ent is not on Docker Hub yet (HTTP ${code}); releasing with ${default_version}-ent"
+            exit 0
+          fi
+          echo "::error::stale default autoscaler: ${default_version}-ent pinned, ${current_version}-ent available (bump the default tag in nomadautoscaler_types.go, regenerate manifests and the schema snapshot, update image assertions)"
+          exit 1
+
   lint:
     needs: operand-currency
     uses: ./.github/workflows/lint.yml
