@@ -53,7 +53,7 @@ immutable, so `pullPolicy: Always` becomes redundant - harmless, but
 `IfNotPresent` avoids pointless registry round-trips. The snapshot
 agent uses the same image reference as the cluster.
 
-**Operator release cadence.** Each operator release ships with the default tag updated to the most recent known-good Nomad Enterprise patch release. The new default applies to NomadClusters created after the operator upgrade. Existing clusters keep the tag stored in their spec, because the API server materialises the default at creation, so move them by setting `spec.image.tag` explicitly, which triggers a rolling restart of the StatefulSet.
+**Operator release cadence.** Each operator release ships with the default tags updated to the most recent known-good patch releases: `spec.image.tag` on NomadCluster for Nomad Enterprise, and `spec.image.tag` on NomadAutoscaler for the Nomad Autoscaler Enterprise agent. The release lane refuses a tag whose default trails the latest upstream release. The snapshot agent has no tag of its own; it runs the owning cluster's image. The new default applies to NomadClusters created after the operator upgrade. Existing clusters keep the tag stored in their spec, because the API server materialises the default at creation, so move them by setting `spec.image.tag` explicitly, which triggers a rolling restart of the StatefulSet.
 
 ## Nomad version compatibility
 
