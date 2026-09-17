@@ -2571,6 +2571,15 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
+			// The autopilot status can still read healthy from before the
+			// deletion, so wait for the replacement pod itself before
+			// judging the quorum or reading its log.
+			By("waiting for the replacement pod to become ready")
+			cmd = exec.Command("kubectl", "wait", "--for=condition=Ready",
+				"pod/"+scaleDownClusterName+"-1", "-n", namespace, "--timeout=5m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
 			By("waiting for the quorum to recover natively")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "nomadcluster", scaleDownClusterName, "-n", namespace,
