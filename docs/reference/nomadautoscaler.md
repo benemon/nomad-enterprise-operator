@@ -22,7 +22,7 @@ source. The CR covers two metric paths:
 | `clusterRef.namespace` | `string` | | Not supported (admission-rejected): the NomadCluster must be in the NomadAutoscaler's own namespace, because the agent pod mounts the cluster's TLS Secret and pods cannot mount Secrets across namespaces |
 | `replicas` | `int` | `1` | Agent pods, 1-3. Above 1 enables the agent's [high-availability mode](#autoscaler-high-availability) |
 | `image.repository` | `string` | `hashicorp/nomad-autoscaler-enterprise` | Agent image. Dynamic Application Sizing needs the enterprise image |
-| `image.tag` | `string` | `0.5.0-ent` | Pinned concrete version, same rationale as [image version pinning](../operations/versions.md) |
+| `image.tag` | `string` | `0.6.0-ent` | Pinned concrete version, same rationale as [image version pinning](../operations/versions.md) |
 | `image.digest` | `string` | | Optional content-digest pin; takes precedence over `tag` |
 | `image.pullPolicy` | `string` | `Always` | Defence against registry-side retags of the pinned tag; applies even when the `image` block is omitted |
 | `namespaces` | `[]string` | `["default"]` | Nomad namespaces the agent may observe and scale; drives both agent config and the minted ACL policy scope. `"*"` grants all and must be the only entry |

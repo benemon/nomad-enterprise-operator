@@ -141,7 +141,7 @@ spec:
                     description: Repository is the container image repository
                     type: string
                   tag:
-                    default: 0.5.0-ent
+                    default: 0.6.0-ent
                     description: |-
                       Tag is the container image tag, default-pinned to a concrete
                       version so a registry-side retag cannot change the running agent

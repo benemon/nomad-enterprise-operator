@@ -302,7 +302,7 @@ var _ = Describe("NomadAutoscaler Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "as-autoscaler-agent", Namespace: namespace}, deploy)).To(Succeed())
 			Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
 			container := deploy.Spec.Template.Spec.Containers[0]
-			Expect(container.Image).To(Equal("hashicorp/nomad-autoscaler-enterprise:0.5.0-ent"))
+			Expect(container.Image).To(Equal("hashicorp/nomad-autoscaler-enterprise:0.6.0-ent"))
 			Expect(container.ImagePullPolicy).To(Equal(corev1.PullAlways),
 				"apiserver-defaulted pullPolicy must reach the pod (retag defence)")
 			Expect(container.Command).To(ContainElement("nomad-autoscaler"))
