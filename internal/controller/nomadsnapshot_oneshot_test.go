@@ -159,6 +159,18 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 		if len(recorder.Events) != 0 {
 			t.Error("unexpected event on success")
 		}
+
+		// A cluster upgrade after completion moves the mirror only.
+		cluster.Status.NomadVersion = "2.1.0-ent"
+		if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
+			t.Fatalf("reconcileOneShot() post-upgrade pass error = %v", err)
+		}
+		if snap.Status.LastSnapshot.NomadVersion != "2.0.7-ent" {
+			t.Errorf("lastSnapshot.nomadVersion = %q after upgrade, want frozen 2.0.7-ent", snap.Status.LastSnapshot.NomadVersion)
+		}
+		if snap.Status.NomadVersion != "2.1.0-ent" {
+			t.Errorf("status.nomadVersion = %q after upgrade, want 2.1.0-ent", snap.Status.NomadVersion)
+		}
 	})
 
 	t.Run("version unknown stays unset", func(t *testing.T) {
@@ -189,10 +201,22 @@ func TestSnapshotStatusFromJob(t *testing.T) {
 		}
 		r, recorder := newSnapshotReconciler(snap, cluster, job)
 
+		// Status round-trips at second precision, so plant a past failure
+		// time between passes: an unfrozen record would overwrite it.
+		failedAt := metav1.NewTime(now.Add(-time.Hour).Truncate(time.Second))
 		for i := 0; i < 2; i++ { // second pass must not re-emit
 			if _, err := r.reconcileOneShot(context.Background(), snap, cluster, "https://addr:4646", "c", "s"); err != nil {
 				t.Fatalf("reconcileOneShot() pass %d error = %v", i, err)
 			}
+			if i == 0 {
+				snap.Status.LastSnapshot.Time = &failedAt
+				if err := r.Status().Update(context.Background(), snap); err != nil {
+					t.Fatalf("plant failure time: %v", err)
+				}
+			}
+		}
+		if got := snap.Status.LastSnapshot.Time; got == nil || !got.Equal(&failedAt) {
+			t.Errorf("lastSnapshot.time = %v after re-reconcile, want frozen %v", got, failedAt)
 		}
 		if snap.Status.Phase != nomadv1alpha1.SnapshotPhaseFailed {
 			t.Errorf("phase = %q, want Failed", snap.Status.Phase)
