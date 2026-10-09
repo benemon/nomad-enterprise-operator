@@ -428,14 +428,17 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 	case job.Name == "":
 		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhasePending
 	case job.Status.Succeeded > 0:
-		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseSucceeded
-		snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
-			Time:   job.Status.CompletionTime,
-			Status: "Success",
-			// Frozen per-artifact record: status.nomadVersion follows
-			// the cluster across upgrades, this does not.
-			NomadVersion: cluster.Status.NomadVersion,
+		// Frozen per-artifact record, written only on the transition:
+		// status.nomadVersion follows the cluster across upgrades, this
+		// does not.
+		if snapshot.Status.Phase != nomadv1alpha1.SnapshotPhaseSucceeded {
+			snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
+				Time:         job.Status.CompletionTime,
+				Status:       "Success",
+				NomadVersion: cluster.Status.NomadVersion,
+			}
 		}
+		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseSucceeded
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionTrue,
@@ -444,12 +447,14 @@ func (r *NomadSnapshotReconciler) reconcileOneShot(
 		})
 		r.setDegraded(snapshot, false, "OperationHealthy", "")
 	case jobFailed(job):
-		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseFailed
-		snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
-			Time:   &metav1.Time{Time: time.Now()},
-			Status: "Failed",
-			Error:  "snapshot Job exhausted its retries; see Job pod logs",
+		if snapshot.Status.Phase != nomadv1alpha1.SnapshotPhaseFailed {
+			snapshot.Status.LastSnapshot = &nomadv1alpha1.SnapshotInfo{
+				Time:   &metav1.Time{Time: time.Now()},
+				Status: "Failed",
+				Error:  "snapshot Job exhausted its retries; see Job pod logs",
+			}
 		}
+		snapshot.Status.Phase = nomadv1alpha1.SnapshotPhaseFailed
 		r.setCondition(snapshot, metav1.Condition{
 			Type:    "Ready",
 			Status:  metav1.ConditionFalse,
