@@ -104,7 +104,7 @@ type AutoscalerImageSpec struct {
 	// Tag is the container image tag, default-pinned to a concrete
 	// version so a registry-side retag cannot change the running agent
 	// mid-roll.
-	// +kubebuilder:default="0.5.0-ent"
+	// +kubebuilder:default="0.6.0-ent"
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
 	Tag string `json:"tag,omitempty"`
 

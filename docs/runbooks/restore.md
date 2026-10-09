@@ -111,7 +111,7 @@ cluster (the Nomad image already has the CLI):
 
 ```sh
 kubectl run nomad-restore -n <ns> --rm -it --restart=Never \
-  --image=<same image as the cluster, e.g. hashicorp/nomad:2.0.6-ent> \
+  --image=<same image as the cluster, e.g. hashicorp/nomad:2.0.7-ent> \
   --overrides='{"spec":{"volumes":[{"name":"tls","secret":{"secretName":"<cluster>-tls"}}],
     "containers":[{"name":"nomad-restore","image":"<image>","stdin":true,"tty":true,
     "command":["sh"],

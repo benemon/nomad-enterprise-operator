@@ -114,7 +114,7 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 			{
 				name: "concrete patch tag accepted",
 				mutate: func(c *nomadv1alpha1.NomadCluster) {
-					c.Spec.Image.Tag = "2.0.6-ent"
+					c.Spec.Image.Tag = "2.0.7-ent"
 				},
 			},
 			{
@@ -731,7 +731,7 @@ var _ = Describe("CRD admission invariants (neo-f7j)", func() {
 			Expect(fetched.Spec.Image.PullPolicy).To(Equal(corev1.PullAlways),
 				"the documented Always retag defence must survive an omitted image block")
 			Expect(fetched.Spec.Image.Repository).To(Equal("hashicorp/nomad-autoscaler-enterprise"))
-			Expect(fetched.Spec.Image.Tag).To(Equal("0.5.0-ent"))
+			Expect(fetched.Spec.Image.Tag).To(Equal("0.6.0-ent"))
 		})
 
 		// clusterRef transition rule (neo-2um.3): retargeting orphans
