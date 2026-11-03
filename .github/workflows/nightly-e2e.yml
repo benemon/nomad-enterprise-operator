@@ -108,6 +108,7 @@ jobs:
           # when a new minor GAs.
           - { from: "1.10-ent", to: "1.11-ent" }
           - { from: "1.11-ent", to: "2.0-ent" }
+          - { from: "2.0-ent", to: "2.1-ent" }
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
