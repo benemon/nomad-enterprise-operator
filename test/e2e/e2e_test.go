@@ -80,7 +80,7 @@ metadata: {name: vault, namespace: %s, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault-enterprise:2.0-ent
+    image: hashicorp/vault-enterprise:2.1-ent
     args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
     env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
@@ -162,7 +162,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   trustBundle:
@@ -665,7 +665,7 @@ data:
 			}
 			checks := []check{
 				{"{.spec.replicas}", "1", "replica count"},
-				{"{.spec.template.spec.containers[0].image}", "hashicorp/nomad:2.0.7-ent", "container image"},
+				{"{.spec.template.spec.containers[0].image}", "hashicorp/nomad:2.1.1-ent", "container image"},
 				{"{.spec.template.spec.serviceAccountName}", testClusterName, "service account"},
 				{"{.spec.serviceName}", testClusterName + "-headless", "headless service name"},
 				{"{.spec.podManagementPolicy}", "Parallel", "pod management policy"},
@@ -1242,7 +1242,7 @@ data:
 				"-o", `jsonpath={.spec.template.spec.containers[0].image}`)
 			output, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(output).To(Equal("hashicorp/nomad:2.0.7-ent"), "snapshot agent should use same image as cluster")
+			Expect(output).To(Equal("hashicorp/nomad:2.1.1-ent"), "snapshot agent should use same image as cluster")
 
 			By("verifying container command runs snapshot agent")
 			cmd = exec.Command("kubectl", "get", "deployment",
@@ -1821,7 +1821,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -1976,7 +1976,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -2117,7 +2117,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -2202,7 +2202,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -2259,7 +2259,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -2342,7 +2342,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -2676,7 +2676,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -3354,7 +3354,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   topology:
@@ -3476,7 +3476,7 @@ metadata:
 spec:
   containers:
   - name: nomad
-    image: hashicorp/nomad:2.0.7-ent
+    image: hashicorp/nomad:2.1.1-ent
     command: ["nomad"]
     args: ["agent", "-config=/nomad/config/client.hcl"]
     # Clients need no license. Privileged root for writable cgroups (why
@@ -3758,7 +3758,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -3930,7 +3930,7 @@ spec:
   replicas: 1
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   services:
@@ -4102,7 +4102,7 @@ metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault-enterprise:2.0-ent
+    image: hashicorp/vault-enterprise:2.1-ent
     args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
     env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
@@ -4634,7 +4634,7 @@ metadata: {name: vault, namespace: e2e-vault, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault-enterprise:2.0-ent
+    image: hashicorp/vault-enterprise:2.1-ent
     args: ["server", "-dev", "-dev-root-token-id=e2e-root", "-dev-listen-address=0.0.0.0:8200"]
     env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
@@ -4902,7 +4902,7 @@ metadata: {name: vault, namespace: %s, labels: {app: vault}}
 spec:
   containers:
   - name: vault
-    image: hashicorp/vault-enterprise:2.0-ent
+    image: hashicorp/vault-enterprise:2.1-ent
     args: %s
     env: [{name: VAULT_LICENSE, valueFrom: {secretKeyRef: {name: vault-license, key: license}}}]
 ---
@@ -5279,8 +5279,8 @@ data:
 		// Overridable for the nightly matrix. Major.minor tags serve
 		// each line's latest patch — HashiCorp's recommended upgrade
 		// origin — so the matrix self-maintains as patches ship.
-		fromTag := envOr("UPGRADE_FROM", "1.11-ent")
-		toTag := envOr("UPGRADE_TO", "2.0-ent")
+		fromTag := envOr("UPGRADE_FROM", "2.0-ent")
+		toTag := envOr("UPGRADE_TO", "2.1-ent")
 
 		upgradeClusterCR := fmt.Sprintf(`apiVersion: nomad.hashicorp.com/v1alpha1
 kind: NomadCluster
