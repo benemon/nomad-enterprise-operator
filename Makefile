@@ -373,11 +373,6 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
-	# Stamp the olm.skipRange upper bound with this release's version:
-	# the catalogs are single-bundle, so without the range no OLM
-	# upgrade ever fires (neo-7th).
-	sed -i.bak 's/SKIP_RANGE_UPPER_BOUND/$(VERSION)/' bundle/manifests/nomad-enterprise-operator.clusterserviceversion.yaml
-	rm -f bundle/manifests/nomad-enterprise-operator.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle
 
 .PHONY: bundle-build
@@ -405,24 +400,23 @@ OPM = $(shell which opm)
 endif
 endif
 
-# A comma-separated list of bundle images (e.g. make catalog-build BUNDLE_IMGS=example.com/operator-bundle:v0.1.0,example.com/operator-bundle:v0.2.0).
-# These images MUST exist in a registry and be pull-able.
-BUNDLE_IMGS ?= $(BUNDLE_IMG)
-
 # The image tag given to the resulting catalog image (e.g. make catalog-build CATALOG_IMG=example.com/operator-catalog:v0.2.0).
 CATALOG_IMG ?= $(IMAGE_TAG_BASE)-catalog:v$(VERSION)
 
-# Set CATALOG_BASE_IMG to an existing catalog image tag to add $BUNDLE_IMGS to that image.
-ifneq ($(origin CATALOG_BASE_IMG), undefined)
-FROM_INDEX_OPT := --from-index $(CATALOG_BASE_IMG)
-endif
-
-# Build a catalog image by adding bundle images to an empty catalog using the operator package manager tool, 'opm'.
-# This recipe invokes 'opm' in 'semver' bundle add mode. For more information on add modes, see:
-# https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
+# $(BUNDLE_IMG) must be pull-able. With one bundle there is no replaces chain: the channel
+# entry's skipRange is the only upgrade edge, and a file-based catalog does not read a CSV
+# olm.skipRange annotation.
 .PHONY: catalog-build
 catalog-build: opm ## Build a catalog image.
-	$(OPM) index add --container-tool $(CONTAINER_TOOL) --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
+	rm -rf catalog catalog.Dockerfile
+	mkdir -p catalog/nomad-enterprise-operator
+	$(OPM) init nomad-enterprise-operator --default-channel=$(DEFAULT_CHANNEL) -o yaml > catalog/nomad-enterprise-operator/package.yaml
+	$(OPM) render $(BUNDLE_IMG) -o yaml > catalog/nomad-enterprise-operator/bundle.yaml
+	printf 'schema: olm.channel\npackage: nomad-enterprise-operator\nname: %s\nentries:\n  - name: nomad-enterprise-operator.v%s\n    skipRange: ">=0.1.0 <%s"\n' \
+		$(DEFAULT_CHANNEL) $(VERSION) $(VERSION) > catalog/nomad-enterprise-operator/channel.yaml
+	$(OPM) validate catalog
+	$(OPM) generate dockerfile catalog -i quay.io/operator-framework/opm:v1.55.0 -b quay.io/operator-framework/opm:v1.55.0
+	$(CONTAINER_TOOL) build -f catalog.Dockerfile -t $(CATALOG_IMG) .
 
 # Push the catalog image.
 .PHONY: catalog-push

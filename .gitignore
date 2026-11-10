@@ -53,3 +53,6 @@ go.work
 test/load/kube-burner/collected-metrics/
 test/load/kube-burner/kube-burner-*.log
 .local-*
+
+/catalog/
+/catalog.Dockerfile
