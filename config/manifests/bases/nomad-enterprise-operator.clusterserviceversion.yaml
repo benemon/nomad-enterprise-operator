@@ -9,7 +9,6 @@ metadata:
     description: Community operator for HashiCorp Nomad Enterprise on Kubernetes and
       OpenShift - server clusters, Raft snapshots, and managed autoscaler agents.
       Not maintained or supported by HashiCorp.
-    olm.skipRange: '>=0.1.0 <SKIP_RANGE_UPPER_BOUND'
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
     operators.operatorframework.io/builder: operator-sdk-v1.42.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4

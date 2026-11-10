@@ -174,8 +174,9 @@ jobs:
       - name: Build and push catalog image
         run: |
           make catalog-build catalog-push \
+            VERSION=${{ env.VERSION }} \
             CATALOG_IMG=${{ env.IMAGE_TAG_BASE }}-catalog:v${{ env.VERSION }} \
-            BUNDLE_IMGS=${{ env.IMAGE_TAG_BASE }}-bundle:v${{ env.VERSION }}
+            BUNDLE_IMG=${{ env.IMAGE_TAG_BASE }}-bundle:v${{ env.VERSION }}
 
       - name: Install cosign
         uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3

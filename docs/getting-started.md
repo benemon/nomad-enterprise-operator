@@ -78,6 +78,29 @@ Alternatively, once the CatalogSource is created, the operator appears in
 the OpenShift console under **OperatorHub** and can be installed from the UI.
 The suggested namespace `nomad-enterprise-operator-system` will be pre-filled.
 
+### Disconnected clusters
+
+The catalog is a file-based catalog, so oc-mirror v2 mirrors the catalog,
+bundle and operator images from an `operators` entry naming the package
+`nomad-enterprise-operator`. The Nomad and autoscaler images are chosen per
+resource, so they are not part of the bundle: list the tags you run under
+`additionalImages` in the same ImageSetConfiguration, and point
+`spec.image.repository` at the mirror (see
+[Digest pinning](operations/versions.md)).
+
+```yaml
+kind: ImageSetConfiguration
+apiVersion: mirror.openshift.io/v2alpha1
+mirror:
+  operators:
+    - catalog: quay.io/benjamin_holmes/nomad-enterprise-operator-catalog:v<version>
+      packages:
+        - name: nomad-enterprise-operator
+  additionalImages:
+    - name: docker.io/hashicorp/nomad:<nomad-version>-ent
+    - name: docker.io/hashicorp/nomad-autoscaler-enterprise:<autoscaler-version>-ent
+```
+
 ## Install with YAML manifests
 
 For clusters without OLM, each release attaches a consolidated `install.yaml`
