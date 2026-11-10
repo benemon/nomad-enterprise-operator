@@ -160,7 +160,7 @@ spec:
   replicas: 3
   image:
     repository: hashicorp/nomad
-    tag: "2.0.7-ent"
+    tag: "2.1.1-ent"
   license:
     secretName: nomad-license
   server:

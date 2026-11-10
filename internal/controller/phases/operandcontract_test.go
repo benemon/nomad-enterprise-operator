@@ -24,7 +24,7 @@ func operandImage(t *testing.T) string {
 	t.Helper()
 	img := os.Getenv("OPERAND_IMAGE")
 	if img == "" {
-		t.Fatal("OPERAND_IMAGE not set (e.g. hashicorp/nomad:2.0.7-ent)")
+		t.Fatal("OPERAND_IMAGE not set (e.g. hashicorp/nomad:2.1.1-ent)")
 	}
 	return img
 }
