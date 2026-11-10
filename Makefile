@@ -403,9 +403,9 @@ endif
 # The image tag given to the resulting catalog image (e.g. make catalog-build CATALOG_IMG=example.com/operator-catalog:v0.2.0).
 CATALOG_IMG ?= $(IMAGE_TAG_BASE)-catalog:v$(VERSION)
 
-# File-based catalog holding the single bundle $(BUNDLE_IMG), which must be pull-able.
-# With one bundle there is no replaces chain: the channel entry's skipRange is the only
-# upgrade edge, and a file-based catalog does not read a CSV olm.skipRange annotation.
+# $(BUNDLE_IMG) must be pull-able. With one bundle there is no replaces chain: the channel
+# entry's skipRange is the only upgrade edge, and a file-based catalog does not read a CSV
+# olm.skipRange annotation.
 .PHONY: catalog-build
 catalog-build: opm ## Build a catalog image.
 	rm -rf catalog catalog.Dockerfile
