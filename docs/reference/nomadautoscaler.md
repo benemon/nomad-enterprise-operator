@@ -137,6 +137,19 @@ to this instance's metrics Service:
 | `NomadAutoscalerPolicyEvaluationsStalled` | warning | Scaling policies exist but no policy evaluations ran in 30 minutes - in HA mode only the leader evaluates, so check leader election first |
 | `NomadAutoscalerAgentDown` | critical | An agent's metrics scrape target has been down for 5 minutes |
 
+## Status fields
+
+| Field | Description |
+|-------|-------------|
+| `status.deploymentName` | Agent Deployment name |
+| `status.readyReplicas` | Ready agent replicas |
+| `status.desiredReplicas` | Desired agent replicas |
+| `status.configMapName` | Agent configuration ConfigMap |
+| `status.nomadAddress` | Nomad address the agent uses |
+| `status.policyName` | Nomad ACL policy created for the agent |
+| `status.tokenAccessorID` | Accessor ID of the agent's Nomad ACL token |
+| `status.observedGeneration` | Last `metadata.generation` the operator reconciled |
+
 ## Conditions
 
 `Ready=True` (reason `Deployed`) requires at least one ready agent

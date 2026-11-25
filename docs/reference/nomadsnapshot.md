@@ -151,6 +151,46 @@ token. The policy name is tracked in `status.policyName`. Both the
 token and policy are cleaned up from Nomad when the NomadSnapshot is
 deleted.
 
+## Status fields
+
+| Field | Description |
+|-------|-------------|
+| `status.operation` | `Job` (one-shot) or `Deployment` (recurring) |
+| `status.phase` | One-shot lifecycle: `Pending`, `Running`, `Succeeded`, `Failed`. Empty in recurring mode |
+| `status.jobName` | One-shot Job name |
+| `status.deploymentName` | Recurring agent Deployment name |
+| `status.readyReplicas` | Ready agent replicas |
+| `status.desiredReplicas` | Desired agent replicas |
+| `status.configSecretName` | Rendered agent configuration Secret |
+| `status.nomadAddress` | Nomad address the agent uses |
+| `status.nomadVersion` | Version of the referenced cluster; follows upgrades |
+| `status.lastSnapshot.time` | When the most recent snapshot was taken |
+| `status.lastSnapshot.status` | `Success` or `Failed` |
+| `status.lastSnapshot.error` | Failure message, when the snapshot failed |
+| `status.lastSnapshot.nomadVersion` | Version the one-shot artifact was taken at, frozen at Job completion |
+| `status.nextScheduled` | When the next recurring snapshot is expected |
+| `status.policyName` | Nomad ACL policy created for the agent |
+| `status.tokenAccessorID` | Accessor ID of the agent's Nomad ACL token |
+| `status.observedGeneration` | Last `metadata.generation` the operator reconciled |
+
+## Conditions
+
+Recurring mode: `Ready=True` (reason `Deployed`) requires at least one
+ready agent replica; otherwise `Ready=False` with `DeploymentNotReady`.
+One-shot mode: `Ready=True` with `SnapshotSucceeded` once the Job
+completes, `Ready=False` with `SnapshotRunning` while it runs and
+`SnapshotFailed` when it fails.
+
+`Ready=False` reasons common to both modes: `ClusterNotFound`,
+`ACLsDisabled` (terminal, also emitted as a Warning Event),
+`WaitingForACLBootstrap`, `WaitingForManagementToken`,
+`TokenCreationFailed`, `CredentialsSecretNotFound`, and
+`CredentialsSecretInvalid` (both also emitted as Warning Events).
+
+`Degraded=True` (reason `SnapshotJobFailed`) when a one-shot Job fails
+after exhausting its retries, with a `SnapshotDegraded` Warning Event;
+otherwise `Degraded=False` (`OperationHealthy`).
+
 ## Example
 
 ```yaml
