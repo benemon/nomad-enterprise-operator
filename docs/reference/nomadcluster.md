@@ -32,8 +32,8 @@ Server-scoped configuration is split across the subsections below:
 [TLS](#tls-specservertls), [ACL](#acl-specserveracl),
 [Audit](#audit-specserveraudit),
 [Garbage Collection](#garbage-collection-specservergc),
-[Keyrings](../guides/keyrings.md), and
-[Vault Workload Identity](../guides/workload-identity.md).
+[Keyrings](#keyrings-specserverkeyrings), and
+[Vault Workload Identity](#vault-workload-identity-specservervaults).
 
 ## TLS (`spec.server.tls`)
 
@@ -109,6 +109,19 @@ defaults. Values are Nomad durations (`s`/`m`/`h`, e.g. `30m`, `2h`).
 | `server.gc.batchEvalHistory` | `string` | Nomad `24h` | Minimum retention of a terminal batch evaluation and its allocations (`batch_eval_gc_threshold`) |
 | `server.gc.evalHistory` | `string` | Nomad `1h` | Minimum retention of a terminal non-batch evaluation and its allocations (`eval_gc_threshold`) |
 
+## Keyrings (`spec.server.keyrings`)
+
+External KMS keyrings (AWS KMS, Azure Key Vault, GCP Cloud KMS, Vault
+transit) that wrap Nomad's root keys in place of the default `aead`
+keyring. See the [keyrings guide](../guides/keyrings.md) for the field
+table, credential options, and how a change to the set migrates.
+
+## Vault Workload Identity (`spec.server.vaults`)
+
+Vault clusters the servers admit jobs for, each with an optional
+default identity stamped into tasks. See the
+[workload identity guide](../guides/workload-identity.md) for the field
+table and the Vault-side prerequisites.
 
 ## Gossip encryption (`spec.gossip`)
 
@@ -203,20 +216,28 @@ nomad-enterprise  Running   3       3         10.96.0.15       5m
 | `status.aclBootstrapped` | Whether ACL bootstrap has completed |
 | `status.aclBootstrapSecretName` | Secret containing the bootstrap token |
 | `status.operatorStatusSecretName` | Secret containing the operator status token |
+| `status.operatorManagementSecretName` | Secret containing the operator's management token for day-2 ACL writes |
 | `status.operatorStatusPolicyName` | Nomad ACL policy for the operator status token |
 | `status.routeHost` | Assigned OpenShift Route hostname |
 | `status.certificateAuthority.source` | `operator-generated` or `user-provided` |
 | `status.certificateAuthority.expiryTime` | CA certificate expiry |
 | `status.certificateAuthority.subject` | CA certificate subject DN |
+| `status.certificateAuthority.renewalRequiredBy` | CA expiry minus 30 days: when an operator-generated CA starts rotating, or when a user-provided CA must be renewed (`CARenewalRequired` Events) |
+| `status.certificateAuthority.renewalWarningThreshold` | Last renewal warning emitted for a user-provided CA (`30d`, `14d`, then daily `7d:<date>`); stops the warnings repeating across operator restarts |
 | `status.nomadVersion` | Nomad agent version observed via `/v1/agent/self` (e.g. `1.11.0+ent`); empty until the first successful probe |
 | `status.keyring` | Keyring set state: `phase` (`Ready`/`Introducing`/`Rotating`/`Retiring`/`Degraded`), `active[]`, `retiring[]`, `retirementPending` for the old-key cleanup tail, and `tokenExpiry` for operator-managed Vault tokens |
 | `status.license.valid` | Whether the Nomad license is valid |
+| `status.license.licenseId` | License identifier |
 | `status.license.expirationTime` | License expiry time |
+| `status.license.terminationTime` | End of the license's grace period |
 | `status.license.features` | Licensed features |
 | `status.autopilot.healthy` | Whether autopilot considers the cluster healthy |
 | `status.autopilot.failureTolerance` | Number of server failures the cluster can tolerate |
 | `status.autopilot.voters` | Number of voting servers |
-| `status.autopilot.servers[]` | Per-server health details |
+| `status.autopilot.servers[]` | Per server: `name`, Raft `id`, `address`, `healthy`, `voter`, `leader`, `stableSince`, `lastContact` |
+| `status.scaleDown.removedPeers` | Raft server IDs already removed by an in-flight scale-down; `spec.replicas` is frozen while it is non-empty |
+| `status.observedGeneration` | Last `metadata.generation` the operator reconciled |
+| `status.lastReconcileTime` | Advances when status changes and on an idle heartbeat (about every 2m30s), not on every reconcile loop |
 
 ## Conditions
 
