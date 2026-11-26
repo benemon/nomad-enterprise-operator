@@ -48,3 +48,18 @@ jobs:
             exit 1
           fi
           echo "OK — CRDs and snapshots are in sync."
+
+      # Release regenerates the bundle it ships; this keeps the committed
+      # copy reviewers read in step with it (neo-p71d). createdAt is
+      # stamped on every run, so it is the one line ignored.
+      - name: Regenerate the OLM bundle
+        run: make bundle
+
+      - name: Fail if the committed bundle drifted
+        run: |
+          set -uo pipefail
+          if ! git diff --exit-code -I 'createdAt:' -- bundle/ bundle.Dockerfile; then
+            echo "::error::Bundle drift detected. Run \`make bundle\` locally and commit the diff. The drift is shown above."
+            exit 1
+          fi
+          echo "OK — committed bundle matches make bundle."
