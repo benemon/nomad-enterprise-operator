@@ -71,7 +71,7 @@ metadata:
           "spec": {
             "image": {
               "repository": "hashicorp/nomad",
-              "tag": "2.0.4-ent"
+              "tag": "2.1.1-ent"
             },
             "license": {
               "secretName": "nomad-license"
@@ -100,7 +100,17 @@ metadata:
               },
               "audit": {
                 "enabled": true
-              }
+              },
+              "vaults": [
+                {
+                  "defaultIdentity": {
+                    "audiences": [
+                      "vault.io"
+                    ],
+                    "ttl": "1h"
+                  }
+                }
+              ]
             },
             "services": {
               "external": {
@@ -153,13 +163,12 @@ metadata:
     capabilities: Basic Install
     categories: Modernization & Migration, Integration & Delivery
     containerImage: quay.io/benjamin_holmes/nomad-enterprise-operator:v0.0.1
-    createdAt: "2026-07-18T21:15:42Z"
+    createdAt: "2026-11-25T14:54:48Z"
     description: Community operator for HashiCorp Nomad Enterprise on Kubernetes and
       OpenShift - server clusters, Raft snapshots, and managed autoscaler agents.
       Not maintained or supported by HashiCorp.
-    olm.skipRange: '>=0.1.0 <0.0.1'
     operatorframework.io/suggested-namespace: nomad-enterprise-operator-system
-    operators.operatorframework.io/builder: operator-sdk-v1.42.2
+    operators.operatorframework.io/builder: operator-sdk-v1.42.3
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: nomad-enterprise-operator.v0.0.1
   namespace: placeholder
@@ -179,10 +188,6 @@ spec:
       version: v1alpha1
     - description: |-
         NomadSnapshot is the Schema for the nomadsnapshots API.
-
-        The XValidation rule below blocks a mode switch (adding/removing
-        spec.schedule) while a one-shot Job is running; recurring mode is
-        never blocked.
 
         spec.clusterRef is immutable: retargeting would orphan the old
         cluster's ACL policy and token (status.tokenAccessorID is only
@@ -217,9 +222,11 @@ spec:
           - ""
           resources:
           - configmaps
-          - services
+          - persistentvolumeclaims
+          - secrets
           verbs:
           - create
+          - delete
           - get
           - list
           - update
@@ -231,18 +238,6 @@ spec:
           verbs:
           - create
           - patch
-        - apiGroups:
-          - ""
-          resources:
-          - persistentvolumeclaims
-          - secrets
-          verbs:
-          - create
-          - delete
-          - get
-          - list
-          - update
-          - watch
         - apiGroups:
           - ""
           resources:
@@ -266,6 +261,16 @@ spec:
           - serviceaccounts/token
           verbs:
           - create
+        - apiGroups:
+          - ""
+          resources:
+          - services
+          verbs:
+          - create
+          - get
+          - list
+          - update
+          - watch
         - apiGroups:
           - apps
           resources:
@@ -303,10 +308,19 @@ spec:
           - monitoring.coreos.com
           resources:
           - prometheusrules
-          - servicemonitors
           verbs:
           - create
           - delete
+          - get
+          - list
+          - update
+          - watch
+        - apiGroups:
+          - monitoring.coreos.com
+          resources:
+          - servicemonitors
+          verbs:
+          - create
           - get
           - list
           - update

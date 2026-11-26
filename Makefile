@@ -50,7 +50,8 @@ endif
 
 # Set the Operator SDK version to use. By default, what is installed on the system is used.
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
-OPERATOR_SDK_VERSION ?= v1.42.2
+OPERATOR_SDK_VERSION ?= v1.42.3
+OPM_VERSION ?= v1.74.0
 # Image URL to use all building/pushing image targets
 IMG ?= $(IMAGE_TAG_BASE):v$(VERSION)
 
@@ -392,7 +393,7 @@ ifeq (,$(shell which opm 2>/dev/null))
 	set -e ;\
 	mkdir -p $(dir $(OPM)) ;\
 	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.55.0/$${OS}-$${ARCH}-opm ;\
+	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION)/$${OS}-$${ARCH}-opm ;\
 	chmod +x $(OPM) ;\
 	}
 else
@@ -415,7 +416,7 @@ catalog-build: opm ## Build a catalog image.
 	printf 'schema: olm.channel\npackage: nomad-enterprise-operator\nname: %s\nentries:\n  - name: nomad-enterprise-operator.v%s\n    skipRange: ">=0.1.0 <%s"\n' \
 		$(DEFAULT_CHANNEL) $(VERSION) $(VERSION) > catalog/nomad-enterprise-operator/channel.yaml
 	$(OPM) validate catalog
-	$(OPM) generate dockerfile catalog -i quay.io/operator-framework/opm:v1.55.0 -b quay.io/operator-framework/opm:v1.55.0
+	$(OPM) generate dockerfile catalog -i quay.io/operator-framework/opm:$(OPM_VERSION) -b quay.io/operator-framework/opm:$(OPM_VERSION)
 	$(CONTAINER_TOOL) build -f catalog.Dockerfile -t $(CATALOG_IMG) .
 
 # Push the catalog image.
